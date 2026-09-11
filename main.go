@@ -3,10 +3,13 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"log"
 	"log/slog"
 	"math"
 	"net"
@@ -22,6 +25,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/df-mc/go-xsapi/v2/xal/sisu"
+	"github.com/df-mc/go-xsapi/v2/xal/xasd"
 	"github.com/go-gl/mathgl/mgl32"
 	"github.com/google/uuid"
 	"github.com/sandertv/go-raknet"
@@ -32,6 +37,34 @@ import (
 	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
 	"golang.org/x/oauth2"
 )
+
+// skinConfig holds the bot's skin in a dedicated skin.json file.
+type skinConfig struct {
+	Type               string `json:"type"`               // "slim", "normal"/"wide", "pack"/"custom"
+	Path               string `json:"path"`               // PNG file (slim/normal) or skin pack folder (pack/custom)
+	Skin               string `json:"skin"`               // skin id/index in the pack (pack/custom)
+	OverrideAppearance *bool  `json:"overrideAppearance"` // nil defaults to true
+}
+
+// defaultSkinConfig is what "skin default" restores: the standard slim skin.
+var defaultSkinConfig = skinConfig{Type: "slim", Path: "skin/skin.png"}
+
+// overrideAppearanceOn returns true unless sc.OverrideAppearance is explicitly set to false.
+func overrideAppearanceOn(sc skinConfig) bool {
+	if sc.OverrideAppearance == nil {
+		return true
+	}
+	return *sc.OverrideAppearance
+}
+
+// baseReconnectDelay returns the configured base reconnect backoff.
+func baseReconnectDelay(cfg config) time.Duration {
+	d := time.Duration(cfg.Behaviour.ReconnectBaseDelayMs) * time.Millisecond
+	if d <= 0 {
+		d = 5 * time.Second
+	}
+	return d
+}
 
 type config struct {
 	Superuser string `json:"superuser"`
@@ -44,22 +77,75 @@ type config struct {
 	Behaviour struct {
 		ReconnectBaseDelayMs, AfkJumpIntervalMs int
 		WalkSpeed                               float32
+		RenderDistance                          int32 `json:"renderDistance"`
 	} `json:"behaviour"`
-	CommandsViaChat *bool `json:"commands_via_chat"`
+	CommandsViaChat *bool      `json:"commands_via_chat"`
+	Skin            skinConfig `json:"skin"`
 }
 
 var tracePackets bool
 var tracedPackets atomic.Uint64
 
+type xstsDiskCache struct {
+	Snapshot    *sisu.Snapshot `json:"snapshot"`
+	DeviceToken *xasd.Token    `json:"device_token"`
+	PrivateKey  []byte         `json:"private_key"`
+}
+
+func loadXBLCache(path string, source oauth2.TokenSource) *auth.XBLTokenCache {
+	if data, err := os.ReadFile(path); err == nil {
+		var cache xstsDiskCache
+		if json.Unmarshal(data, &cache) == nil && cache.Snapshot != nil {
+			if key, err := x509.ParseECPrivateKey(cache.PrivateKey); err == nil {
+				device := xasd.ReuseTokenSource(auth.AndroidConfig.Config.Config, cache.DeviceToken, key)
+				session := auth.AndroidConfig.New(source, &sisu.SessionConfig{
+					Snapshot:          cache.Snapshot,
+					DeviceTokenSource: device,
+				})
+				log.Println("bebot: restored Xbox Live session from", path)
+				return auth.AndroidConfig.ReuseTokenCache(session)
+			}
+		}
+	}
+	return auth.AndroidConfig.NewTokenCache()
+}
+
+func saveXBLCache(path string, cache *auth.XBLTokenCache) {
+	if cache == nil {
+		return
+	}
+	session := cache.Session()
+	if session == nil {
+		return
+	}
+	deviceToken, _ := cache.Device().DeviceToken(context.Background())
+	keyBytes, _ := x509.MarshalECPrivateKey(cache.Device().ProofKey())
+
+	dc := xstsDiskCache{
+		Snapshot:    session.Snapshot(),
+		DeviceToken: deviceToken,
+		PrivateKey:  keyBytes,
+	}
+	if data, err := json.Marshal(dc); err == nil {
+		_ = os.WriteFile(path, data, 0644)
+	}
+}
+
 func main() {
 	configPath := flag.String("config", "config.json", "bot configuration file")
 	authCachePath := flag.String("auth-cache", "token_cache.json", "path used to persist the Microsoft session")
 	debugFlag := flag.Bool("debug", false, "print packet-level handshake diagnostics")
+	skinFile := flag.String("skin", "skin.json", "bot skin configuration file")
 	flag.Parse()
+
+	// Initialize file logger
+	logWriter := io.MultiWriter(os.Stderr, newDailyLogger("logs"))
+	log.SetOutput(logWriter)
+
 	tracePackets = *debugFlag
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
-		fmt.Println("bebot:", err)
+		log.Println("bebot:", err)
 		return
 	}
 	if cfg.Server.Port == 0 {
@@ -75,18 +161,25 @@ func main() {
 		t := false
 		cfg.CommandsViaChat = &t
 	}
+	skinCfg, err := loadSkin(*skinFile)
+	if err != nil {
+		log.Println("bebot: skin:", err)
+		skinCfg = defaultSkinConfig
+	}
+	cfg.Skin = skinCfg
+	log.Printf("bebot: skin config: type=%s path=%s skin=%s override=%v\n", cfg.Skin.Type, cfg.Skin.Path, cfg.Skin.Skin, overrideAppearanceOn(cfg.Skin))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	source, err := loadAuthSource(*authCachePath)
 	if err != nil {
-		fmt.Println("bebot: authentication failed:", err)
+		log.Println("bebot: authentication failed:", err)
 		return
 	}
-	bot := &Bot{cfg: cfg, source: source, players: make(map[string]player), mode: modeIdle, waypoints: loadWaypoints(waypointsFile)}
+	bot := &Bot{cfg: cfg, source: source, players: make(map[string]player), entities: make(map[int64]string), mode: modeIdle, waypoints: loadWaypoints(waypointsFile), configPath: *configPath, skinPath: *skinFile, xblCache: loadXBLCache("xsts_cache.json", source)}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			fmt.Printf("bebot: FATAL panic: %v\n%s\n", recovered, debug.Stack())
+			log.Printf("bebot: FATAL panic: %v\n%s\n", recovered, debug.Stack())
 		}
 	}()
 	go bot.run(ctx)
@@ -121,13 +214,13 @@ func loadAuthSource(path string) (oauth2.TokenSource, error) {
 		if json.Unmarshal(data, &token) == nil && token.RefreshToken != "" {
 			source := &persistedTokenSource{source: auth.RefreshTokenSource(&token), path: path}
 			if _, err := source.Token(); err == nil {
-				fmt.Println("bebot: restored saved Microsoft session from", path)
+				log.Println("bebot: restored saved Microsoft session from", path)
 				return source, nil
 			}
-			fmt.Println("bebot: saved Microsoft session expired; signing in again")
+			log.Println("bebot: saved Microsoft session expired; signing in again")
 		}
 	}
-	fmt.Println("bebot: no usable saved Microsoft session; device authentication is required")
+	log.Println("bebot: no usable saved Microsoft session; device authentication is required")
 	token, err := auth.RequestLiveToken()
 	if err != nil {
 		return nil, err
@@ -136,7 +229,7 @@ func loadAuthSource(path string) (oauth2.TokenSource, error) {
 	if err := source.save(token); err != nil {
 		return nil, err
 	}
-	fmt.Println("bebot: Microsoft session saved to", path)
+	log.Println("bebot: Microsoft session saved to", path)
 	return source, nil
 }
 
@@ -152,7 +245,7 @@ func (s *persistedTokenSource) Token() (*oauth2.Token, error) {
 		return nil, err
 	}
 	if err := s.save(token); err != nil {
-		fmt.Println("bebot: warning: could not save refreshed session:", err)
+		log.Println("bebot: warning: could not save refreshed session:", err)
 	}
 	return token, nil
 }
@@ -181,6 +274,25 @@ func loadConfig(path string) (config, error) {
 	return cfg, nil
 }
 
+// loadSkin reads the bot's skin config from its dedicated skin.json file.
+func loadSkin(path string) (skinConfig, error) {
+	var sc skinConfig
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return sc, err
+	}
+	if err := json.Unmarshal(b, &sc); err != nil {
+		return sc, err
+	}
+	if sc.Type == "" {
+		sc.Type = defaultSkinConfig.Type
+	}
+	if sc.Path == "" {
+		sc.Path = defaultSkinConfig.Path
+	}
+	return sc, nil
+}
+
 func tracePacket(header packet.Header, payload []byte, src, dst net.Addr) {
 	if !tracePackets {
 		return
@@ -196,7 +308,7 @@ func tracePacket(header packet.Header, payload []byte, src, dst net.Addr) {
 	if dst != nil {
 		to = dst.String()
 	}
-	fmt.Printf("bebot: PACKET #%d id=%d bytes=%d %s -> %s\n", n, header.PacketID, len(payload), from, to)
+	log.Printf("bebot: PACKET #%d id=%d bytes=%d %s -> %s\n", n, header.PacketID, len(payload), from, to)
 }
 
 func explainError(err error) string {
@@ -227,6 +339,7 @@ type player struct {
 	yaw, pitch                             float32
 	sprinting, sneaking, swimming, jumping bool
 	swinging, usingItem                    bool
+	lastSwing                              time.Time
 }
 
 type waypoint struct {
@@ -249,7 +362,7 @@ func loadWaypoints(path string) map[string]waypoint {
 	}
 	var wps map[string]waypoint
 	if err := json.Unmarshal(data, &wps); err != nil {
-		fmt.Println("bebot: ignoring invalid waypoints file:", err)
+		log.Println("bebot: ignoring invalid waypoints file:", err)
 		return make(map[string]waypoint)
 	}
 	if wps == nil {
@@ -263,11 +376,11 @@ func (b *Bot) saveWaypoints() {
 	data, err := json.MarshalIndent(b.waypoints, "", "  ")
 	b.mu.Unlock()
 	if err != nil {
-		fmt.Println("bebot: failed to encode waypoints:", err)
+		log.Println("bebot: failed to encode waypoints:", err)
 		return
 	}
 	if err := os.WriteFile(waypointsFile, data, 0600); err != nil {
-		fmt.Println("bebot: failed to save waypoints:", err)
+		log.Println("bebot: failed to save waypoints:", err)
 	}
 }
 
@@ -287,6 +400,22 @@ func entityFlagSet(metadata protocol.EntityMetadata, key uint32, flag int) bool 
 	return false
 }
 
+func entityPose(metadata protocol.EntityMetadata) (byte, bool) {
+	raw, ok := metadata[protocol.EntityDataKeyPoseIndex]
+	if !ok {
+		return 0, false
+	}
+	switch value := raw.(type) {
+	case int64:
+		return byte(value), true
+	case int32:
+		return byte(value), true
+	case byte:
+		return value, true
+	}
+	return 0, false
+}
+
 func playerMetadataState(metadata protocol.EntityMetadata) (sneaking, sprinting, swimming, using bool) {
 	// Player movement state is normally carried in EntityDataKeyFlags. Some
 	// servers send the same metadata as a byte, so decode both wire forms.
@@ -294,6 +423,21 @@ func playerMetadataState(metadata protocol.EntityMetadata) (sneaking, sprinting,
 	sprinting = entityFlagSet(metadata, protocol.EntityDataKeyFlags, protocol.EntityDataFlagSprinting)
 	swimming = entityFlagSet(metadata, protocol.EntityDataKeyFlags, protocol.EntityDataFlagSwimming)
 	using = entityFlagSet(metadata, protocol.EntityDataKeyFlags, protocol.EntityDataFlagUsingItem)
+	// A stationary sneak/swim toggle is announced through the actor pose
+	// (EntityDataKeyPoseIndex) rather than the movement flags, so honour the
+	// Bedrock ActorPose values whenever the pose changes. Pose 0 (standing)
+	// clears the state unless the flags in this same packet still report
+	// sneaking/swimming.
+	if pose, ok := entityPose(metadata); ok {
+		switch pose {
+		case 4: // ActorPose.Sneaking
+			sneaking = true
+			swimming = false
+		case 2: // ActorPose.Swimming
+			swimming = true
+			sneaking = false
+		}
+	}
 	return
 }
 
@@ -307,6 +451,30 @@ const (
 	modeCamic
 	modeLookAt
 )
+
+// headshakeMode drives the bot's scripted head motion: "yes" bobs the head
+// up/down (pitch), "no" turns it left/right (yaw).
+type headshakeMode uint8
+
+const (
+	headshakeNone headshakeMode = iota
+	headshakeYes
+	headshakeNo
+)
+
+// headshake*Ticks tune the animation cadence (1 tick = 50ms).
+const (
+	headshakeSwingTicks = 8  // ticks for a single quarter-swing
+	headshakePeriod     = 32 // ticks for a full left-to-left / up-to-up cycle
+	headshakeOnceTicks  = 96 // ticks (~4.8s, 3 cycles) before a non-repeat shake stops
+)
+
+// defaultEmoteLength is the default number of ticks (50ms) the bot reports an
+// emote lasts and the interval at which a repeating emote is resent. The emote
+// metadata list has no per-emote duration, so this is a guess (Bedrock emotes
+// are typically ~3s = 60 ticks); it can be overridden per emote with the
+// length argument of the emote command.
+const defaultEmoteLength = 60
 
 // stackRequest tracks an in-flight ItemStackRequest so the ItemStackResponse
 // handler can deliver the matching status back to the sender.
@@ -336,6 +504,7 @@ type Bot struct {
 	startGameTime                int64
 	capture                      chan commandResult
 	mode                         botMode
+	entities                     map[int64]string
 	followTarget, mimicTarget    string
 	lookAtTarget                 string
 	lookAtPos                    *mgl32.Vec3
@@ -346,13 +515,17 @@ type Bot struct {
 	itemRequestID                int32
 	stackPending                 *stackRequest
 	containerOpen                chan struct{}
-	facingYaw                    float32
+	invMu                        sync.Mutex
+	facingYaw, facingPitch       float32
+	idleYaw, idlePitch           float32
 	velocityY                    float32
 	stuckTicks                   int
 	lastJump, lastSwing, lastUse bool
 	breakTarget                  *protocol.BlockPos
 	breakTicks                   int
 	breakAnimation               bool
+	breakRepeat                  bool
+	abortBreakTarget             *protocol.BlockPos
 	inventory                    []protocol.ItemInstance
 	hotbarSlot                   byte
 	heldItem                     protocol.ItemInstance
@@ -360,74 +533,155 @@ type Bot struct {
 	mimicPosSet                  bool
 	mimicSneaking, mimicSwimming bool
 	sneaking, sentSneaking       bool
+	headshake                    headshakeMode
+	headshakeRepeat              bool
+	headshakeTicks               int
+	emoteID                      string
+	emoteRepeat                  bool
+	payback                      bool
+	killTarget                   string
+	lastHealth                   int32
+	autoFish                     bool
+	fishingHookID                uint64
+	emoteLength                  uint32
+	emoteNextTick                uint64
+	selfUUID                     uuid.UUID
+	configPath                   string
+	skinPath                     string
+	reconnectDelay               time.Duration
+	xblCache                     *auth.XBLTokenCache
 }
 
 func (b *Bot) run(ctx context.Context) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			fmt.Printf("bebot: FATAL bot panic: %v\n%s\n", recovered, debug.Stack())
+			log.Printf("bebot: FATAL bot panic: %v\n%s\n", recovered, debug.Stack())
 			b.close()
 		}
 	}()
-	delay := time.Duration(b.cfg.Behaviour.ReconnectBaseDelayMs) * time.Millisecond
-	if delay <= 0 {
-		delay = 5 * time.Second
-	}
+	b.mu.Lock()
+	b.reconnectDelay = baseReconnectDelay(b.cfg)
+	b.mu.Unlock()
 	for !b.quitting {
 		if err := b.connect(ctx); err != nil && !b.quitting {
-			fmt.Println("bebot: disconnected:", err)
+			log.Println("bebot: disconnected:", err)
 		}
 		if b.quitting || ctx.Err() != nil {
 			return
 		}
-		fmt.Printf("bebot: reconnecting in %s\n", delay)
+		b.mu.Lock()
+		delay := b.reconnectDelay
+		b.mu.Unlock()
+		log.Printf("bebot: reconnecting in %s\n", delay)
 		time.Sleep(delay)
-		if delay < time.Minute {
-			delay += 5 * time.Second
-			if delay > time.Minute {
-				delay = time.Minute
+		b.mu.Lock()
+		if b.reconnectDelay < time.Minute {
+			b.reconnectDelay += 5 * time.Second
+			if b.reconnectDelay > time.Minute {
+				b.reconnectDelay = time.Minute
 			}
 		}
+		b.mu.Unlock()
 	}
+}
+
+// pingServer pings the given Bedrock address with a short per-attempt deadline
+// and parses the RakNet pong. The caller's context is unbounded (signal-derived),
+// and go-raknet only assigns a connection deadline when ctx.Deadline() exists,
+// so without a per-call timeout a silent server would hang PingContext forever.
+func pingServer(ctx context.Context, address string) (serverPong, error) {
+	pingCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	pongBytes, err := raknet.PingContext(pingCtx, address)
+	if err != nil {
+		return serverPong{}, fmt.Errorf("ping %s: %w", address, err)
+	}
+	return parseServerPong(pongBytes)
 }
 
 func (b *Bot) connect(ctx context.Context) error {
 	address := fmt.Sprintf("%s:%d", b.cfg.Server.Host, b.cfg.Server.Port)
-	fmt.Printf("bebot: pinging %s...\n", address)
-	pongBytes, err := raknet.PingContext(ctx, address)
-	if err != nil {
-		return fmt.Errorf("ping %s: %w", address, err)
-	}
-	pong, err := parseServerPong(pongBytes)
+	// Stage 1: ping to learn the server's identity and whether it is actually up.
+	log.Printf("bebot: pinging %s...\n", address)
+	pong, err := pingServer(ctx, address)
 	if err != nil {
 		return err
 	}
 	version := pong.Version
 	if b.cfg.Server.Version != "" && b.cfg.Server.Version != pong.Version {
-		fmt.Printf("bebot: warning: config version %s differs from server %s; using server version\n", b.cfg.Server.Version, pong.Version)
+		log.Printf("bebot: warning: config version %s differs from server %s; using server version\n", b.cfg.Server.Version, pong.Version)
 	}
-	fmt.Printf("bebot: server=%s motd=%q protocol=%d version=%s players=%d/%d\n", pong.Edition, pong.MOTD, pong.ProtocolID, pong.Version, pong.Players, pong.MaxPlayers)
-	fmt.Printf("bebot: connecting to %s using Minecraft %s...\n", address, version)
+	log.Printf("bebot: server=%s motd=%q protocol=%d version=%s players=%d/%d\n", pong.Edition, pong.MOTD, pong.ProtocolID, pong.Version, pong.Players, pong.MaxPlayers)
+	// Stage 2: detect an offline lobby. Aternos (and similar hosts) expose a
+	// lightweight proxy with MOTD "Offline" while the real server is stopped.
+	// Connecting to that lobby accepts the connection but never produces a
+	// world spawn, so the bot would hang forever. Instead, poll until the real
+	// server reports itself online, then dial.
+	offline := strings.EqualFold(strings.TrimSpace(pong.MOTD), "offline") || strings.Contains(strings.ToLower(pong.MOTD), "lobby")
+	if offline {
+		log.Println("bebot: server is offline (lobby); waiting for it to come online...")
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(5 * time.Second):
+			}
+			pong, err = pingServer(ctx, address)
+			if err != nil {
+				log.Printf("bebot:   ping failed: %v (retrying)\n", err)
+				continue
+			}
+			offline = strings.EqualFold(strings.TrimSpace(pong.MOTD), "offline") || strings.Contains(strings.ToLower(pong.MOTD), "lobby")
+			log.Printf("bebot:   still offline: motd=%q players=%d/%d\n", pong.MOTD, pong.Players, pong.MaxPlayers)
+			if !offline {
+				version = pong.Version
+				log.Printf("bebot: server is now online: motd=%q version=%s players=%d/%d\n", pong.MOTD, pong.Version, pong.Players, pong.MaxPlayers)
+				break
+			}
+		}
+	}
+	log.Printf("bebot: connecting to %s using Minecraft %s...\n", address, version)
 	clientData := login.ClientData{
 		DeviceOS: protocol.DeviceOrbis, DeviceModel: "playstation_5_emu", DeviceID: login.DeviceID(uuid.NewString()),
-		LanguageCode: "en_US", GameVersion: version, CurrentInputMode: packet.InputModeTouch,
-		DefaultInputMode: packet.InputModeTouch, UIProfile: 0, MaxViewDistance: 16, MemoryTier: 3,
+		LanguageCode: "en_US", GameVersion: version, CurrentInputMode: packet.InputModeGamePad,
+		DefaultInputMode: packet.InputModeGamePad, UIProfile: 0, MaxViewDistance: 16, MemoryTier: 3,
 		PlatformType: 2, GraphicsMode: 1, TrustedSkin: true, CompatibleWithClientSideChunkGen: true,
 		SelfSignedID: uuid.NewString(), ArmSize: "slim", SkinID: "Standard_Alex",
 	}
-	if err := applySkin(&clientData, "skin.png"); err != nil {
-		fmt.Println("bebot: skin disabled:", err)
+	if skin, err := loadSkinFromConfig(b.cfg.Skin); err != nil {
+		log.Println("bebot: skin disabled:", err)
 	} else {
-		fmt.Printf("bebot: loaded skin.png (%dx%d)\n", clientData.SkinImageWidth, clientData.SkinImageHeight)
+		fillClientDataSkin(&clientData, skin)
+		log.Printf("bebot: loaded skin type=%s path=%s (%dx%d)\n", b.cfg.Skin.Type, b.cfg.Skin.Path, clientData.SkinImageWidth, clientData.SkinImageHeight)
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	d := minecraft.Dialer{ErrorLog: logger, TokenSource: b.source, ClientData: clientData, Protocol: serverProtocol{id: pong.ProtocolID, version: pong.Version}, DisconnectOnUnknownPackets: false, DisconnectOnInvalidPackets: false, EnableClientCache: false, PacketFunc: tracePacket}
-	dialCtx, cancelDial := context.WithTimeout(ctx, time.Minute)
+
+	logger := slog.New(slog.NewTextHandler(log.Writer(), &slog.HandlerOptions{Level: slog.LevelDebug}))
+	d := minecraft.Dialer{
+		ErrorLog:                   logger,
+		TokenSource:                b.source,
+		ClientData:                 clientData,
+		Protocol:                   serverProtocol{id: pong.ProtocolID, version: pong.Version},
+		DisconnectOnUnknownPackets: false,
+		DisconnectOnInvalidPackets: false,
+		EnableClientCache:          false,
+		PacketFunc:                 tracePacket,
+		DownloadResourcePack: func(id uuid.UUID, version string, current, total int) bool {
+			log.Printf("bebot: skipping resource pack %s version %s (%d/%d)\n", id, version, current, total)
+			return false
+		},
+	}
+	// Stage 3: RakNet handshake + login handshake + resource packs. This is the
+	// phase most likely to stall on a freshly started host, so surface it.
+	log.Println("bebot: stage: raknet handshake + login...")
+	dialCtx, cancelDial := context.WithTimeout(ctx, 5*time.Minute)
+	dialCtx = auth.WithXBLTokenCache(dialCtx, b.xblCache)
 	defer cancelDial()
 	c, err := d.DialContext(dialCtx, "raknet", address)
 	if err != nil {
-		return fmt.Errorf("dial %s: %s", address, explainError(err))
+		return fmt.Errorf("dial: %s", explainError(err))
 	}
+	saveXBLCache("xsts_cache.json", b.xblCache)
+	log.Println("bebot: stage: login complete; finishing loading screen...")
 	b.mu.Lock()
 	b.conn = c
 	b.mu.Unlock()
@@ -442,18 +696,37 @@ func (b *Bot) connect(ctx context.Context) error {
 	if err := c.Flush(); err != nil {
 		return fmt.Errorf("flush loading screen: %s", explainError(err))
 	}
-	fmt.Println("bebot: connected; waiting for world spawn...")
-	spawnCtx, cancel := context.WithTimeout(ctx, time.Minute)
+	// Stage 4: wait for the server to acknowledge spawn (StartGame world data).
+	log.Println("bebot: stage: waiting for world spawn...")
+	spawnCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	if err := c.DoSpawnContext(spawnCtx); err != nil {
 		return fmt.Errorf("spawn: %s", explainError(err))
 	}
+	log.Println("bebot: stage: world spawn ok")
+
+	// The gophertunnel dialer is patched to use a 4-chunk radius to speed up the
+	// Geyser login handshake. Now that we're spawned, we request the real chunk
+	// radius so that the server sends chunks/entities up to the configured limit.
+	renderDist := b.cfg.Behaviour.RenderDistance
+	if renderDist == 0 {
+		renderDist = 16 // fallback default
+	}
+	_ = c.WritePacket(&packet.RequestChunkRadius{ChunkRadius: int32(renderDist), MaxChunkRadius: uint8(renderDist)})
+	log.Printf("bebot: requested updated chunk radius of %d chunks\n", renderDist)
+
 	b.pos = c.GameData().PlayerPosition
 	b.last = b.pos
 	b.entityID = c.GameData().EntityRuntimeID
+	if id, err := uuid.Parse(c.IdentityData().Identity); err == nil {
+		b.selfUUID = id
+	}
 	b.gameMode = c.GameData().PlayerGameMode
-	// PlayerAuthInput tick is the client prediction tick, not world time.
-	b.tick = 0
+	// PlayerAuthInput.Tick is the server tick the client believes it is at
+	// (used to pair server corrections with the inputs they refer to). Start
+	// from the world tick reported in StartGame and advance one per tick, like
+	// a real client (and the old JS bot, which used StartGame.current_tick).
+	b.tick = uint64(c.GameData().Time)
 	b.players = make(map[string]player)
 	b.playersByID = make(map[uint64]string)
 	b.playerListReady = false
@@ -480,9 +753,9 @@ func (b *Bot) connect(ctx context.Context) error {
 			}
 		}
 	}
-	fmt.Printf("bebot: world time: startGameTime=%d dayCycleLockTime=%d doDaylightCycle=%v\n", game.Time, game.DayCycleLockTime, daylightCycle)
-	fmt.Printf("bebot: joined %s at %.1f %.1f %.1f entity=%d gamemode=%d dimension=%d seed=%d\n", address, b.pos.X(), b.pos.Y(), b.pos.Z(), b.entityID, game.PlayerGameMode, game.Dimension, game.WorldSeed)
-	fmt.Printf("bebot: movement settings rewind=%d server-authoritative-block-breaking=%v server-authoritative-inventory=%v interactions-disabled=%v chunk-radius=%d\n", game.PlayerMovementSettings.RewindHistorySize, game.PlayerMovementSettings.ServerAuthoritativeBlockBreaking, game.ServerAuthoritativeInventory, game.DisablePlayerInteractions, game.ChunkRadius)
+	log.Printf("bebot: world time: startGameTime=%d dayCycleLockTime=%d doDaylightCycle=%v\n", game.Time, game.DayCycleLockTime, daylightCycle)
+	log.Printf("bebot: joined %s at %.1f %.1f %.1f entity=%d gamemode=%d dimension=%d seed=%d\n", address, b.pos.X(), b.pos.Y(), b.pos.Z(), b.entityID, game.PlayerGameMode, game.Dimension, game.WorldSeed)
+	log.Printf("bebot: movement settings rewind=%d server-authoritative-block-breaking=%v server-authoritative-inventory=%v interactions-disabled=%v chunk-radius=%d\n", game.PlayerMovementSettings.RewindHistorySize, game.PlayerMovementSettings.ServerAuthoritativeBlockBreaking, game.ServerAuthoritativeInventory, game.DisablePlayerInteractions, game.ChunkRadius)
 	done := make(chan error, 1)
 	go func() { done <- b.readPackets(c) }()
 	t := time.NewTicker(50 * time.Millisecond)
@@ -532,7 +805,7 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 		case *packet.Transfer:
 			return fmt.Errorf("server requested transfer to %s:%d; reconnecting to configured target", p.Address, p.Port)
 		case *packet.Disconnect:
-			fmt.Printf("bebot: server disconnected: %q\n", p.Message)
+			log.Printf("bebot: server disconnected: %q\n", p.Message)
 		case *packet.CommandOutput:
 			msgs := make([]string, 0, len(p.OutputMessages))
 			var capKey string
@@ -548,7 +821,7 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 				}
 				msgs = append(msgs, text)
 			}
-			fmt.Printf("bebot: command output (success=%d): %s\n", p.SuccessCount, strings.Join(msgs, " | "))
+			log.Printf("bebot: command output (success=%d): %s\n", p.SuccessCount, strings.Join(msgs, " | "))
 			b.mu.Lock()
 			cap := b.capture
 			b.capture = nil
@@ -580,6 +853,9 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 				b.pos = p.Position
 				b.last = p.Position
 				b.velocityY = 0
+				if b.sentSneaking {
+					log.Printf("bebot: own MovePlayer tick=%d -> (%.2f, %.2f, %.2f) mode=%d\n", p.Tick, p.Position.X(), p.Position.Y(), p.Position.Z(), p.Mode)
+				}
 			}
 			if name, ok := b.playersByID[p.EntityRuntimeID]; ok {
 				v := b.players[name]
@@ -594,16 +870,22 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 				b.mu.Lock()
 				b.pos = p.Position
 				b.last = p.Position
+				// sneaking := b.sentSneaking
 				b.mu.Unlock()
-				//fmt.Printf("bebot: server movement correction at tick %d -> (%.2f, %.2f, %.2f)\n", p.Tick, p.Position.X(), p.Position.Y(), p.Position.Z())
+				// if sneaking {
+				// 	log.Printf("bebot: correction(tick=%d clientTick=%d) while sneaking -> (%.2f, %.2f, %.2f)\n", p.Tick, b.tick, p.Position.X(), p.Position.Y(), p.Position.Z())
+				// }
 			}
 		case *packet.SetHealth:
-			fmt.Printf("bebot: health update=%d\n", p.Health)
+			log.Printf("bebot: health update=%d\n", p.Health)
+			b.mu.Lock()
+			b.lastHealth = p.Health
+			b.mu.Unlock()
 		case *packet.HurtArmour:
-			fmt.Printf("bebot: armour damage cause=%d damage=%d slots=0x%x\n", p.Cause, p.Damage, p.ArmourSlots)
+			log.Printf("bebot: armour damage cause=%d damage=%d slots=0x%x\n", p.Cause, p.Damage, p.ArmourSlots)
 		case *packet.Respawn:
 			if p.State == packet.RespawnStateReadyToSpawn {
-				fmt.Printf("bebot: respawn state=%d position=(%.2f, %.2f, %.2f)\n", p.State, p.Position.X(), p.Position.Y(), p.Position.Z())
+				log.Printf("bebot: respawn state=%d position=(%.2f, %.2f, %.2f)\n", p.State, p.Position.X(), p.Position.Y(), p.Position.Z())
 			}
 			b.handleRespawn(c, p)
 		case *packet.PlayerList:
@@ -638,6 +920,20 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 			}
 			b.playerListReady = true
 			b.mu.Unlock()
+		case *packet.AddActor:
+			b.mu.Lock()
+			b.entities[p.EntityUniqueID] = p.EntityType
+			if p.EntityType == "minecraft:fishing_hook" {
+				if ownerID, ok := p.EntityMetadata[protocol.EntityDataKeyOwner]; ok {
+					if id, ok := ownerID.(int64); ok && uint64(id) == b.entityID {
+						b.fishingHookID = p.EntityRuntimeID
+						if b.autoFish {
+							log.Printf("bebot: registered fishing hook %d\n", b.fishingHookID)
+						}
+					}
+				}
+			}
+			b.mu.Unlock()
 		case *packet.RemoveActor:
 			// RemoveActor is an entity despawn, not a disconnect: it fires when a
 			// player leaves render distance or the server culls the entity, so it
@@ -655,7 +951,55 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 					}
 				}
 			}
+			delete(b.entities, p.EntityUniqueID)
+			if uint64(p.EntityUniqueID) == b.fishingHookID {
+				b.fishingHookID = 0
+			}
 			b.mu.Unlock()
+		case *packet.ActorEvent:
+			if p.EventType == packet.ActorEventFishhookTease || p.EventType == packet.ActorEventFishhookBubble {
+				b.mu.Lock()
+				isOurHook := p.EntityRuntimeID == b.fishingHookID
+				autoFishOn := b.autoFish
+				b.mu.Unlock()
+				if isOurHook && autoFishOn {
+					log.Println("bebot: fish bit! reeling in...")
+					b.useItemInHand() // reel in
+					
+					// cast again in 1 second
+					go func() {
+						time.Sleep(1 * time.Second)
+						b.mu.Lock()
+						autoFishOn := b.autoFish
+						b.mu.Unlock()
+						if autoFishOn {
+							log.Println("bebot: autofish recasting...")
+							b.useItemInHand()
+						}
+					}()
+				}
+			} else if p.EventType == packet.ActorEventHurt {
+				b.mu.Lock()
+				isUs := p.EntityRuntimeID == b.entityID
+				paybackOn := b.payback
+				b.mu.Unlock()
+				if isUs && paybackOn {
+					targetID, targetPos, found := b.nearestAttacker(4.5)
+					if found {
+						log.Printf("bebot: payback! attacking entity %d at %v\n", targetID, targetPos)
+						b.attack(targetID, targetPos)
+					}
+				}
+			} else if p.EventType == packet.ActorEventDeath {
+				b.mu.Lock()
+				if name, ok := b.playersByID[p.EntityRuntimeID]; ok {
+					if b.killTarget == name {
+						b.killTarget = ""
+						log.Printf("bebot: target %s died! stopping kill mode\n", name)
+					}
+				}
+				b.mu.Unlock()
+			}
 		case *packet.Animate:
 			if name, ok := b.playersByID[p.EntityRuntimeID]; ok && p.ActionType == packet.AnimateActionSwingArm {
 				b.mu.Lock()
@@ -663,16 +1007,67 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 				v.jumping = false
 				v.swinging = true
 				v.usingItem = p.SwingSource == packet.AnimateSwingSourceUseItem || p.SwingSource == packet.AnimateSwingSourceInteract
+				v.lastSwing = time.Now()
 				b.players[name] = v
 				b.mu.Unlock()
 			}
 		case *packet.SetActorData:
+			if p.EntityRuntimeID == b.entityID {
+				// BDS normally does not echo a player's own metadata, but if it
+				// does, it tells us whether the server-side sneak was applied.
+				// b.mu.Lock()
+				// sneaking := b.sentSneaking
+				// b.mu.Unlock()
+				// if sneaking {
+				// 	log.Printf("bebot: own SetActorData tick=%d flags=%v\n", p.Tick, p.EntityMetadata[protocol.EntityDataKeyFlags])
+				// }
+			}
 			if name, ok := b.playersByID[p.EntityRuntimeID]; ok {
 				sneaking, sprinting, swimming, using := playerMetadataState(p.EntityMetadata)
+				_, hasFlags := p.EntityMetadata[protocol.EntityDataKeyFlags]
+				pose, hasPose := entityPose(p.EntityMetadata)
+				if hasFlags || hasPose {
+					b.mu.Lock()
+					isMimicTarget := strings.EqualFold(name, b.mimicTarget)
+					b.mu.Unlock()
+					if isMimicTarget {
+						// Debug: log.Printf("bebot: mimic metadata target=%q pose=%d flags=%v sneak=%v swim=%v\n", name, pose, p.EntityMetadata[protocol.EntityDataKeyFlags], sneaking, swimming)
+					}
+				}
+				// Only overwrite the player's movement state when this packet
+				// explicitly carries it (a flags key, or a definitive
+				// sneaking/swimming pose). An unrelated metadata refresh (held
+				// item change, pose refresh, ...) that omits the flags key must
+				// not cancel a sneak that a previous packet set. This keeps the
+				// detected state persistent, mirroring how the sneak command's
+				// b.sneaking stays true until explicitly toggled off.
 				b.mu.Lock()
 				v := b.players[name]
-				v.sneaking, v.sprinting, v.swimming = sneaking, sprinting, swimming
-				v.usingItem = using
+				if hasFlags || (hasPose && (pose == 4 || pose == 2)) {
+					v.sneaking, v.sprinting, v.swimming = sneaking, sprinting, swimming
+					v.usingItem = using
+				}
+				b.players[name] = v
+				b.mu.Unlock()
+			}
+		case *packet.PlayerAction:
+			// Some servers announce a player's sneak/swim toggles as
+			// edge-triggered PlayerAction packets. Apply them immediately so
+			// a stationary toggle is not missed when no metadata update
+			// follows it.
+			if name, ok := b.playersByID[p.EntityRuntimeID]; ok {
+				b.mu.Lock()
+				v := b.players[name]
+				switch p.ActionType {
+				case protocol.PlayerActionStartSneak:
+					v.sneaking = true
+				case protocol.PlayerActionStopSneak:
+					v.sneaking = false
+				case protocol.PlayerActionStartSwimming:
+					v.swimming = true
+				case protocol.PlayerActionStopSwimming:
+					v.swimming = false
+				}
 				b.players[name] = v
 				b.mu.Unlock()
 			}
@@ -705,7 +1100,7 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 					}
 					b.mu.Unlock()
 					if status != protocol.ItemStackResponseStatusOK {
-						fmt.Printf("bebot: inventory request=%d rejected status=%d\n", response.RequestID, status)
+						log.Printf("bebot: inventory request=%d rejected status=%d\n", response.RequestID, status)
 					}
 					break
 				}
@@ -718,11 +1113,12 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 			} else {
 				for _, response := range p.Responses {
 					if response.Status != protocol.ItemStackResponseStatusOK {
-						fmt.Printf("bebot: inventory request=%d rejected status=%d\n", response.RequestID, response.Status)
+						log.Printf("bebot: inventory request=%d rejected status=%d\n", response.RequestID, response.Status)
 					}
 				}
 			}
 		case *packet.InventoryContent:
+			log.Printf("bebot: trace: InventoryContent WindowID=%d", p.WindowID)
 			if p.WindowID == 0 {
 				b.inventory = append([]protocol.ItemInstance(nil), p.Content...)
 				if int(b.hotbarSlot) < len(b.inventory) {
@@ -731,6 +1127,7 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 				b.sendHeldItem(c)
 			}
 		case *packet.InventorySlot:
+			log.Printf("bebot: trace: InventorySlot WindowID=%d Slot=%d Item=%v", p.WindowID, p.Slot, p.NewItem.Stack.ItemType.NetworkID)
 			if p.WindowID == 0 {
 				if int(p.Slot) >= len(b.inventory) {
 					grown := make([]protocol.ItemInstance, int(p.Slot)+1)
@@ -749,6 +1146,25 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 				if int(b.hotbarSlot) < len(b.inventory) {
 					b.heldItem = b.inventory[b.hotbarSlot]
 					b.sendHeldItem(c)
+				}
+			}
+		case *packet.InventoryTransaction:
+			if _, ok := p.TransactionData.(*protocol.NormalTransactionData); ok {
+				for _, action := range p.Actions {
+					if action.SourceType == protocol.InventoryActionSourceContainer {
+						if windowID, ok := action.WindowID.Value(); ok && windowID == protocol.WindowIDInventory {
+							if int(action.InventorySlot) >= len(b.inventory) {
+								grown := make([]protocol.ItemInstance, int(action.InventorySlot)+1)
+								copy(grown, b.inventory)
+								b.inventory = grown
+							}
+							b.inventory[action.InventorySlot] = action.NewItem
+							if byte(action.InventorySlot) == b.hotbarSlot {
+								b.heldItem = action.NewItem
+								b.sendHeldItem(c)
+							}
+						}
+					}
 				}
 			}
 		}
@@ -777,7 +1193,7 @@ func (b *Bot) handleRespawn(c *minecraft.Conn, p *packet.Respawn) {
 		if err := c.WritePacket(&packet.Respawn{
 			Position: p.Position, State: packet.RespawnStateClientReadyToSpawn, EntityRuntimeID: entityID,
 		}); err != nil {
-			fmt.Println("bebot: respawn response failed:", explainError(err))
+			log.Println("bebot: respawn response failed:", explainError(err))
 		}
 	case packet.RespawnStateReadyToSpawn:
 		if err := c.WritePacket(&packet.PlayerAction{
@@ -785,7 +1201,7 @@ func (b *Bot) handleRespawn(c *minecraft.Conn, p *packet.Respawn) {
 			ActionType:      protocol.PlayerActionRespawn,
 			BlockFace:       -1,
 		}); err != nil {
-			fmt.Println("bebot: respawn action failed:", explainError(err))
+			log.Println("bebot: respawn action failed:", explainError(err))
 		}
 	}
 }
@@ -797,9 +1213,10 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 	if b.mode == modeFollowing || b.mode == modeMimic || b.mode == modeCamic || b.mode == modeLookAt {
 		b.mu.Lock()
 		lookup := b.followTarget
-		if b.mode == modeMimic {
+		switch b.mode {
+		case modeMimic:
 			lookup = b.mimicTarget
-		} else if b.mode == modeLookAt {
+		case modeLookAt:
 			lookup = b.lookAtTarget
 		}
 		if b.mode == modeLookAt && lookup == "" {
@@ -824,6 +1241,10 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 		if b.mode == modeMimic {
 			if b.mimicPosSet {
 				d := targetPlayer.position.Sub(b.mimicLastPos)
+				// Only ground movement counts as movement: a jump in place
+				// changes Y without moving horizontally and must not make the
+				// bot walk toward the target.
+				d[1] = 0
 				targetMoved = d.Dot(d) > .0004
 			}
 			b.mimicLastPos = targetPlayer.position
@@ -831,37 +1252,50 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 			v := b.players[strings.ToLower(b.mimicTarget)]
 			v.swinging = false
 			v.usingItem = false
+			v.jumping = false
 			b.players[strings.ToLower(b.mimicTarget)] = v
+		} else if b.mode == modeFollowing && targetPlayer.id != 0 {
+			v := b.players[strings.ToLower(b.followTarget)]
+			v.jumping = false
+			b.players[strings.ToLower(b.followTarget)] = v
 		}
 		b.mu.Unlock()
 		if targetPlayer.id != 0 && b.mode != modeLookAt {
 			target = targetPlayer.position
 		}
 	}
-	if (b.mode == modeMimic && !targetMoved) || b.mode == modeCamic || b.mode == modeLookAt {
+	if (b.mode == modeMimic && !targetMoved) || b.mode == modeCamic || b.mode == modeLookAt || b.mode == modeIdle {
 		// Mimic reproduces the target's movement, not follow mode's behaviour of
 		// closing the distance to a stationary target.
 		target = b.pos
 	}
 	dx, dy, dz := target.X()-b.pos.X(), target.Y()-b.pos.Y(), target.Z()-b.pos.Z()
-	dist := float32(math.Sqrt(float64(dx*dx + dy*dy + dz*dz)))
-	b.moving = dist > .25
+	// Only the horizontal distance decides whether to walk: a target jumping
+	// in place has a large dy but no ground movement, so it must not cause
+	// forward input.
+	hDist := float32(math.Sqrt(float64(dx*dx + dz*dz)))
+	b.moving = hDist > .25
 	if b.mode == modeIdle {
 		b.moving = false
-		jump = false
-		b.velocityY = 0
 	}
 	if b.moving {
 		step := b.cfg.Behaviour.WalkSpeed
-		if step > dist {
-			step = dist
+		if step > hDist {
+			step = hDist
 		}
 		// Horizontal movement follows the target; vertical motion is kept as
 		// client-side physics so jumps and falling produce valid auth-input data.
-		b.pos = b.pos.Add(mgl32.Vec3{dx / dist * step, 0, dz / dist * step})
-		if dy > .4 && b.velocityY == 0 {
-			jump = true
-		}
+		b.pos = b.pos.Add(mgl32.Vec3{dx / hDist * step, 0, dz / hDist * step})
+	}
+	// A target jumping in place must still be jumped after, without moving.
+	if dy > .4 && b.velocityY == 0 {
+		jump = true
+	}
+	// The packet handler latches targetPlayer.jumping from a MovePlayer Y
+	// jump edge, so the mimic reacts on the very next tick regardless of
+	// whether the target moved horizontally.
+	if (b.mode == modeMimic || b.mode == modeFollowing) && targetPlayer.id != 0 && targetPlayer.jumping {
+		jump = true
 	}
 	// Predict the initial fall and jumps. The old implementation left Y at
 	// the StartGame spawn height forever, which made BDS treat the actor as an
@@ -903,15 +1337,20 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 	if b.mode == modeMimic {
 		desiredSneaking = targetPlayer.sneaking
 	}
+	sneakStart := desiredSneaking && !b.sentSneaking
+	sneakStop := !desiredSneaking && b.sentSneaking
 	if desiredSneaking {
 		flags.Set(packet.InputFlagSneaking)
 		flags.Set(packet.InputFlagSneakDown)
 		flags.Set(packet.InputFlagPersistSneak)
-		if !b.sentSneaking {
+		flags.Set(packet.InputFlagSneakCurrentRaw)
+		if sneakStart {
 			flags.Set(packet.InputFlagStartSneaking)
+			flags.Set(packet.InputFlagSneakPressedRaw)
 		}
-	} else if b.sentSneaking {
+	} else if sneakStop {
 		flags.Set(packet.InputFlagStopSneaking)
+		flags.Set(packet.InputFlagSneakReleasedRaw)
 	}
 	if b.mode == modeMimic && targetPlayer.swimming {
 		if !b.mimicSwimming {
@@ -953,7 +1392,12 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 	lookPitch := float32(0)
 	if b.mode == modeLookAt && targetPlayer.id != 0 {
 		lookDX := targetPlayer.position.X() - b.pos.X()
-		lookDY := targetPlayer.position.Y() + .9 - b.pos.Y()
+		// Aim the camera at the target's eye line. The pitch is measured from
+		// the bot's camera (pos.Y + eye height), so the vertical component must
+		// be the difference between the two eye lines: (target.Y + eye) -
+		// (bot.Y + eye) = target.Y - bot.Y. Measuring from the feet and adding a
+		// head offset here made the bot look up above the target's head.
+		lookDY := targetPlayer.position.Y() - b.pos.Y()
 		lookDZ := targetPlayer.position.Z() - b.pos.Z()
 		horizontal := math.Sqrt(float64(lookDX*lookDX + lookDZ*lookDZ))
 		if horizontal > .001 {
@@ -964,57 +1408,130 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 			lookPitch = float32(-math.Atan2(float64(lookDY), horizontal) * 180 / math.Pi)
 		}
 	}
+	if b.mode == modeIdle {
+		yaw = b.idleYaw
+	}
 	b.facingYaw = yaw
-	sneakStart := desiredSneaking && !b.sentSneaking
-	sneakStop := !desiredSneaking && b.sentSneaking
 	swimStart := b.mode == modeMimic && targetPlayer.swimming && !b.mimicSwimming
 	swimStop := b.mode == modeMimic && !targetPlayer.swimming && b.mimicSwimming
 	pitch := float32(0)
-	if b.mode == modeMimic || b.mode == modeCamic {
+	switch b.mode {
+	case modeMimic, modeCamic:
 		pitch = targetPlayer.pitch
-	} else if b.mode == modeLookAt {
+	case modeLookAt:
 		pitch = lookPitch
 	}
-	auth := packet.PlayerAuthInput{Position: b.pos, Delta: b.pos.Sub(b.last), Yaw: yaw, HeadYaw: yaw, Pitch: pitch, MoveVector: mgl32.Vec2{0, moveZ}, AnalogueMoveVector: mgl32.Vec2{0, moveZ}, RawMoveVector: mgl32.Vec2{0, moveZ}, InputData: flags, InputMode: packet.InputModeTouch, PlayMode: packet.PlayModeScreen, InteractionModel: packet.InteractionModelTouch, Tick: b.tick}
+	if b.mode == modeIdle {
+		pitch = b.idlePitch
+	}
+	if b.headshake != headshakeNone {
+		// Scripted head shake: "no" swings the head side to side (yaw), "yes"
+		// bobs it up and down (pitch). A sine phase over the period gives a
+		// smooth back-and-forth motion added on top of the current facing.
+		phase := float32(math.Sin(float64(b.headshakeTicks) * 2 * math.Pi / headshakePeriod))
+		switch b.headshake {
+		case headshakeNo:
+			yaw += phase * 18
+		case headshakeYes:
+			pitch += phase * 22
+		}
+		b.headshakeTicks++
+		if !b.headshakeRepeat && b.headshakeTicks >= headshakeOnceTicks {
+			b.headshake = headshakeNone
+			b.headshakeTicks = 0
+		}
+	}
+	b.facingPitch = pitch
+	auth := packet.PlayerAuthInput{Position: b.pos, Delta: b.pos.Sub(b.last), Yaw: yaw, HeadYaw: yaw, Pitch: pitch, MoveVector: mgl32.Vec2{0, moveZ}, AnalogueMoveVector: mgl32.Vec2{0, moveZ}, RawMoveVector: mgl32.Vec2{0, moveZ}, InputData: flags, InputMode: packet.InputModeGamePad, PlayMode: packet.PlayModeScreen, InteractionModel: packet.InteractionModelTouch, Tick: b.tick}
 	mineSwing := false
-	if b.breakTarget != nil {
+
+	b.mu.Lock()
+	bt := b.breakTarget
+	var abortBt *protocol.BlockPos
+	if b.abortBreakTarget != nil {
+		abortBt = b.abortBreakTarget
+		b.abortBreakTarget = nil
+	}
+	b.mu.Unlock()
+
+	var actions []protocol.PlayerBlockAction
+	if abortBt != nil {
+		actions = append(actions, protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionAbortBreak), BlockPos: *abortBt, Face: 1})
+	}
+
+	if bt != nil {
 		action := protocol.PlayerActionContinueDestroyBlock
-		actions := make([]protocol.PlayerBlockAction, 0, 2)
-		if b.breakTicks == 0 {
+		if actions == nil {
+			actions = make([]protocol.PlayerBlockAction, 0, 2)
+		}
+
+		b.mu.Lock()
+		ticks := b.breakTicks
+		b.mu.Unlock()
+
+		if ticks == 0 {
 			action = protocol.PlayerActionStartBreak
+			b.mu.Lock()
 			mineSwing = b.breakAnimation
+			b.mu.Unlock()
 			actions = append(actions,
-				protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionStartBreak), BlockPos: *b.breakTarget, Face: -1},
-				protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionPredictDestroyBlock), BlockPos: *b.breakTarget, Face: -1},
+				protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionStartBreak), BlockPos: *bt, Face: 1},
 			)
-		} else if b.breakTicks == 1 {
-			// The prediction was sent together with start_break above.
 		}
-		if len(actions) == 0 {
-			actions = append(actions, protocol.PlayerBlockAction{Action: int32(action), BlockPos: *b.breakTarget, Face: -1})
+		if len(actions) == 0 || (abortBt != nil && len(actions) == 1) {
+			actions = append(actions, protocol.PlayerBlockAction{Action: int32(action), BlockPos: *bt, Face: 1})
 		}
+
+		if ticks >= 40 {
+			actions = append(actions, protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionPredictDestroyBlock), BlockPos: *bt, Face: 1})
+			_ = c.WritePacket(&packet.InventoryTransaction{
+				TransactionData: &protocol.UseItemTransactionData{
+					ActionType:    protocol.UseItemActionBreakBlock,
+					BlockPosition: *bt,
+					BlockFace:     1,
+					HotBarSlot:    int32(b.hotbarSlot),
+					HeldItem:      b.heldItem,
+				},
+			})
+			b.mu.Lock()
+			if b.breakRepeat {
+				b.breakTicks = 0
+			} else {
+				b.breakTarget = nil
+				b.breakTicks = 0
+			}
+			b.mu.Unlock()
+		} else {
+			b.mu.Lock()
+			b.breakTicks++
+			b.mu.Unlock()
+		}
+	}
+	if len(actions) > 0 {
 		auth.InputData.Set(packet.InputFlagPerformBlockActions)
 		auth.BlockActions = protocol.Option(actions)
-		b.breakTicks++
-		// Server-authoritative block actions use continue_break after the
-		// prediction; stop_break is a legacy PlayerAction and is invalid here.
-		if b.breakTicks >= 40 {
-			b.breakTarget = nil
-			b.breakTicks = 0
-		}
 	}
 	_ = c.WritePacket(&auth)
 	if mineSwing {
 		_ = c.WritePacket(&packet.Animate{ActionType: packet.AnimateActionSwingArm, EntityRuntimeID: b.entityID, SwingSource: packet.AnimateSwingSourceMine})
-		fmt.Printf("bebot: break input action=%d target=%d %d %d\n", protocol.PlayerActionStartBreak, b.breakTarget.X(), b.breakTarget.Y(), b.breakTarget.Z())
+		log.Printf("bebot: break input action=%d target=%d %d %d\n", protocol.PlayerActionStartBreak, bt.X(), bt.Y(), bt.Z())
 	}
+	if sneakStart || sneakStop {
+		// Debug: log.Printf("bebot: sent sneak %s tick=%d desired=%v target=%v up=%v moveZ=%v delta=%v flags=%s\n",
+		// 	map[bool]string{true: "start", false: "stop"}[sneakStart],
+		// 	b.tick, desiredSneaking, targetPlayer.sneaking, flags.Load(packet.InputFlagUp), moveZ, auth.Delta, inputFlagsValue(flags))
+	}
+	b.sentSneaking = desiredSneaking
 	if sneakStart {
+		// Bedrock tracks the sneak state both from PlayerAuthInput flags and
+		// from PlayerAction start_sneaking/stop_sneaking; a real client emits
+		// the PlayerAction edge too. It is the only path BDS applies without
+		// requiring the player to move.
 		_ = c.WritePacket(&packet.PlayerAction{EntityRuntimeID: b.entityID, ActionType: protocol.PlayerActionStartSneak, BlockFace: -1})
 	}
 	if sneakStop {
 		_ = c.WritePacket(&packet.PlayerAction{EntityRuntimeID: b.entityID, ActionType: protocol.PlayerActionStopSneak, BlockFace: -1})
 	}
-	b.sentSneaking = desiredSneaking
 	if swimStart {
 		_ = c.WritePacket(&packet.PlayerAction{EntityRuntimeID: b.entityID, ActionType: protocol.PlayerActionStartSwimming, BlockFace: -1})
 	}
@@ -1023,7 +1540,7 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 	}
 	if b.mode == modeMimic {
 		if targetPlayer.sneaking != b.mimicSneaking {
-			fmt.Printf("bebot: mimic target=%q runtime=%d sneaking=%v\n", targetPlayer.name, targetPlayer.id, targetPlayer.sneaking)
+			// Debug: log.Printf("bebot: mimic target=%q runtime=%d sneaking=%v\n", targetPlayer.name, targetPlayer.id, targetPlayer.sneaking)
 		}
 		b.mimicSneaking = targetPlayer.sneaking
 		b.mimicSwimming = targetPlayer.swimming
@@ -1034,7 +1551,21 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 	if b.mode == modeMimic && mirrorUse {
 		_ = c.WritePacket(&packet.PlayerAction{EntityRuntimeID: b.entityID, ActionType: protocol.PlayerActionStartUsingItem, BlockFace: -1})
 	}
+	if b.emoteRepeat && b.emoteID != "" && b.tick >= b.emoteNextTick {
+		_ = c.WritePacket(&packet.Emote{EntityRuntimeID: b.entityID, EmoteID: b.emoteID, EmoteLength: b.emoteLength, Flags: 0})
+		b.emoteNextTick = b.tick + uint64(b.emoteLength)
+	}
 	b.last = b.pos
+}
+
+func inputFlagsValue(f protocol.InputFlags) string {
+	ids := make([]int, 0, 8)
+	for i := 0; i < f.Len(); i++ {
+		if f.Load(i) {
+			ids = append(ids, i)
+		}
+	}
+	return fmt.Sprintf("%v", ids)
 }
 
 func (b *Bot) say(s string) {
@@ -1052,7 +1583,10 @@ func (b *Bot) commandFromChat(sender, text string) {
 	if !b.isSuperuser(sender) && !isPublicCommand(text) {
 		return
 	}
-	b.command(text)
+	// Commands run inside the packet loop; run them on their own goroutine so
+	// commands that wait for a server response (transfer, drop) do not block
+	// packet processing.
+	go b.command(text)
 }
 
 func isPublicCommand(line string) bool {
@@ -1116,12 +1650,14 @@ func (b *Bot) handleWhisper(sender, message string) {
 	b.whisperTarget = sender
 	b.fromConsole = false
 	b.mu.Unlock()
-	defer func() {
-		b.mu.Lock()
-		b.whisperTarget = ""
-		b.mu.Unlock()
+	go func() {
+		defer func() {
+			b.mu.Lock()
+			b.whisperTarget = ""
+			b.mu.Unlock()
+		}()
+		b.command(message)
 	}()
-	b.command(message)
 }
 
 func (b *Bot) runCommand(cmd string) {
@@ -1130,7 +1666,7 @@ func (b *Bot) runCommand(cmd string) {
 	viaChat := b.cfg.CommandsViaChat != nil && *b.cfg.CommandsViaChat
 	b.mu.Unlock()
 	if c == nil {
-		fmt.Println("bebot: not connected; cannot run command")
+		log.Println("bebot: not connected; cannot run command")
 		return
 	}
 	if !strings.HasPrefix(cmd, "/") {
@@ -1152,14 +1688,14 @@ func (b *Bot) runCommand(cmd string) {
 		})
 	}
 	if err != nil {
-		fmt.Println("bebot: command failed:", explainError(err))
+		log.Println("bebot: command failed:", explainError(err))
 		return
 	}
 	if err := c.Flush(); err != nil {
-		fmt.Println("bebot: command flush failed:", explainError(err))
+		log.Println("bebot: command flush failed:", explainError(err))
 		return
 	}
-	fmt.Println("bebot: executed command:", cmd)
+	log.Println("bebot: executed command:", cmd)
 }
 
 func (b *Bot) whisper(target, message string) {
@@ -1187,7 +1723,7 @@ func (b *Bot) whisper(target, message string) {
 		})
 	}
 	if err != nil {
-		fmt.Println("bebot: whisper failed:", explainError(err))
+		log.Println("bebot: whisper failed:", explainError(err))
 		return
 	}
 	_ = c.Flush()
@@ -1225,6 +1761,61 @@ func (b *Bot) command(line string) {
 			return
 		}
 		b.say(strings.Join(p[1:], " "))
+	case "stopkill":
+		b.mu.Lock()
+		b.killTarget = ""
+		b.mu.Unlock()
+		b.reply("Stopped killing.")
+	case "kill":
+		if len(p) < 3 {
+			b.reply("Usage: kill <target> <cps>")
+			return
+		}
+		targetName := strings.ToLower(p[1])
+		cps, err := strconv.Atoi(p[2])
+		if err != nil || cps <= 0 || cps > 100 {
+			b.reply("Invalid CPS (must be 1-100).")
+			return
+		}
+		b.mu.Lock()
+		pEntry, ok := b.players[targetName]
+		if !ok || !pEntry.online || pEntry.id == 0 {
+			b.mu.Unlock()
+			b.reply("Cannot find target nearby.")
+			return
+		}
+		b.killTarget = targetName
+		b.mu.Unlock()
+		b.reply(fmt.Sprintf("Killing %s at %d CPS...", pEntry.name, cps))
+		go b.killLoop(targetName, cps)
+	case "payback":
+		b.mu.Lock()
+		b.payback = !b.payback
+		if len(p) > 1 {
+			b.payback = strings.EqualFold(p[1], "on") || strings.EqualFold(p[1], "true")
+		}
+		state := "off"
+		if b.payback {
+			state = "on"
+		}
+		b.mu.Unlock()
+		b.reply("Payback mode is now " + state + ".")
+	case "autofish":
+		b.mu.Lock()
+		b.autoFish = !b.autoFish
+		if len(p) > 1 {
+			b.autoFish = strings.EqualFold(p[1], "on") || strings.EqualFold(p[1], "true")
+		}
+		state := "off"
+		if b.autoFish {
+			state = "on"
+		}
+		b.mu.Unlock()
+		b.reply("Auto-fish is now " + state + ".")
+		if state == "on" {
+			// Auto cast immediately
+			b.useItemInHand()
+		}
 	case "follow":
 		if len(p) < 2 {
 			b.reply("Usage: follow <playername>")
@@ -1311,10 +1902,102 @@ func (b *Bot) command(line string) {
 	case "unsneak":
 		b.sneaking = false
 		b.reply("Sneaking disabled.")
+	case "headshake", "shake":
+		if len(p) >= 2 && strings.EqualFold(p[1], "clear") {
+			b.headshake = headshakeNone
+			b.headshakeTicks = 0
+			b.reply("Headshake cleared.")
+			return
+		}
+		if len(p) < 2 || len(p) > 3 {
+			b.reply("Usage: headshake yes|no [repeat:true|false] | headshake clear")
+			return
+		}
+		var mode headshakeMode
+		switch strings.ToLower(p[1]) {
+		case "yes", "y", "nod":
+			mode = headshakeYes
+		case "no", "n":
+			mode = headshakeNo
+		default:
+			b.reply("Usage: headshake yes|no [repeat:true|false] | headshake clear")
+			return
+		}
+		repeat := false
+		if len(p) == 3 {
+			repeat = strings.EqualFold(p[2], "true") || strings.EqualFold(p[2], "yes") || p[2] == "1"
+		}
+		b.headshake = mode
+		b.headshakeRepeat = repeat
+		b.headshakeTicks = 0
+		b.reply(fmt.Sprintf("Headshaking %s (repeat=%v).", p[1], repeat))
+	case "emote":
+		if len(p) >= 2 && strings.EqualFold(p[1], "clear") {
+			b.emoteID = ""
+			b.emoteRepeat = false
+			b.reply("Emote stopped.")
+			return
+		}
+		if len(p) < 2 || len(p) > 4 {
+			b.reply("Usage: emote <uuid> [repeat:true|false] [length] | emote clear")
+			return
+		}
+		emoteUUID := strings.ToLower(p[1])
+		if _, err := uuid.Parse(emoteUUID); err != nil {
+			b.reply(fmt.Sprintf("Invalid emote uuid: %s (use a UUID from the Bedrock-Emotes list)", p[1]))
+			return
+		}
+		repeat := false
+		var length uint32 = defaultEmoteLength
+		for _, arg := range p[2:] {
+			switch {
+			case strings.EqualFold(arg, "true") || strings.EqualFold(arg, "yes") || arg == "1":
+				repeat = true
+			case strings.EqualFold(arg, "false") || strings.EqualFold(arg, "no") || arg == "0":
+				repeat = false
+			default:
+				n, err := strconv.Atoi(arg)
+				if err != nil || n < 1 || n > 7200 {
+					b.reply(fmt.Sprintf("Invalid length: %s (expected ticks 1-7200)", arg))
+					return
+				}
+				length = uint32(n)
+			}
+		}
+		if b.conn != nil {
+			_ = b.conn.WritePacket(&packet.Emote{EntityRuntimeID: b.entityID, EmoteID: emoteUUID, EmoteLength: length, Flags: 0})
+		}
+		b.emoteRepeat = repeat
+		if repeat {
+			b.emoteID = emoteUUID
+			b.emoteLength = length
+			b.emoteNextTick = b.tick + uint64(length)
+			b.reply(fmt.Sprintf("Emote %s repeating (length=%d).", emoteUUID, length))
+		} else {
+			b.emoteID = ""
+			b.reply(fmt.Sprintf("Emote %s sent (length=%d).", emoteUUID, length))
+		}
+	case "skin":
+		b.skinCmd(p[1:])
 	case "nether":
 		b.netherCmd(p[1:])
-	case "day":
-		b.dayCmd()
+	case "renderdistance":
+		if len(p) < 2 {
+			b.reply("Usage: renderdistance <chunks>")
+			return
+		}
+		dist, err := strconv.Atoi(p[1])
+		if err != nil || dist < 1 {
+			b.reply("Invalid render distance.")
+			return
+		}
+		b.mu.Lock()
+		c := b.conn
+		b.mu.Unlock()
+		if c != nil {
+			_ = c.WritePacket(&packet.RequestChunkRadius{ChunkRadius: int32(dist), MaxChunkRadius: uint8(dist)})
+			b.reply(fmt.Sprintf("Requested chunk radius update to %d", dist))
+		}
 	case "sleep":
 		var x, y, z int32
 		if len(p) >= 4 {
@@ -1324,23 +2007,31 @@ func (b *Bot) command(line string) {
 		}
 		b.spawnPos = protocol.BlockPos{x, y, z}
 		b.interactBlock(b.spawnPos)
-		fmt.Printf("bebot: sleep/spawn checkpoint requested at %d %d %d\n", x, y, z)
+		log.Printf("bebot: sleep/spawn checkpoint requested at %d %d %d\n", x, y, z)
 	case "break", "breakat", "breakcoord", "mine", "mineat":
-		if len(p) != 5 {
-			b.reply("Usage: break <x> <y> <z> <animation: true|false>")
+		if len(p) < 5 || len(p) > 6 {
+			b.reply("Usage: break <x> <y> <z> <animation: true|false> [repeat: true|false]")
 			return
 		}
 		var x, y, z int32
 		if _, err := fmt.Sscanf(strings.Join(p[1:4], " "), "%d %d %d", &x, &y, &z); err != nil {
-			b.reply("Usage: break <x> <y> <z> <animation: true|false>")
+			b.reply("Usage: break <x> <y> <z> <animation: true|false> [repeat: true|false]")
 			return
 		}
 		animate, err := strconv.ParseBool(p[4])
 		if err != nil {
-			b.reply("Usage: break <x> <y> <z> <animation: true|false>")
+			b.reply("Usage: break <x> <y> <z> <animation: true|false> [repeat: true|false]")
 			return
 		}
-		b.startBreaking(protocol.BlockPos{x, y, z}, animate)
+		repeat := false
+		if len(p) == 6 {
+			repeat, err = strconv.ParseBool(p[5])
+			if err != nil {
+				b.reply("Usage: break <x> <y> <z> <animation: true|false> [repeat: true|false]")
+				return
+			}
+		}
+		b.startBreaking(protocol.BlockPos{x, y, z}, animate, repeat)
 	case "stopbreak", "cancelbreak", "abortbreak":
 		b.stopBreaking()
 	case "dropall":
@@ -1380,11 +2071,37 @@ func (b *Bot) command(line string) {
 		}
 		b.selectHotbar(byte(slot))
 	case "count":
-		if len(p) < 2 || strings.ToLower(p[1]) != "beds" {
-			b.reply("Usage: count beds")
+		if len(p) < 2 {
+			b.reply("Usage: count <beds|villagers|golems>")
 			return
 		}
-		fmt.Println("bebot: count beds is limited to decoded chunks; gophertunnel is receiving chunk packets")
+		arg := strings.ToLower(p[1])
+		switch arg {
+		case "beds":
+			log.Println("bebot: count beds is limited to decoded chunks; gophertunnel is receiving chunk packets")
+		case "villagers", "villager":
+			b.mu.Lock()
+			count := 0
+			for _, entityType := range b.entities {
+				if entityType == "minecraft:villager" || entityType == "minecraft:villager_v2" {
+					count++
+				}
+			}
+			b.mu.Unlock()
+			b.reply(fmt.Sprintf("There are %d villagers nearby.", count))
+		case "golems", "golem", "irongolem", "irongolems":
+			b.mu.Lock()
+			count := 0
+			for _, entityType := range b.entities {
+				if entityType == "minecraft:iron_golem" {
+					count++
+				}
+			}
+			b.mu.Unlock()
+			b.reply(fmt.Sprintf("There are %d iron golems nearby.", count))
+		default:
+			b.reply("Usage: count <beds|villagers|golems>")
+		}
 	case "online", "players", "list":
 		b.online()
 	case "nearby", "near":
@@ -1398,7 +2115,15 @@ func (b *Bot) command(line string) {
 		b.lookAtTarget = ""
 		b.lookAtPos = nil
 		b.velocityY = 0
-		b.reply("Completely idle & static.")
+		if len(p) > 1 && strings.EqualFold(p[1], "reset") {
+			b.idleYaw = 0
+			b.idlePitch = 0
+			b.reply("bebot: idle (reset).")
+		} else {
+			b.idleYaw = b.facingYaw
+			b.idlePitch = b.facingPitch
+			b.reply("bebot: idle.")
+		}
 	case "waypoint", "waypoints", "wp":
 		b.waypointCmd(p[1:])
 	case "move":
@@ -1416,6 +2141,9 @@ func (b *Bot) command(line string) {
 		b.lookAtTarget = ""
 		b.lookAtPos = nil
 		b.reply(fmt.Sprintf("Moving to (%.1f, %.1f, %.1f)…", b.cfg.Target.X, b.cfg.Target.Y, b.cfg.Target.Z))
+	case "rejoin", "reconnect":
+		b.reply("Reconnecting...")
+		b.close()
 	case "quit", "exit":
 		b.reply("Disconnecting. Bye!")
 		b.quitting = true
@@ -1445,28 +2173,171 @@ func (b *Bot) netherCmd(args []string) {
 	}
 }
 
-func (b *Bot) dayCmd() {
-	b.mu.Lock()
-	t := b.startGameTime
-	setTime := b.worldTime
-	b.mu.Unlock()
-	day := t/24000 + 1
-	tod := t % 24000
-	phase := "morning"
-	switch {
-	case tod >= 12000 && tod < 18000:
-		phase = "afternoon"
-	case tod >= 18000:
-		phase = "night"
+func (b *Bot) skinCmd(args []string) {
+	if len(args) == 0 {
+		b.reply("Usage: skin <slim|normal|wide> <path> [reload] | skin pack <folder> <skin_id> [reload] | skin pack <folder> list | skin default [reload] | skin toggle override")
+		return
 	}
-	h := (6 + tod/1000) % 24
-	m := (tod % 1000) * 60 / 1000
-	fmt.Printf("bebot: day debug: startGameTime=%d setTime=%d\n", t, setTime)
-	b.reply(fmt.Sprintf("Day %d (%s) - %02d:%02d", day, phase, h, m))
+	var err error
+	sc := b.cfg.Skin
+	switch strings.ToLower(args[0]) {
+	case "toggle":
+		if len(args) < 2 || !strings.EqualFold(args[1], "override") {
+			b.reply("Usage: skin toggle override")
+			return
+		}
+		on := !overrideAppearanceOn(sc)
+		sc.OverrideAppearance = &on
+		b.cfg.Skin = sc
+		if err := b.saveSkin(); err != nil {
+			b.reply("skin toggle failed: " + err.Error())
+			return
+		}
+		if on {
+			b.reply("skin override appearance: ON (other players will see skin changes)")
+		} else {
+			b.reply("skin override appearance: OFF (other players will keep their cached skin)")
+		}
+		return
+	case "default":
+		sc = defaultSkinConfig
+		_, err = loadSkinFromConfig(sc)
+		if err != nil {
+			b.reply("skin default failed: " + err.Error())
+			return
+		}
+	case "slim", "normal", "wide":
+		if len(args) < 2 {
+			b.reply("Usage: skin <slim|normal|wide> <path> [reload]")
+			return
+		}
+		armSize := uint8(protocol.ArmSizeSlim)
+		if strings.EqualFold(args[0], "normal") || strings.EqualFold(args[0], "wide") {
+			armSize = protocol.ArmSizeWide
+		}
+		_, err = buildClassicSkin(args[1], armSize)
+		if err != nil {
+			b.reply("skin: " + err.Error())
+			return
+		}
+		sc.Type = strings.ToLower(args[0])
+		sc.Path = args[1]
+		sc.Skin = ""
+	case "pack", "custom":
+		if len(args) < 3 {
+			b.reply("Usage: skin pack <folder> <skin_id> [reload] | skin pack <folder> list")
+			return
+		}
+		if strings.EqualFold(args[2], "list") {
+			skins, err := parseSkinPack(args[1])
+			if err != nil {
+				b.reply("skin: " + err.Error())
+				return
+			}
+			if len(skins) == 0 {
+				b.reply(fmt.Sprintf("No skins in %s.", args[1]))
+				return
+			}
+			b.reply(fmt.Sprintf("Skins in %s (%d):", args[1], len(skins)))
+			for i, s := range skins {
+				b.reply(fmt.Sprintf("  [%d] %s  (%s)", i, s.LocalizationName, s.Geometry))
+			}
+			return
+		}
+		_, err = buildPackSkin(args[1], args[2])
+		if err != nil {
+			b.reply("skin: " + err.Error())
+			return
+		}
+		sc.Type = "pack"
+		sc.Path = args[1]
+		sc.Skin = args[2]
+	default:
+		b.reply("Usage: skin <slim|normal|wide> <path> [reload] | skin pack <folder> <skin_id> [reload] | skin pack <folder> list | skin default [reload] | skin toggle override")
+		return
+	}
+	b.cfg.Skin = sc
+	if err := b.saveSkin(); err != nil {
+		b.reply("skin changed but skin.json write failed: " + err.Error())
+		return
+	}
+	reload := isReloadArg(args)
+	if reload {
+		b.reply(fmt.Sprintf("skin changed to type=%s path=%s skin=%s (reloading)", sc.Type, sc.Path, sc.Skin))
+		b.scheduleReconnect()
+	} else {
+		if err := b.sendSkin(sc); err != nil {
+			b.reply(fmt.Sprintf("skin saved: type=%s path=%s skin=%s (apply failed: %v)", sc.Type, sc.Path, sc.Skin, err))
+			return
+		}
+		b.reply(fmt.Sprintf("skin changed: type=%s path=%s skin=%s", sc.Type, sc.Path, sc.Skin))
+	}
+}
+
+// sendSkin builds the skin described by sc and sends a PlayerSkin packet to the
+// server, updating the bot's appearance in-game without reconnecting.
+func (b *Bot) sendSkin(sc skinConfig) error {
+	b.mu.Lock()
+	c := b.conn
+	b.mu.Unlock()
+	if c == nil {
+		return fmt.Errorf("not connected")
+	}
+	skin, err := loadSkinFromConfig(sc)
+	if err != nil {
+		return err
+	}
+	skin.OverrideAppearance = overrideAppearanceOn(sc)
+	return c.WritePacket(&packet.PlayerSkin{
+		UUID: b.selfUUID,
+		Skin: skin,
+	})
+}
+
+// isReloadArg checks whether the trailing argument in the skin command is a
+// truthy reload flag ("true", "yes", or "reload"). The reload argument is
+// optional and must be the very last argument.
+func isReloadArg(args []string) bool {
+	if len(args) < 2 {
+		return false
+	}
+	last := strings.ToLower(args[len(args)-1])
+	return last == "true" || last == "yes" || last == "reload"
+}
+
+// scheduleReconnect forces a fresh connection so the newly saved skin is loaded
+// via the login ClientData. BDS only applies/relays the first in-session
+// PlayerSkin self-change (and rejects empty-geometry classic skins), so runtime
+// PlayerSkin changes are unreliable here; a quick reconnect is the reliable way
+// to show the skin to other players. The reconnect delay is reset so this
+// reconnect happens immediately instead of waiting on the failure backoff.
+func (b *Bot) scheduleReconnect() {
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		b.mu.Lock()
+		b.reconnectDelay = baseReconnectDelay(b.cfg)
+		c := b.conn
+		b.mu.Unlock()
+		if c != nil {
+			_ = c.Close()
+		}
+	}()
+}
+
+// saveSkin writes the bot's skin config to its dedicated skin.json file. The
+// file holds only skin data, so nothing else is touched.
+func (b *Bot) saveSkin() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	data, err := json.MarshalIndent(b.cfg.Skin, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(b.skinPath, data, 0644)
 }
 
 func (b *Bot) reply(message string) {
-	fmt.Println("bebot:", message)
+	log.Println("bebot:", message)
 	b.mu.Lock()
 	target := b.whisperTarget
 	fromConsole := b.fromConsole
@@ -1480,12 +2351,14 @@ func (b *Bot) reply(message string) {
 	}
 	b.say(message)
 }
+
 func (b *Bot) logPlayerEvent(event, name string) {
 	if name == "" {
 		return
 	}
 	fmt.Printf("[player - %s] %s %s\n", time.Now().Format("2006-01-02 15:04:05"), event, cleanChatName(name))
 }
+
 func (b *Bot) online() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -1500,8 +2373,9 @@ func (b *Bot) online() {
 		}
 		names = append(names, name)
 	}
-	fmt.Printf("bebot: online players (%d): %s\n", len(names), strings.Join(names, ", "))
+	log.Printf("bebot: online players (%d): %s\n", len(names), strings.Join(names, ", "))
 }
+
 func (b *Bot) nearby() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -1514,11 +2388,159 @@ func (b *Bot) nearby() {
 		if name == "" {
 			name = key
 		}
-		fmt.Printf("bebot: %s @ (%.1f, %.1f, %.1f), %.1fm away\n", name, p.position.X(), p.position.Y(), p.position.Z(), float32(math.Sqrt(float64(d.Dot(d)))))
+		log.Printf("bebot: %s @ (%.1f, %.1f, %.1f), %.1fm away\n", name, p.position.X(), p.position.Y(), p.position.Z(), float32(math.Sqrt(float64(d.Dot(d)))))
 	}
 }
+
+func (b *Bot) nearestPlayer(maxDist float32) (uint64, mgl32.Vec3, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var closestID uint64
+	var closestPos mgl32.Vec3
+	minD2 := maxDist * maxDist
+	found := false
+	for _, p := range b.players {
+		if !p.online || p.id == 0 || p.id == b.entityID {
+			continue
+		}
+		d := p.position.Sub(b.pos)
+		d2 := d.Dot(d)
+		if d2 <= minD2 {
+			minD2 = d2
+			closestID = p.id
+			closestPos = p.position
+			found = true
+		}
+	}
+	return closestID, closestPos, found
+}
+
+func (b *Bot) nearestAttacker(maxDist float32) (uint64, mgl32.Vec3, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var closestID uint64
+	var closestPos mgl32.Vec3
+	minD2 := maxDist * maxDist
+	found := false
+	now := time.Now()
+	for _, p := range b.players {
+		if !p.online || p.id == 0 || p.id == b.entityID {
+			continue
+		}
+		// Consider attackers who swung their arm within the last 1 second
+		if now.Sub(p.lastSwing) > time.Second {
+			continue
+		}
+		d := p.position.Sub(b.pos)
+		d2 := d.Dot(d)
+		if d2 <= minD2 {
+			minD2 = d2
+			closestID = p.id
+			closestPos = p.position
+			found = true
+		}
+	}
+	return closestID, closestPos, found
+}
+
+func (b *Bot) attack(targetID uint64, targetPos mgl32.Vec3) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.conn == nil {
+		return
+	}
+	
+	// Turn to face them visually
+	lookDX := targetPos.X() - b.pos.X()
+	lookDZ := targetPos.Z() - b.pos.Z()
+	horizontal := math.Sqrt(float64(lookDX*lookDX + lookDZ*lookDZ))
+	if horizontal > 0.001 {
+		yaw := float32(math.Atan2(float64(-lookDX), float64(lookDZ)) * 180 / math.Pi)
+		if yaw < 0 {
+			yaw += 360
+		}
+		lookDY := (targetPos.Y() + 1.62) - (b.pos.Y() + 1.62) // approximate eye height
+		pitch := float32(-math.Atan2(float64(lookDY), horizontal) * 180 / math.Pi)
+		b.idleYaw = yaw
+		b.idlePitch = pitch
+	}
+	
+	_ = b.conn.WritePacket(&packet.InventoryTransaction{
+		TransactionData: &protocol.UseItemOnEntityTransactionData{
+			TargetEntityRuntimeID: targetID,
+			ActionType:            protocol.UseItemOnEntityActionAttack,
+			HotBarSlot:            int32(b.hotbarSlot),
+			HeldItem:              b.heldItem,
+			Position:              b.pos,
+			ClickedPosition:       targetPos,
+		},
+	})
+	_ = b.conn.Flush()
+	
+	// Send arm swing animation so everyone can see the bot hitting back
+	_ = b.conn.WritePacket(&packet.Animate{ActionType: packet.AnimateActionSwingArm, EntityRuntimeID: b.entityID})
+	_ = b.conn.Flush()
+}
+
+func (b *Bot) killLoop(targetName string, cps int) {
+	ticker := time.NewTicker(time.Second / time.Duration(cps))
+	defer ticker.Stop()
+	for {
+		<-ticker.C
+		b.mu.Lock()
+		if b.killTarget != targetName {
+			b.mu.Unlock()
+			return
+		}
+		pEntry, ok := b.players[targetName]
+		if !ok || !pEntry.online || pEntry.id == 0 {
+			b.killTarget = ""
+			b.mu.Unlock()
+			b.reply("Target lost or died.")
+			return
+		}
+		d := pEntry.position.Sub(b.pos)
+		if d.Dot(d) > 36 { // > 6 blocks away
+			b.killTarget = ""
+			b.mu.Unlock()
+			b.reply("Target escaped (too far).")
+			return
+		}
+		targetID := pEntry.id
+		targetPos := pEntry.position
+		b.mu.Unlock()
+		
+		b.attack(targetID, targetPos)
+	}
+}
+
+func (b *Bot) useItemInHand() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.conn == nil {
+		return
+	}
+	
+	_ = b.conn.WritePacket(&packet.InventoryTransaction{
+		TransactionData: &protocol.UseItemTransactionData{
+			ActionType:    protocol.UseItemActionClickAir,
+			BlockPosition: protocol.BlockPos{},
+			BlockFace:     255,
+			HotBarSlot:    int32(b.hotbarSlot),
+			HeldItem:      b.heldItem,
+			Position:      b.pos,
+			ClickedPosition: b.pos.Add(mgl32.Vec3{0, 1, 0}),
+			BlockRuntimeID: 0,
+		},
+	})
+	_ = b.conn.Flush()
+	
+	_ = b.conn.WritePacket(&packet.Animate{ActionType: packet.AnimateActionSwingArm, EntityRuntimeID: b.entityID})
+	_ = b.conn.Flush()
+}
+
 func (b *Bot) coords() {
-	fmt.Printf("bebot: bot @ (%.1f, %.1f, %.1f)\n", b.pos.X(), b.pos.Y(), b.pos.Z())
+	log.Printf("bebot: bot @ (%.1f, %.1f, %.1f)\n", b.pos.X(), b.pos.Y(), b.pos.Z())
 	b.nearby()
 }
 
@@ -1674,15 +2696,16 @@ func (b *Bot) waypointHelp() {
 	}
 }
 
-func (b *Bot) startBreaking(pos protocol.BlockPos, animate bool) {
+func (b *Bot) startBreaking(pos protocol.BlockPos, animate bool, repeat bool) {
 	b.breakAnimation = animate
+	b.breakRepeat = repeat
 	if b.gameMode == 1 || b.gameMode == 4 {
 		b.mu.Lock()
 		c := b.conn
 		entityID := b.entityID
 		b.mu.Unlock()
 		if c == nil {
-			fmt.Println("bebot: cannot break block: not connected")
+			log.Println("bebot: cannot break block: not connected")
 			return
 		}
 		if err := c.WritePacket(&packet.PlayerAction{
@@ -1690,52 +2713,50 @@ func (b *Bot) startBreaking(pos protocol.BlockPos, animate bool) {
 			ActionType:      protocol.PlayerActionCreativePlayerDestroyBlock,
 			BlockPosition:   pos,
 			ResultPosition:  pos,
-			BlockFace:       -1,
+			BlockFace:       1,
 		}); err != nil {
-			fmt.Println("bebot: creative break failed:", explainError(err))
+			log.Println("bebot: creative break failed:", explainError(err))
 		}
 		if animate {
 			_ = c.WritePacket(&packet.Animate{ActionType: packet.AnimateActionSwingArm, EntityRuntimeID: entityID, SwingSource: packet.AnimateSwingSourceMine})
 		}
 		if err := c.Flush(); err != nil {
-			fmt.Println("bebot: creative break flush failed:", explainError(err))
+			log.Println("bebot: creative break flush failed:", explainError(err))
 		}
 		// Some 1.26 servers advertise server-authoritative block breaking even
 		// for Creative players. Keep the authoritative transaction queued too;
 		// the creative action alone only produces the swing animation.
+		b.mu.Lock()
 		b.breakTarget = &pos
 		b.breakTicks = 0
-		fmt.Printf("bebot: creative break requested action=%d at %d %d %d\n", protocol.PlayerActionCreativePlayerDestroyBlock, pos.X(), pos.Y(), pos.Z())
+		b.mu.Unlock()
+		log.Printf("bebot: creative break requested action=%d at %d %d %d\n", protocol.PlayerActionCreativePlayerDestroyBlock, pos.X(), pos.Y(), pos.Z())
 		return
 	}
+	b.mu.Lock()
 	b.breakTarget = &pos
 	b.breakTicks = 0
-	fmt.Printf("bebot: breaking block at %d %d %d\n", pos.X(), pos.Y(), pos.Z())
+	b.mu.Unlock()
+	log.Printf("bebot: breaking block at %d %d %d\n", pos.X(), pos.Y(), pos.Z())
 }
 
 func (b *Bot) stopBreaking() {
+	b.mu.Lock()
 	if b.breakTarget == nil {
-		fmt.Println("bebot: no block breaking operation is active")
+		b.mu.Unlock()
+		log.Println("bebot: no block breaking operation is active")
 		return
 	}
 	pos := *b.breakTarget
+	b.abortBreakTarget = &pos
 	b.breakTarget = nil
 	b.breakTicks = 0
-	b.mu.Lock()
-	c := b.conn
-	entityID := b.entityID
 	b.mu.Unlock()
-	if c != nil {
-		if err := c.WritePacket(&packet.PlayerAction{EntityRuntimeID: entityID, ActionType: protocol.PlayerActionAbortBreak, BlockPosition: pos, ResultPosition: pos, BlockFace: -1}); err != nil {
-			fmt.Println("bebot: stop break failed:", explainError(err))
-		} else {
-			_ = c.Flush()
-		}
-	}
-	fmt.Printf("bebot: stopped breaking block at %d %d %d\n", pos.X(), pos.Y(), pos.Z())
+
+	log.Printf("bebot: stopped breaking block at %d %d %d\n", pos.X(), pos.Y(), pos.Z())
 }
 
-func (b *Bot) startBreakingFront(animate bool) {
+func (b *Bot) startBreakingFront(animate bool, repeat bool) {
 	// Bedrock yaw points forward as (-sin(yaw), cos(yaw)).
 	yaw := b.facingYaw
 	if b.mode == modeMimic {
@@ -1749,7 +2770,7 @@ func (b *Bot) startBreakingFront(animate bool) {
 	x := int32(math.Floor(float64(b.pos.X() - float32(math.Sin(rad)))))
 	y := int32(math.Floor(float64(b.pos.Y())))
 	z := int32(math.Floor(float64(b.pos.Z() + float32(math.Cos(rad)))))
-	b.startBreaking(protocol.BlockPos{x, y, z}, animate)
+	b.startBreaking(protocol.BlockPos{x, y, z}, animate, repeat)
 }
 
 func (b *Bot) help() {
@@ -1763,7 +2784,17 @@ func (b *Bot) help() {
 		"stoplookat - stop looking at a player",
 		"sneak [on|off|toggle] - toggle or set sneaking",
 		"unsneak - stop sneaking",
-		"idle / stop - stop movement",
+		"headshake yes|no [repeat:true|false] - shake the head (yes=up/down, no=left/right)",
+		"headshake clear - stop headshaking",
+		"emote <uuid> [repeat:true|false] [length] - send an emote (UUID from Bedrock-Emotes list); length = duration in ticks, default 60",
+		"emote clear - stop repeating emote",
+		"skin <slim|normal|wide> <path> [reload] - change to a classic skin PNG",
+		"skin pack <folder> <skin_id> [reload] - change to a skin from a skin pack (skins.json)",
+		"skin pack <folder> list - list skins in a skin pack",
+		"skin default [reload] - revert to default slim skin",
+		"skin toggle override - toggle whether skin changes override other players' view (default: on)",
+		"idle / stop - stop movement (keeps current facing)",
+		"idle reset - idle and reset facing to default",
 		"break <x y z> <animation: true|false> - break a block",
 		"stopbreak - stop breaking",
 		"hotbar <0-9> - select a hotbar slot",
@@ -1776,6 +2807,10 @@ func (b *Bot) help() {
 		"coords - show coordinates",
 		"waypoint help - waypoint add/remove/update/list/show",
 		"say <message> - send chat",
+		"payback [on|off] - toggle payback mode (attacks back if hurt)",
+		"autofish [on|off] - toggle auto-fishing",
+		"kill <target> <cps> - rapidly attack a player until they die",
+		"stopkill - stop the current kill command",
 		"quit / exit - disconnect",
 	}
 	for _, line := range lines {
@@ -1880,7 +2915,10 @@ func (b *Bot) openInventory(c *minecraft.Conn) {
 	case <-b.containerOpen:
 	default:
 	}
-	_ = c.WritePacket(&packet.Interact{ActionType: packet.InteractActionOpenInventory})
+	b.mu.Lock()
+	entityID := b.entityID
+	b.mu.Unlock()
+	_ = c.WritePacket(&packet.Interact{ActionType: packet.InteractActionOpenInventory, TargetEntityRuntimeID: entityID})
 	_ = c.Flush()
 	select {
 	case <-b.containerOpen:
@@ -1938,6 +2976,8 @@ func (b *Bot) sendItemStackRequest(c *minecraft.Conn, actions []protocol.StackRe
 // stack when the destination is empty, or swaps the two stacks when the
 // destination is occupied.
 func (b *Bot) transferCmd(p []string) {
+	b.invMu.Lock()
+	defer b.invMu.Unlock()
 	if len(p) != 3 {
 		b.reply("Usage: transfer <slot a> <slot b>")
 		return
@@ -2011,6 +3051,8 @@ func (b *Bot) transferCmd(p []string) {
 }
 
 func (b *Bot) dropSlots(start, count, requested int) {
+	b.invMu.Lock()
+	defer b.invMu.Unlock()
 	b.mu.Lock()
 	c := b.conn
 	type dropRequest struct {
@@ -2042,13 +3084,11 @@ func (b *Bot) dropSlots(start, count, requested int) {
 		b.reply("No items found to drop.")
 		return
 	}
-	// Drops go through the modern item stack request system, like dragging a
-	// stack out of the open inventory screen: take the stack to the cursor,
-	// then drop it from there. Each slot is its own request so a rejection on
 	// one slot does not fail the rest.
 	b.openInventory(c)
 	defer b.closeInventory(c)
-	dropped := 0
+	var actions []protocol.StackRequestAction
+	var validDrops []dropRequest
 	for _, drop := range drops {
 		container, slotIn, ok := playerSlotContainer(drop.slot)
 		if !ok {
@@ -2066,14 +3106,41 @@ func (b *Bot) dropSlots(start, count, requested int) {
 		take.Source = fromSlot
 		take.Destination = cursorEmpty
 		dropAction := &protocol.DropStackRequestAction{Count: byte(count), Source: cursorFull}
-		ok, status := b.sendItemStackRequest(c, []protocol.StackRequestAction{take, dropAction})
-		if !ok {
-			fmt.Printf("bebot: drop slot %d rejected status %d (%s)\n", drop.slot, status, stackStatusName(status))
-			continue
-		}
-		dropped++
+		actions = append(actions, take, dropAction)
+		validDrops = append(validDrops, drop)
 	}
-	b.reply(fmt.Sprintf("Dropped items from %d of %d slot(s).", dropped, len(drops)))
+
+	if len(actions) == 0 {
+		b.reply("No valid items to drop.")
+		return
+	}
+
+	ok, status := b.sendItemStackRequest(c, actions)
+	if !ok {
+		b.reply(fmt.Sprintf("Drop request failed: %s", stackStatusName(status)))
+		return
+	}
+
+	// Update local inventory state
+	b.mu.Lock()
+	for _, drop := range validDrops {
+		count := drop.count
+		if count > 255 {
+			count = 255
+		}
+		if b.inventory[drop.slot].Stack.Count > count {
+			b.inventory[drop.slot].Stack.Count -= count
+		} else {
+			b.inventory[drop.slot] = protocol.ItemInstance{}
+		}
+		if byte(drop.slot) == b.hotbarSlot {
+			b.heldItem = b.inventory[drop.slot]
+		}
+	}
+	b.mu.Unlock()
+	b.sendHeldItem(c)
+
+	b.reply(fmt.Sprintf("Dropped items from %d slot(s).", len(validDrops)))
 }
 
 func (b *Bot) sendHeldItem(c *minecraft.Conn) {
@@ -2092,7 +3159,7 @@ func (b *Bot) sendHeldItem(c *minecraft.Conn) {
 		HotBarSlot:      slot,
 		WindowID:        0,
 	}); err != nil {
-		fmt.Println("bebot: held-item update failed:", explainError(err))
+		log.Println("bebot: held-item update failed:", explainError(err))
 	}
 }
 
@@ -2105,6 +3172,7 @@ func (b *Bot) interactBlock(pos protocol.BlockPos) {
 	_ = b.conn.WritePacket(&packet.Interact{ActionType: packet.InteractActionMouseOverEntity, TargetEntityRuntimeID: 0})
 	_ = b.conn.WritePacket(&packet.PlayerAction{EntityRuntimeID: b.entityID, ActionType: protocol.PlayerActionStartSleeping, BlockPosition: pos, ResultPosition: pos, BlockFace: 1})
 	_ = b.conn.WritePacket(&packet.PlayerAction{EntityRuntimeID: b.entityID, ActionType: protocol.PlayerActionStartItemUseOn, BlockPosition: pos, ResultPosition: pos, BlockFace: 1})
+	_ = b.conn.Flush()
 }
 func (b *Bot) close() {
 	b.mu.Lock()
@@ -2112,6 +3180,7 @@ func (b *Bot) close() {
 	if b.conn != nil {
 		// Give the server a proper client disconnect before closing RakNet.
 		_ = b.conn.WritePacket(&packet.Disconnect{HideDisconnectionScreen: true, Message: "Client shutting down"})
+		_ = b.conn.Flush()
 		time.Sleep(100 * time.Millisecond)
 		_ = b.conn.Close()
 		b.conn = nil

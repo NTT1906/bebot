@@ -1,5 +1,33 @@
+# IDE
 .idea
+.vscode/
+
+# Hidden Info / Account Info
 token_cache.json
-example
-arie19062
+xsts_cache.json
+config.json
+skin.json
+waypoints.json
+
+# Certs
+cert/
+certs/
+*.pem
+*.crt
+*.key
+
+# Logs
+logs/
+*.log
+
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Other
+example/
+arie19062/
 floating-fix.md
