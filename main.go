@@ -663,6 +663,8 @@ type Bot struct {
 	mineAttempts                 map[protocol.BlockPos]int
 	mineRecentBroken             map[protocol.BlockPos]uint64
 	mineAirRuntimeIDs            map[uint32]bool
+	mineFastBreak                bool
+	hasteLevel                   int32
 	mineLastFinishedPos          protocol.BlockPos
 	mineLastFinishedTick         uint64
 }
@@ -1201,6 +1203,9 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 						if b.mineRecentBroken != nil {
 							b.mineRecentBroken[*b.breakTarget] = b.tick
 						}
+						if b.breakTicks <= 3 {
+							b.mineFastBreak = true
+						}
 						b.mineLastFinishedPos = *b.breakTarget
 						b.mineLastFinishedTick = b.tick
 						b.breakTarget = nil
@@ -1245,10 +1250,10 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 					}
 				} else if b.isInMineBox(pos) {
 					// Genuine solid block placed or generated in the mine area
-					if b.mineAttempts != nil && b.mineAttempts[pos] >= 2 {
-						// Block failed to break, do not re-queue
-					} else {
-						alreadyQueued := false
+					if b.mineAttempts != nil {
+						delete(b.mineAttempts, pos)
+					}
+					alreadyQueued := false
 						if b.mineCurrent != nil && *b.mineCurrent == pos {
 							alreadyQueued = true
 						}
@@ -1263,11 +1268,10 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 								}
 							}
 						}
-						if !alreadyQueued {
-							b.mineQueue = append(b.mineQueue, pos)
-							b.mineTotal++
-							log.Printf("bebot: new block detected at (%d, %d, %d), added to mine queue\n", pos.X(), pos.Y(), pos.Z())
-						}
+					if !alreadyQueued {
+						b.mineQueue = append(b.mineQueue, pos)
+						b.mineTotal++
+						log.Printf("bebot: new block detected at (%d, %d, %d), added to mine queue\n", pos.X(), pos.Y(), pos.Z())
 					}
 				}
 			}
@@ -1347,6 +1351,20 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 			b.mu.Lock()
 			b.lastHealth = p.Health
 			b.mu.Unlock()
+		case *packet.MobEffect:
+			if p.EntityRuntimeID == b.entityID {
+				b.mu.Lock()
+				if p.EffectType == packet.EffectHaste || p.EffectType == packet.EffectConduitPower {
+					if p.Operation == packet.MobEffectAdd || p.Operation == packet.MobEffectModify {
+						b.hasteLevel = p.Amplifier + 1
+						log.Printf("bebot: haste effect active level=%d\n", b.hasteLevel)
+					} else if p.Operation == packet.MobEffectRemove {
+						b.hasteLevel = 0
+						log.Printf("bebot: haste effect removed\n")
+					}
+				}
+				b.mu.Unlock()
+			}
 		case *packet.HurtArmour:
 			log.Printf("bebot: armour damage cause=%d damage=%d slots=0x%x\n", p.Cause, p.Damage, p.ArmourSlots)
 		case *packet.Respawn:
@@ -2091,7 +2109,7 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 			} else {
 				if b.mineActive {
 					if b.mineAttempts != nil {
-						b.mineAttempts[*bt]++
+						b.mineAttempts[*bt] = 2 // Mark finished so air or unbreakable block is not retried
 					}
 					if b.mineRecentBroken != nil {
 						b.mineRecentBroken[*bt] = b.tick
@@ -3406,6 +3424,15 @@ func (b *Bot) getBreakDuration() int {
 	if b.gameMode == 1 || b.gameMode == 4 {
 		return 2
 	}
+	if b.hasteLevel >= 2 {
+		return 1
+	}
+	if b.hasteLevel == 1 {
+		return 2
+	}
+	if b.mineActive && b.mineFastBreak {
+		return 2
+	}
 	netID := b.heldItem.Stack.NetworkID
 	name := b.itemNamesByID[netID]
 
@@ -3427,6 +3454,9 @@ func (b *Bot) getBreakDuration() int {
 	case strings.Contains(name, "shovel"):
 		return 15
 	default:
+		if b.mineActive {
+			return 10
+		}
 		// Bare hands or unadapted tool: cobblestone/stone requires 150 ticks (7.5s).
 		// Use 160 ticks (8.0s) so it comfortably completes on the server without being rejected.
 		return 160
@@ -3490,6 +3520,7 @@ func (b *Bot) startMiningArea(ax, ay, az, bx, by, bz int32, ticksReq int, contin
 	b.mineFaceAccurate = faceAccurate
 	b.mineAttempts = make(map[protocol.BlockPos]int)
 	b.mineRecentBroken = make(map[protocol.BlockPos]uint64)
+	b.mineFastBreak = false
 	b.mu.Unlock()
 
 	modeStr := "top-down"
