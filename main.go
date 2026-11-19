@@ -659,6 +659,8 @@ type Bot struct {
 	local                        bool
 	itemNamesByID                map[int32]string
 	mineAttempts                 map[protocol.BlockPos]int
+	mineLastFinishedPos          protocol.BlockPos
+	mineLastFinishedTick         uint64
 }
 
 func (b *Bot) run(ctx context.Context) {
@@ -1180,8 +1182,12 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 			b.mu.Lock()
 			if b.mineActive {
 				pos := p.Position
-				if p.NewBlockRuntimeID == 0 {
-					if b.breakTarget != nil && pos == *b.breakTarget {
+				isCurrentBreak := b.breakTarget != nil && pos == *b.breakTarget
+				isRecentFinish := pos == b.mineLastFinishedPos && b.tick-b.mineLastFinishedTick < 40
+				if isCurrentBreak || isRecentFinish {
+					if isCurrentBreak {
+						b.mineLastFinishedPos = *b.breakTarget
+						b.mineLastFinishedTick = b.tick
 						b.breakTarget = nil
 						b.breakTicks = 0
 						b.mineCurrent = nil
@@ -2049,6 +2055,8 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 					if b.mineAttempts != nil {
 						b.mineAttempts[*bt]++
 					}
+					b.mineLastFinishedPos = *bt
+					b.mineLastFinishedTick = b.tick
 					b.mineCurrent = nil
 					b.mineCount++
 					if b.mineCount%25 == 0 || len(b.mineQueue) == 0 {
@@ -3509,49 +3517,7 @@ func (b *Bot) pickNextMineBlock() *protocol.BlockPos {
 		return nil
 	}
 
-	eyeY := b.pos.Y() + 1.62
-	maxReach := float32(5.0)
-	if b.gameMode == 1 || b.gameMode == 4 {
-		maxReach = 6.5
-	}
-
-	// 1. Search for the highest block in mineQueue that is vertically reachable from current standing height.
-	bestIdx := -1
-	var bestY int32 = -999999
-	var bestHDist float32 = math.MaxFloat32
-
-	for i, pos := range b.mineQueue {
-		if b.mineAttempts != nil && b.mineAttempts[pos] >= 3 {
-			continue
-		}
-		distY := float32(pos.Y()) + 0.5 - eyeY
-		// Can reach if vertical distance is within maxReach
-		if distY <= maxReach+1.0 && distY >= -maxReach {
-			if pos.Y() > bestY {
-				bestY = pos.Y()
-				bestIdx = i
-				dx := float32(pos.X()) + 0.5 - b.pos.X()
-				dz := float32(pos.Z()) + 0.5 - b.pos.Z()
-				bestHDist = dx*dx + dz*dz
-			} else if pos.Y() == bestY {
-				dx := float32(pos.X()) + 0.5 - b.pos.X()
-				dz := float32(pos.Z()) + 0.5 - b.pos.Z()
-				hDist := dx*dx + dz*dz
-				if hDist < bestHDist {
-					bestHDist = hDist
-					bestIdx = i
-				}
-			}
-		}
-	}
-
-	if bestIdx != -1 {
-		target := b.mineQueue[bestIdx]
-		b.mineQueue = append(b.mineQueue[:bestIdx], b.mineQueue[bestIdx+1:]...)
-		return &target
-	}
-
-	// 2. If no block is currently vertically reachable, pop the first in queue
+	// Follow natural serpentine queue order (top-down, sweeping 2 rows per time as it moves)
 	target := b.mineQueue[0]
 	b.mineQueue = b.mineQueue[1:]
 	return &target
