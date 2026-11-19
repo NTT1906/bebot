@@ -25,12 +25,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	connGoPath := filepath.Join(gopath, "pkg", "mod", "github.com", "sandertv", "gophertunnel@v1.61.0", "minecraft", "conn.go")
+	connGoPath := filepath.Join(gopath, "pkg", "mod", "github.com", "sandertv", "gophertunnel@v1.63.0", "minecraft", "conn.go")
 	fmt.Printf("Target file: %s\n", connGoPath)
 
 	content, err := os.ReadFile(connGoPath)
 	if err != nil {
-		fmt.Printf("Error reading file (is gophertunnel@v1.61.0 downloaded?): %v\n", err)
+		fmt.Printf("Error reading file (is gophertunnel@v1.63.0 downloaded?): %v\n", err)
 		os.Exit(1)
 	}
 

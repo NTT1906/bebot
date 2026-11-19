@@ -167,7 +167,7 @@ func findTextureFile(folder, texture string) (string, error) {
 		if err != nil || d.IsDir() {
 			return nil
 		}
-		if strings.ToLower(path) == strings.ToLower(filepath.Join(folder, texture)) {
+		if strings.EqualFold(path, filepath.Join(folder, texture)) {
 			found = path
 			return fs.SkipAll
 		}
