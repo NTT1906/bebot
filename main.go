@@ -169,7 +169,7 @@ func main() {
 	cfg.Skin = skinCfg
 	log.Printf("bebot: skin config: type=%s path=%s skin=%s override=%v\n", cfg.Skin.Type, cfg.Skin.Path, cfg.Skin.Skin, overrideAppearanceOn(cfg.Skin))
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	source, err := loadAuthSource(*authCachePath)
 	if err != nil {
@@ -550,6 +550,16 @@ type Bot struct {
 	skinPath                     string
 	reconnectDelay               time.Duration
 	xblCache                     *auth.XBLTokenCache
+	mineQueue                    []protocol.BlockPos
+	mineTotal                    int
+	mineCount                    int
+	mineActive                   bool
+	mineCurrent                  *protocol.BlockPos
+	mineStuckTicks               int
+	mineTicksReq                 int
+	mineBoxMin                   protocol.BlockPos
+	mineBoxMax                   protocol.BlockPos
+	mineContinuous               bool
 }
 
 func (b *Bot) run(ctx context.Context) {
@@ -594,7 +604,7 @@ func pingServer(ctx context.Context, address string) (serverPong, error) {
 	defer cancel()
 	pongBytes, err := raknet.PingContext(pingCtx, address)
 	if err != nil {
-		return serverPong{}, fmt.Errorf("ping %s: %w", address, err)
+		return serverPong{}, err
 	}
 	return parseServerPong(pongBytes)
 }
@@ -655,6 +665,7 @@ func (b *Bot) connect(ctx context.Context) error {
 		log.Printf("bebot: loaded skin type=%s path=%s (%dx%d)\n", b.cfg.Skin.Type, b.cfg.Skin.Path, clientData.SkinImageWidth, clientData.SkinImageHeight)
 	}
 
+
 	logger := slog.New(slog.NewTextHandler(log.Writer(), &slog.HandlerOptions{Level: slog.LevelDebug}))
 	d := minecraft.Dialer{
 		ErrorLog:                   logger,
@@ -670,17 +681,21 @@ func (b *Bot) connect(ctx context.Context) error {
 			return false
 		},
 	}
-	// Stage 3: RakNet handshake + login handshake + resource packs. This is the
+	// Stage 3: RakNet/NetherNet handshake + login handshake + resource packs. This is the
 	// phase most likely to stall on a freshly started host, so surface it.
-	log.Println("bebot: stage: raknet handshake + login...")
+	log.Println("bebot: stage: connecting via RakNet...")
 	dialCtx, cancelDial := context.WithTimeout(ctx, 5*time.Minute)
-	dialCtx = auth.WithXBLTokenCache(dialCtx, b.xblCache)
+	if b.source != nil && b.xblCache != nil {
+		dialCtx = auth.WithXBLTokenCache(dialCtx, b.xblCache)
+	}
 	defer cancelDial()
 	c, err := d.DialContext(dialCtx, "raknet", address)
 	if err != nil {
 		return fmt.Errorf("dial: %s", explainError(err))
 	}
-	saveXBLCache("xsts_cache.json", b.xblCache)
+	if b.source != nil && b.xblCache != nil {
+		saveXBLCache("xsts_cache.json", b.xblCache)
+	}
 	log.Println("bebot: stage: login complete; finishing loading screen...")
 	b.mu.Lock()
 	b.conn = c
@@ -741,6 +756,10 @@ func (b *Bot) connect(ctx context.Context) error {
 	b.itemRequestID = -859
 	b.stackPending = nil
 	b.containerOpen = make(chan struct{}, 1)
+	b.mineActive = false
+	b.mineQueue = nil
+	b.mineCurrent = nil
+	b.mineStuckTicks = 0
 	game := c.GameData()
 	b.serverAuthoritativeInventory = game.ServerAuthoritativeInventory
 	b.worldTime = game.Time
@@ -806,6 +825,48 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 			return fmt.Errorf("server requested transfer to %s:%d; reconnecting to configured target", p.Address, p.Port)
 		case *packet.Disconnect:
 			log.Printf("bebot: server disconnected: %q\n", p.Message)
+		case *packet.UpdateBlock:
+			b.mu.Lock()
+			if b.mineActive {
+				pos := p.Position
+				if b.breakTarget != nil && pos == *b.breakTarget {
+					b.breakTarget = nil
+					b.breakTicks = 0
+					b.mineCurrent = nil
+					b.mineCount++
+					if b.mineCount%25 == 0 || len(b.mineQueue) == 0 {
+						log.Printf("bebot: block broken (%d mined)\n", b.mineCount)
+					}
+				} else if b.isInMineBox(pos) {
+					if p.NewBlockRuntimeID != 0 {
+						alreadyQueued := false
+						if b.mineCurrent != nil && *b.mineCurrent == pos {
+							alreadyQueued = true
+						} else {
+							for _, q := range b.mineQueue {
+								if q == pos {
+									alreadyQueued = true
+									break
+								}
+							}
+						}
+						if !alreadyQueued {
+							b.mineQueue = append(b.mineQueue, pos)
+							b.mineTotal++
+							log.Printf("bebot: new block detected at (%d, %d, %d), added to mine queue\n", pos.X(), pos.Y(), pos.Z())
+						}
+					} else {
+						filtered := make([]protocol.BlockPos, 0, len(b.mineQueue))
+						for _, q := range b.mineQueue {
+							if q != pos {
+								filtered = append(filtered, q)
+							}
+						}
+						b.mineQueue = filtered
+					}
+				}
+			}
+			b.mu.Unlock()
 		case *packet.CommandOutput:
 			msgs := make([]string, 0, len(p.OutputMessages))
 			var capKey string
@@ -1207,6 +1268,82 @@ func (b *Bot) handleRespawn(c *minecraft.Conn, p *packet.Respawn) {
 }
 
 func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
+	b.mu.Lock()
+	if b.mineActive {
+		if b.mineCurrent == nil {
+			if len(b.mineQueue) == 0 {
+				if !b.mineContinuous {
+					b.mineActive = false
+					b.mode = modeIdle
+					count := b.mineCount
+					b.mu.Unlock()
+					b.reply(fmt.Sprintf("Area mining complete! Mined %d blocks.", count))
+					b.mu.Lock()
+				} else {
+					if b.mode == modeMoving {
+						b.mode = modeIdle
+					}
+				}
+			} else {
+				targetPos := b.mineQueue[0]
+				b.mineQueue = b.mineQueue[1:]
+				b.mineCurrent = &targetPos
+				b.mineStuckTicks = 0
+			}
+		}
+
+		if b.mineCurrent != nil {
+			cur := *b.mineCurrent
+			center := mgl32.Vec3{float32(cur.X()) + 0.5, float32(cur.Y()) + 0.5, float32(cur.Z()) + 0.5}
+			eyePos := mgl32.Vec3{b.pos.X(), b.pos.Y() + 1.62, b.pos.Z()}
+			diff := center.Sub(eyePos)
+			dist := float32(math.Sqrt(float64(diff.Dot(diff))))
+			hDiffX := center.X() - b.pos.X()
+			hDiffZ := center.Z() - b.pos.Z()
+			hDist := float32(math.Sqrt(float64(hDiffX*hDiffX + hDiffZ*hDiffZ)))
+
+			reachLimit := float32(4.5)
+			if b.gameMode == 1 || b.gameMode == 4 {
+				reachLimit = 6.0
+			}
+
+			if dist > reachLimit || hDist > reachLimit-0.5 {
+				b.cfg.Target.X = center.X()
+				b.cfg.Target.Y = float32(cur.Y())
+				b.cfg.Target.Z = center.Z()
+				b.mode = modeMoving
+				b.mineStuckTicks++
+				if b.mineStuckTicks > 120 {
+					log.Printf("bebot: skipping unreachable block at %d %d %d\n", cur.X(), cur.Y(), cur.Z())
+					b.mineCurrent = nil
+					b.mineStuckTicks = 0
+				}
+			} else {
+				if b.mode == modeMoving {
+					b.mode = modeIdle
+				}
+				yaw := float32(math.Atan2(float64(-diff.X()), float64(diff.Z())) * 180 / math.Pi)
+				if yaw < 0 {
+					yaw += 360
+				}
+				hLen := math.Sqrt(float64(diff.X()*diff.X() + diff.Z()*diff.Z()))
+				pitch := float32(-math.Atan2(float64(diff.Y()), hLen) * 180 / math.Pi)
+				b.idleYaw = yaw
+				b.idlePitch = pitch
+				b.facingYaw = yaw
+				b.facingPitch = pitch
+
+				if b.breakTarget == nil {
+					b.breakTarget = b.mineCurrent
+					b.breakTicks = 0
+					b.breakAnimation = true
+					b.breakRepeat = false
+				}
+			}
+		}
+	}
+	b.mu.Unlock()
+
 	target := mgl32.Vec3{b.cfg.Target.X, b.cfg.Target.Y, b.cfg.Target.Z}
 	var targetPlayer player
 	targetMoved := true
@@ -1482,7 +1619,14 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 			actions = append(actions, protocol.PlayerBlockAction{Action: int32(action), BlockPos: *bt, Face: 1})
 		}
 
-		if ticks >= 40 {
+		maxTicks := 40
+		if b.mineActive && b.mineTicksReq > 0 {
+			maxTicks = b.mineTicksReq
+		} else if b.gameMode == 1 || b.gameMode == 4 {
+			maxTicks = 2
+		}
+
+		if ticks >= maxTicks {
 			actions = append(actions, protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionPredictDestroyBlock), BlockPos: *bt, Face: 1})
 			_ = c.WritePacket(&packet.InventoryTransaction{
 				TransactionData: &protocol.UseItemTransactionData{
@@ -1493,12 +1637,28 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 					HeldItem:      b.heldItem,
 				},
 			})
+			if b.gameMode == 1 || b.gameMode == 4 {
+				_ = c.WritePacket(&packet.PlayerAction{
+					EntityRuntimeID: b.entityID,
+					ActionType:      protocol.PlayerActionCreativePlayerDestroyBlock,
+					BlockPosition:   *bt,
+					ResultPosition:  *bt,
+					BlockFace:       1,
+				})
+			}
 			b.mu.Lock()
 			if b.breakRepeat {
 				b.breakTicks = 0
 			} else {
 				b.breakTarget = nil
 				b.breakTicks = 0
+				if b.mineActive {
+					b.mineCurrent = nil
+					b.mineCount++
+					if b.mineCount%25 == 0 || len(b.mineQueue) == 0 {
+						log.Printf("bebot: mined %d/%d blocks\n", b.mineCount, b.mineTotal)
+					}
+				}
 			}
 			b.mu.Unlock()
 		} else {
@@ -1512,9 +1672,11 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 		auth.BlockActions = protocol.Option(actions)
 	}
 	_ = c.WritePacket(&auth)
-	if mineSwing {
+	if mineSwing || (bt != nil && b.mineActive && b.breakTicks%4 == 0) {
 		_ = c.WritePacket(&packet.Animate{ActionType: packet.AnimateActionSwingArm, EntityRuntimeID: b.entityID, SwingSource: packet.AnimateSwingSourceMine})
-		log.Printf("bebot: break input action=%d target=%d %d %d\n", protocol.PlayerActionStartBreak, bt.X(), bt.Y(), bt.Z())
+		if mineSwing {
+			log.Printf("bebot: break input action=%d target=%d %d %d\n", protocol.PlayerActionStartBreak, bt.X(), bt.Y(), bt.Z())
+		}
 	}
 	if sneakStart || sneakStop {
 		// Debug: log.Printf("bebot: sent sneak %s tick=%d desired=%v target=%v up=%v moveZ=%v delta=%v flags=%s\n",
@@ -2008,9 +2170,32 @@ func (b *Bot) command(line string) {
 		b.spawnPos = protocol.BlockPos{x, y, z}
 		b.interactBlock(b.spawnPos)
 		log.Printf("bebot: sleep/spawn checkpoint requested at %d %d %d\n", x, y, z)
-	case "break", "breakat", "breakcoord", "mine", "mineat":
+	case "break", "breakat", "breakcoord", "mine", "mineat", "minearea", "minespace", "breakarea", "breakspace", "mineloop", "minefarm":
+		continuous := strings.EqualFold(p[0], "mineloop") || strings.EqualFold(p[0], "minefarm")
+		if len(p) >= 7 && len(p) <= 9 {
+			var ax, ay, az, bx, by, bz int32
+			if _, err := fmt.Sscanf(strings.Join(p[1:7], " "), "%d %d %d %d %d %d", &ax, &ay, &az, &bx, &by, &bz); err != nil {
+				b.reply("Usage: mine <ax> <ay> <az> <bx> <by> <bz> [ticksPerBlock] [continuous: true|false]")
+				return
+			}
+			ticks := 0
+			if len(p) >= 8 {
+				if t, err := strconv.Atoi(p[7]); err == nil && t >= 0 {
+					ticks = t
+				} else if bVal, err := strconv.ParseBool(p[7]); err == nil {
+					continuous = bVal
+				}
+			}
+			if len(p) == 9 {
+				if bVal, err := strconv.ParseBool(p[8]); err == nil {
+					continuous = bVal
+				}
+			}
+			b.startMiningArea(ax, ay, az, bx, by, bz, ticks, continuous)
+			return
+		}
 		if len(p) < 5 || len(p) > 6 {
-			b.reply("Usage: break <x> <y> <z> <animation: true|false> [repeat: true|false]")
+			b.reply("Usage: break <x> <y> <z> <animation: true|false> [repeat: true|false] OR mine <ax> <ay> <az> <bx> <by> <bz> [ticks]")
 			return
 		}
 		var x, y, z int32
@@ -2032,7 +2217,8 @@ func (b *Bot) command(line string) {
 			}
 		}
 		b.startBreaking(protocol.BlockPos{x, y, z}, animate, repeat)
-	case "stopbreak", "cancelbreak", "abortbreak":
+	case "stopbreak", "cancelbreak", "abortbreak", "stopmine", "cancelmine":
+		b.stopMiningArea()
 		b.stopBreaking()
 	case "dropall":
 		b.dropSlots(0, len(b.inventory), 0)
@@ -2109,6 +2295,8 @@ func (b *Bot) command(line string) {
 	case "coords", "coord", "coordinates", "playercoords", "playerpos", "pos", "positions", "where":
 		b.coords()
 	case "idle", "stop":
+		b.stopMiningArea()
+		b.stopBreaking()
 		b.mode = modeIdle
 		b.followTarget = ""
 		b.mimicTarget = ""
@@ -2756,6 +2944,84 @@ func (b *Bot) stopBreaking() {
 	log.Printf("bebot: stopped breaking block at %d %d %d\n", pos.X(), pos.Y(), pos.Z())
 }
 
+func (b *Bot) isInMineBox(pos protocol.BlockPos) bool {
+	return pos.X() >= b.mineBoxMin.X() && pos.X() <= b.mineBoxMax.X() &&
+		pos.Y() >= b.mineBoxMin.Y() && pos.Y() <= b.mineBoxMax.Y() &&
+		pos.Z() >= b.mineBoxMin.Z() && pos.Z() <= b.mineBoxMax.Z()
+}
+
+func (b *Bot) startMiningArea(ax, ay, az, bx, by, bz int32, ticksReq int, continuous bool) {
+	minX, maxX := ax, bx
+	if minX > maxX {
+		minX, maxX = maxX, minX
+	}
+	minY, maxY := ay, by
+	if minY > maxY {
+		minY, maxY = maxY, minY
+	}
+	minZ, maxZ := az, bz
+	if minZ > maxZ {
+		minZ, maxZ = maxZ, minZ
+	}
+
+	total := int((maxX - minX + 1) * (maxY - minY + 1) * (maxZ - minZ + 1))
+	if total <= 0 || total > 100000 {
+		b.reply(fmt.Sprintf("Invalid area size: %d blocks (limit 1-100,000).", total))
+		return
+	}
+
+	queue := make([]protocol.BlockPos, 0, total)
+	for y := maxY; y >= minY; y-- {
+		forward := true
+		for x := minX; x <= maxX; x++ {
+			if forward {
+				for z := minZ; z <= maxZ; z++ {
+					queue = append(queue, protocol.BlockPos{x, y, z})
+				}
+			} else {
+				for z := maxZ; z >= minZ; z-- {
+					queue = append(queue, protocol.BlockPos{x, y, z})
+				}
+			}
+			forward = !forward
+		}
+	}
+
+	b.mu.Lock()
+	b.mineQueue = queue
+	b.mineTotal = total
+	b.mineCount = 0
+	b.mineActive = true
+	b.mineCurrent = nil
+	b.mineStuckTicks = 0
+	b.mineTicksReq = ticksReq
+	b.mineBoxMin = protocol.BlockPos{minX, minY, minZ}
+	b.mineBoxMax = protocol.BlockPos{maxX, maxY, maxZ}
+	b.mineContinuous = continuous
+	b.mu.Unlock()
+
+	modeStr := "top-down"
+	if continuous {
+		modeStr = "continuous/generator mode"
+	}
+	b.reply(fmt.Sprintf("Mining space (%d, %d, %d) to (%d, %d, %d): %d blocks queued (%s).", minX, minY, minZ, maxX, maxY, maxZ, total, modeStr))
+}
+
+func (b *Bot) stopMiningArea() {
+	b.mu.Lock()
+	if !b.mineActive && len(b.mineQueue) == 0 {
+		b.mu.Unlock()
+		return
+	}
+	b.mineActive = false
+	b.mineContinuous = false
+	b.mineQueue = nil
+	b.mineCurrent = nil
+	b.mineStuckTicks = 0
+	b.mu.Unlock()
+	b.reply("Stopped area mining.")
+}
+
 func (b *Bot) startBreakingFront(animate bool, repeat bool) {
 	// Bedrock yaw points forward as (-sin(yaw), cos(yaw)).
 	yaw := b.facingYaw
@@ -2796,7 +3062,8 @@ func (b *Bot) help() {
 		"idle / stop - stop movement (keeps current facing)",
 		"idle reset - idle and reset facing to default",
 		"break <x y z> <animation: true|false> - break a block",
-		"stopbreak - stop breaking",
+		"mine <ax ay az> <bx by bz> [ticks] - mine all blocks in a space (top-down)",
+		"stopmine / stopbreak - stop mining",
 		"hotbar <0-9> - select a hotbar slot",
 		"dropall - drop all inventory items",
 		"drop <slot> [amount] - drop items from a slot",
