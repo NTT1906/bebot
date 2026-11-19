@@ -1579,35 +1579,39 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 					}
 				}
 			} else {
-				targetPos := b.mineQueue[0]
-				b.mineQueue = b.mineQueue[1:]
-				b.mineCurrent = &targetPos
+				b.mineCurrent = b.pickNextMineBlock()
 				b.mineStuckTicks = 0
 			}
 		}
 
 		if b.mineCurrent != nil {
 			cur := *b.mineCurrent
-			center := mgl32.Vec3{float32(cur.X()) + 0.5, float32(cur.Y()) + 0.5, float32(cur.Z()) + 0.5}
 			eyePos := mgl32.Vec3{b.pos.X(), b.pos.Y() + 1.62, b.pos.Z()}
-			diff := center.Sub(eyePos)
-			dist := float32(math.Sqrt(float64(diff.Dot(diff))))
-			hDiffX := center.X() - b.pos.X()
-			hDiffZ := center.Z() - b.pos.Z()
-			hDist := float32(math.Sqrt(float64(hDiffX*hDiffX + hDiffZ*hDiffZ)))
 
-			reachLimit := float32(4.5)
+			// Calculate distance to closest point on target block bounding box
+			closestX := float32(math.Max(float64(cur.X()), math.Min(float64(eyePos.X()), float64(cur.X()+1))))
+			closestY := float32(math.Max(float64(cur.Y()), math.Min(float64(eyePos.Y()), float64(cur.Y()+1))))
+			closestZ := float32(math.Max(float64(cur.Z()), math.Min(float64(eyePos.Z()), float64(cur.Z()+1))))
+			diff := mgl32.Vec3{closestX - eyePos.X(), closestY - eyePos.Y(), closestZ - eyePos.Z()}
+			dist := float32(math.Sqrt(float64(diff.Dot(diff))))
+
+			reachLimit := float32(5.0)
 			if b.gameMode == 1 || b.gameMode == 4 {
-				reachLimit = 6.0
+				reachLimit = 6.5
 			}
 
-			if dist > reachLimit || hDist > reachLimit-0.5 {
-				b.cfg.Target.X = center.X()
+			// If the block is above eye level and slightly out of reach, jump to reach it
+			if dist > reachLimit && closestY > eyePos.Y() && dist <= reachLimit+1.25 {
+				jump = true
+			}
+
+			if dist > reachLimit {
+				b.cfg.Target.X = float32(cur.X()) + 0.5
 				b.cfg.Target.Y = float32(cur.Y())
-				b.cfg.Target.Z = center.Z()
+				b.cfg.Target.Z = float32(cur.Z()) + 0.5
 				b.mode = modeMoving
 				b.mineStuckTicks++
-				if b.mineStuckTicks > 120 {
+				if b.mineStuckTicks > 40 {
 					log.Printf("bebot: skipping unreachable block at %d %d %d\n", cur.X(), cur.Y(), cur.Z())
 					b.mineCurrent = nil
 					b.mineStuckTicks = 0
@@ -1616,12 +1620,15 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 				if b.mode == modeMoving {
 					b.mode = modeIdle
 				}
-				yaw := float32(math.Atan2(float64(-diff.X()), float64(diff.Z())) * 180 / math.Pi)
+				b.mineStuckTicks = 0
+
+				centerDiff := mgl32.Vec3{float32(cur.X()) + 0.5 - eyePos.X(), float32(cur.Y()) + 0.5 - eyePos.Y(), float32(cur.Z()) + 0.5 - eyePos.Z()}
+				yaw := float32(math.Atan2(float64(-centerDiff.X()), float64(centerDiff.Z())) * 180 / math.Pi)
 				if yaw < 0 {
 					yaw += 360
 				}
-				hLen := math.Sqrt(float64(diff.X()*diff.X() + diff.Z()*diff.Z()))
-				pitch := float32(-math.Atan2(float64(diff.Y()), hLen) * 180 / math.Pi)
+				hLen := math.Sqrt(float64(centerDiff.X()*centerDiff.X() + centerDiff.Z()*centerDiff.Z()))
+				pitch := float32(-math.Atan2(float64(centerDiff.Y()), hLen) * 180 / math.Pi)
 				b.idleYaw = yaw
 				b.idlePitch = pitch
 				b.facingYaw = yaw
@@ -1873,8 +1880,6 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 		}
 	}
 	b.facingPitch = pitch
-	auth := packet.PlayerAuthInput{Position: b.pos, Delta: b.pos.Sub(b.last), Yaw: yaw, HeadYaw: yaw, Pitch: pitch, MoveVector: mgl32.Vec2{0, moveZ}, AnalogueMoveVector: mgl32.Vec2{0, moveZ}, RawMoveVector: mgl32.Vec2{0, moveZ}, InputData: flags, InputMode: packet.InputModeGamePad, PlayMode: packet.PlayModeScreen, InteractionModel: packet.InteractionModelTouch, Tick: b.tick}
-	mineSwing := false
 
 	b.mu.Lock()
 	bt := b.breakTarget
@@ -1885,12 +1890,39 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 	}
 	b.mu.Unlock()
 
+	// If actively breaking a block, ensure crosshair (Yaw & Pitch) aims directly at the block
+	if bt != nil {
+		eyePos := b.pos.Add(mgl32.Vec3{0, 1.62, 0})
+		tX := float32(bt.X()) + 0.5
+		tY := float32(bt.Y()) + 0.5
+		tZ := float32(bt.Z()) + 0.5
+		lookDX := tX - eyePos.X()
+		lookDY := tY - eyePos.Y()
+		lookDZ := tZ - eyePos.Z()
+		hLen := math.Sqrt(float64(lookDX*lookDX + lookDZ*lookDZ))
+		if hLen > .001 {
+			yaw = float32(math.Atan2(float64(-lookDX), float64(lookDZ)) * 180 / math.Pi)
+			if yaw < 0 {
+				yaw += 360
+			}
+		}
+		pitch = float32(-math.Atan2(float64(lookDY), hLen) * 180 / math.Pi)
+		b.facingYaw = yaw
+		b.facingPitch = pitch
+	}
+
+	auth := packet.PlayerAuthInput{Position: b.pos, Delta: b.pos.Sub(b.last), Yaw: yaw, HeadYaw: yaw, Pitch: pitch, MoveVector: mgl32.Vec2{0, moveZ}, AnalogueMoveVector: mgl32.Vec2{0, moveZ}, RawMoveVector: mgl32.Vec2{0, moveZ}, InputData: flags, InputMode: packet.InputModeGamePad, PlayMode: packet.PlayModeScreen, InteractionModel: packet.InteractionModelTouch, Tick: b.tick}
+	mineSwing := false
+
 	var actions []protocol.PlayerBlockAction
+	eyePos := b.pos.Add(mgl32.Vec3{0, 1.62, 0})
 	if abortBt != nil {
-		actions = append(actions, protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionAbortBreak), BlockPos: *abortBt, Face: 1})
+		abortFace := determineBlockFace(eyePos, *abortBt)
+		actions = append(actions, protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionAbortBreak), BlockPos: *abortBt, Face: abortFace})
 	}
 
 	if bt != nil {
+		btFace := determineBlockFace(eyePos, *bt)
 		action := protocol.PlayerActionContinueDestroyBlock
 		if actions == nil {
 			actions = make([]protocol.PlayerBlockAction, 0, 2)
@@ -1906,11 +1938,11 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 			mineSwing = b.breakAnimation
 			b.mu.Unlock()
 			actions = append(actions,
-				protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionStartBreak), BlockPos: *bt, Face: 1},
+				protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionStartBreak), BlockPos: *bt, Face: btFace},
 			)
 		}
 		if len(actions) == 0 || (abortBt != nil && len(actions) == 1) {
-			actions = append(actions, protocol.PlayerBlockAction{Action: int32(action), BlockPos: *bt, Face: 1})
+			actions = append(actions, protocol.PlayerBlockAction{Action: int32(action), BlockPos: *bt, Face: btFace})
 		}
 
 		maxTicks := 40
@@ -1921,12 +1953,12 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 		}
 
 		if ticks >= maxTicks {
-			actions = append(actions, protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionPredictDestroyBlock), BlockPos: *bt, Face: 1})
+			actions = append(actions, protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionPredictDestroyBlock), BlockPos: *bt, Face: btFace})
 			_ = c.WritePacket(&packet.InventoryTransaction{
 				TransactionData: &protocol.UseItemTransactionData{
 					ActionType:    protocol.UseItemActionBreakBlock,
 					BlockPosition: *bt,
-					BlockFace:     1,
+					BlockFace:     btFace,
 					HotBarSlot:    int32(b.hotbarSlot),
 					HeldItem:      b.heldItem,
 				},
@@ -1937,7 +1969,7 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 					ActionType:      protocol.PlayerActionCreativePlayerDestroyBlock,
 					BlockPosition:   *bt,
 					ResultPosition:  *bt,
-					BlockFace:       1,
+					BlockFace:       btFace,
 				})
 			}
 			b.mu.Lock()
@@ -3190,12 +3222,13 @@ func (b *Bot) startBreaking(pos protocol.BlockPos, animate bool, repeat bool) {
 			log.Println("bebot: cannot break block: not connected")
 			return
 		}
+		face := determineBlockFace(b.pos.Add(mgl32.Vec3{0, 1.62, 0}), pos)
 		if err := c.WritePacket(&packet.PlayerAction{
 			EntityRuntimeID: entityID,
 			ActionType:      protocol.PlayerActionCreativePlayerDestroyBlock,
 			BlockPosition:   pos,
 			ResultPosition:  pos,
-			BlockFace:       1,
+			BlockFace:       face,
 		}); err != nil {
 			log.Println("bebot: creative break failed:", explainError(err))
 		}
@@ -3314,6 +3347,83 @@ func (b *Bot) stopMiningArea() {
 	b.mineStuckTicks = 0
 	b.mu.Unlock()
 	b.reply("Stopped area mining.")
+}
+
+func determineBlockFace(eyePos mgl32.Vec3, blockPos protocol.BlockPos) int32 {
+	dx := float32(blockPos.X()) + 0.5 - eyePos.X()
+	dy := float32(blockPos.Y()) + 0.5 - eyePos.Y()
+	dz := float32(blockPos.Z()) + 0.5 - eyePos.Z()
+
+	absX := float32(math.Abs(float64(dx)))
+	absY := float32(math.Abs(float64(dy)))
+	absZ := float32(math.Abs(float64(dz)))
+
+	if absY >= absX && absY >= absZ {
+		if dy > 0 {
+			return 0 // Bottom face (-Y): player is below the block looking up
+		}
+		return 1 // Top face (+Y): player is above the block looking down
+	} else if absX >= absZ {
+		if dx > 0 {
+			return 4 // West face (-X)
+		}
+		return 5 // East face (+X)
+	} else {
+		if dz > 0 {
+			return 2 // North face (-Z)
+		}
+		return 3 // South face (+Z)
+	}
+}
+
+func (b *Bot) pickNextMineBlock() *protocol.BlockPos {
+	if len(b.mineQueue) == 0 {
+		return nil
+	}
+
+	eyeY := b.pos.Y() + 1.62
+	maxReach := float32(5.0)
+	if b.gameMode == 1 || b.gameMode == 4 {
+		maxReach = 6.5
+	}
+
+	// 1. Search for the highest block in mineQueue that is vertically reachable from current standing height.
+	bestIdx := -1
+	var bestY int32 = -999999
+	var bestHDist float32 = math.MaxFloat32
+
+	for i, pos := range b.mineQueue {
+		distY := float32(pos.Y()) + 0.5 - eyeY
+		// Can reach if vertical distance is within maxReach
+		if distY <= maxReach+1.0 && distY >= -maxReach {
+			if pos.Y() > bestY {
+				bestY = pos.Y()
+				bestIdx = i
+				dx := float32(pos.X()) + 0.5 - b.pos.X()
+				dz := float32(pos.Z()) + 0.5 - b.pos.Z()
+				bestHDist = dx*dx + dz*dz
+			} else if pos.Y() == bestY {
+				dx := float32(pos.X()) + 0.5 - b.pos.X()
+				dz := float32(pos.Z()) + 0.5 - b.pos.Z()
+				hDist := dx*dx + dz*dz
+				if hDist < bestHDist {
+					bestHDist = hDist
+					bestIdx = i
+				}
+			}
+		}
+	}
+
+	if bestIdx != -1 {
+		target := b.mineQueue[bestIdx]
+		b.mineQueue = append(b.mineQueue[:bestIdx], b.mineQueue[bestIdx+1:]...)
+		return &target
+	}
+
+	// 2. If no block is currently vertically reachable, pop the first in queue
+	target := b.mineQueue[0]
+	b.mineQueue = b.mineQueue[1:]
+	return &target
 }
 
 func (b *Bot) startBreakingFront(animate bool, repeat bool) {
