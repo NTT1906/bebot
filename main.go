@@ -12,6 +12,7 @@ import (
 	"log"
 	"log/slog"
 	"math"
+	"math/rand/v2"
 	"net"
 	"os"
 	"os/signal"
@@ -25,6 +26,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/df-mc/go-nethernet"
+	"github.com/df-mc/go-nethernet/discovery"
 	"github.com/df-mc/go-xsapi/v2/xal/sisu"
 	"github.com/df-mc/go-xsapi/v2/xal/xasd"
 	"github.com/go-gl/mathgl/mgl32"
@@ -131,11 +134,26 @@ func saveXBLCache(path string, cache *auth.XBLTokenCache) {
 	}
 }
 
+func isFlagPassed(name string) bool {
+	found := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
+}
+
 func main() {
 	configPath := flag.String("config", "config.json", "bot configuration file")
 	authCachePath := flag.String("auth-cache", "token_cache.json", "path used to persist the Microsoft session")
 	debugFlag := flag.Bool("debug", false, "print packet-level handshake diagnostics")
 	skinFile := flag.String("skin", "skin.json", "bot skin configuration file")
+	localFlag := flag.Bool("local", false, "connect to a local/LAN singleplayer world (127.0.0.1)")
+	hostFlag := flag.String("host", "", "override server host (e.g. 127.0.0.1)")
+	portFlag := flag.Int("port", 0, "override server port (e.g. 19132)")
+	offlineFlag := flag.Bool("offline", false, "connect without Microsoft authentication (LAN mode)")
+	botNameFlag := flag.String("name", "Bebot", "bot display name (used in offline/LAN mode)")
 	flag.Parse()
 
 	// Initialize file logger
@@ -147,6 +165,23 @@ func main() {
 	if err != nil {
 		log.Println("bebot:", err)
 		return
+	}
+	if *localFlag {
+		if *hostFlag == "" {
+			*hostFlag = "127.0.0.1"
+		}
+		if *portFlag == 0 && cfg.Server.Port == 0 {
+			cfg.Server.Port = 19132
+		}
+		if !isFlagPassed("offline") {
+			*offlineFlag = true
+		}
+	}
+	if *hostFlag != "" {
+		cfg.Server.Host = *hostFlag
+	}
+	if *portFlag != 0 {
+		cfg.Server.Port = *portFlag
 	}
 	if cfg.Server.Port == 0 {
 		cfg.Server.Port = 19132
@@ -169,14 +204,37 @@ func main() {
 	cfg.Skin = skinCfg
 	log.Printf("bebot: skin config: type=%s path=%s skin=%s override=%v\n", cfg.Skin.Type, cfg.Skin.Path, cfg.Skin.Skin, overrideAppearanceOn(cfg.Skin))
 
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	source, err := loadAuthSource(*authCachePath)
-	if err != nil {
-		log.Println("bebot: authentication failed:", err)
-		return
+
+	var source oauth2.TokenSource
+	var xblCache *auth.XBLTokenCache
+	if !*offlineFlag {
+		var err error
+		source, err = loadAuthSource(*authCachePath)
+		if err != nil {
+			log.Println("bebot: authentication failed:", err)
+			return
+		}
+		xblCache = loadXBLCache("xsts_cache.json", source)
+	} else {
+		log.Printf("bebot: running in offline/LAN mode as %q (no Microsoft authentication)\n", *botNameFlag)
 	}
-	bot := &Bot{cfg: cfg, source: source, players: make(map[string]player), entities: make(map[int64]string), mode: modeIdle, waypoints: loadWaypoints(waypointsFile), configPath: *configPath, skinPath: *skinFile, xblCache: loadXBLCache("xsts_cache.json", source)}
+
+	bot := &Bot{
+		cfg:         cfg,
+		source:      source,
+		offline:     *offlineFlag,
+		botName:     *botNameFlag,
+		local:       *localFlag,
+		players:     make(map[string]player),
+		entities:    make(map[int64]string),
+		mode:        modeIdle,
+		waypoints:   loadWaypoints(waypointsFile),
+		configPath:  *configPath,
+		skinPath:    *skinFile,
+		xblCache:    xblCache,
+	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			log.Printf("bebot: FATAL panic: %v\n%s\n", recovered, debug.Stack())
@@ -560,6 +618,9 @@ type Bot struct {
 	mineBoxMin                   protocol.BlockPos
 	mineBoxMax                   protocol.BlockPos
 	mineContinuous               bool
+	offline                      bool
+	botName                      string
+	local                        bool
 }
 
 func (b *Bot) run(ctx context.Context) {
@@ -596,24 +657,243 @@ func (b *Bot) run(ctx context.Context) {
 }
 
 // pingServer pings the given Bedrock address with a short per-attempt deadline
-// and parses the RakNet pong. The caller's context is unbounded (signal-derived),
-// and go-raknet only assigns a connection deadline when ctx.Deadline() exists,
-// so without a per-call timeout a silent server would hang PingContext forever.
-func pingServer(ctx context.Context, address string) (serverPong, error) {
-	pingCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-	defer cancel()
-	pongBytes, err := raknet.PingContext(pingCtx, address)
-	if err != nil {
-		return serverPong{}, err
+// and parses the RakNet or NetherNet pong.
+func pingServer(ctx context.Context, address string) (serverPong, string, string, error) {
+	// 1. Try RakNet first (with a short 3s timeout)
+	rakCtx, rakCancel := context.WithTimeout(ctx, 3*time.Second)
+	defer rakCancel()
+	pongBytes, rakErr := raknet.PingContext(rakCtx, address)
+	if rakErr == nil {
+		if p, err := parseServerPong(pongBytes); err == nil {
+			return p, "raknet", address, nil
+		}
 	}
-	return parseServerPong(pongBytes)
+
+	// 2. If RakNet fails/times out, try NetherNet (HTTPS / HTTP)
+	netherCtx, netherCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer netherCancel()
+	n := minecraft.NetherNet{}
+	for _, scheme := range []string{"https://", "http://"} {
+		target := scheme + address
+		pongBytes, nErr := n.PingContext(netherCtx, target)
+		if nErr == nil {
+			if p, err := parseServerPong(pongBytes); err == nil {
+				return p, "nethernet", target, nil
+			}
+		}
+	}
+
+	// 3. If local address (127.0.0.1 or localhost) on port 19132 failed, check if Bedrock LAN opened on 19133..19140
+	host, portStr, splitErr := net.SplitHostPort(address)
+	if splitErr == nil && (host == "127.0.0.1" || host == "localhost") && portStr == "19132" {
+		for testPort := 19133; testPort <= 19140; testPort++ {
+			testAddr := fmt.Sprintf("%s:%d", host, testPort)
+			tCtx, tCancel := context.WithTimeout(ctx, 500*time.Millisecond)
+			pBytes, pErr := raknet.PingContext(tCtx, testAddr)
+			tCancel()
+			if pErr == nil {
+				if p, err := parseServerPong(pBytes); err == nil {
+					log.Printf("bebot: discovered local LAN world on port %d\n", testPort)
+					return p, "raknet", testAddr, nil
+				}
+			}
+		}
+	}
+
+	return serverPong{}, "", "", fmt.Errorf("ping %s: raknet (%v) and nethernet failed", address, rakErr)
+}
+
+func (b *Bot) connectLocal(ctx context.Context) error {
+	cfg := discovery.ListenConfig{
+		NetworkID: rand.Uint64(),
+	}
+	d, err := cfg.Listen("0.0.0.0:0")
+	if err != nil {
+		return fmt.Errorf("lan discovery listen: %w", err)
+	}
+	defer d.Close()
+
+	log.Println("bebot: discovering local Bedrock world on LAN (port 7551)...")
+	var (
+		serverData discovery.ServerData
+		networkID  uint64
+		found      bool
+	)
+
+	timeout := time.After(8 * time.Second)
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+
+DiscoveryLoop:
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timeout:
+			break DiscoveryLoop
+		case <-ticker.C:
+			for id, resp := range d.Responses() {
+				if err := serverData.UnmarshalBinary(resp); err == nil {
+					networkID = id
+					found = true
+					break DiscoveryLoop
+				}
+			}
+		}
+	}
+
+	if !found {
+		return fmt.Errorf("no local Bedrock world found on LAN (make sure your world has Multiplayer & Visible to LAN enabled)")
+	}
+
+	log.Printf("bebot: found local world %q by %s (version %s, protocol %d, players %d/%d)\n",
+		serverData.LevelName, serverData.ServerName, serverData.Version, serverData.Protocol, serverData.PlayerCount, serverData.MaxPlayerCount)
+
+	botUUID := uuid.New()
+	b.selfUUID = botUUID
+	name := b.botName
+	if name == "" {
+		name = "Bebot"
+	}
+
+	clientData := login.ClientData{
+		DeviceOS: protocol.DeviceOrbis, DeviceModel: "playstation_5_emu", DeviceID: login.DeviceID(uuid.NewString()),
+		LanguageCode: "en_US", GameVersion: serverData.Version, CurrentInputMode: packet.InputModeGamePad,
+		DefaultInputMode: packet.InputModeGamePad, UIProfile: 0, MaxViewDistance: 16, MemoryTier: 3,
+		PlatformType: 2, GraphicsMode: 1, TrustedSkin: true, CompatibleWithClientSideChunkGen: true,
+		SelfSignedID: uuid.NewString(), ArmSize: "slim", SkinID: "Standard_Alex",
+		Nonce: serverData.Nonce,
+	}
+	if skin, err := loadSkinFromConfig(b.cfg.Skin); err != nil {
+		log.Println("bebot: skin disabled:", err)
+	} else {
+		fillClientDataSkin(&clientData, skin)
+	}
+
+	logger := slog.New(slog.NewTextHandler(log.Writer(), &slog.HandlerOptions{Level: slog.LevelDebug}))
+	dialer := minecraft.Dialer{
+		ErrorLog: logger,
+		ClientData: clientData,
+		IdentityData: login.IdentityData{
+			DisplayName: name,
+			Identity:    botUUID.String(),
+		},
+		Protocol:                   serverProtocol{id: serverData.Protocol, version: serverData.Version},
+		DisconnectOnUnknownPackets: false,
+		DisconnectOnInvalidPackets: false,
+		EnableClientCache:          false,
+		PacketFunc:                 tracePacket,
+		DownloadResourcePack: func(id uuid.UUID, version string, current, total int) bool {
+			return false
+		},
+	}
+
+	log.Println("bebot: stage: connecting via NetherNet LAN...")
+	network := minecraft.NetherNet{
+		Signaling: d,
+		Dialer: nethernet.Dialer{
+			AllowIdentitylessServer: true,
+		},
+	}
+
+	dialCtx, cancelDial := context.WithTimeout(ctx, 30*time.Second)
+	defer cancelDial()
+	c, err := dialer.DialContextNetwork(dialCtx, network, strconv.FormatUint(networkID, 10))
+	if err != nil {
+		return fmt.Errorf("dial local: %s", explainError(err))
+	}
+
+	log.Println("bebot: stage: login complete; finishing loading screen...")
+	b.mu.Lock()
+	b.conn = c
+	b.mu.Unlock()
+	defer func() { c.Close(); b.mu.Lock(); b.conn = nil; b.mu.Unlock() }()
+
+	if err := c.WritePacket(&packet.ServerBoundLoadingScreen{Type: packet.LoadingScreenTypeEnd}); err != nil {
+		return fmt.Errorf("finish loading screen: %s", explainError(err))
+	}
+	if err := c.Flush(); err != nil {
+		return fmt.Errorf("flush loading screen: %s", explainError(err))
+	}
+
+	log.Println("bebot: stage: waiting for world spawn...")
+	spawnCtx, cancel := context.WithTimeout(ctx, 1*time.Minute)
+	defer cancel()
+	if err := c.DoSpawnContext(spawnCtx); err != nil {
+		return fmt.Errorf("spawn: %s", explainError(err))
+	}
+	log.Println("bebot: stage: world spawn ok")
+
+	renderDist := b.cfg.Behaviour.RenderDistance
+	if renderDist == 0 {
+		renderDist = 16
+	}
+	_ = c.WritePacket(&packet.RequestChunkRadius{ChunkRadius: int32(renderDist), MaxChunkRadius: uint8(renderDist)})
+
+	b.pos = c.GameData().PlayerPosition
+	b.last = b.pos
+	b.entityID = c.GameData().EntityRuntimeID
+	b.gameMode = c.GameData().PlayerGameMode
+	b.tick = uint64(c.GameData().Time)
+	b.players = make(map[string]player)
+	b.playersByID = make(map[uint64]string)
+	b.playerListReady = false
+	b.playerEventsAfter = time.Now().Add(2 * time.Second)
+	b.mode = modeIdle
+	b.lookAtTarget = ""
+	b.lookAtPos = nil
+	b.mimicPosSet = false
+	b.mimicSneaking = false
+	b.mimicSwimming = false
+	b.sentSneaking = false
+	b.itemRequestID = -859
+	b.stackPending = nil
+	b.containerOpen = make(chan struct{}, 1)
+	b.mineActive = false
+	b.mineQueue = nil
+	b.mineCurrent = nil
+	b.mineStuckTicks = 0
+	game := c.GameData()
+	b.serverAuthoritativeInventory = game.ServerAuthoritativeInventory
+	b.worldTime = game.Time
+	b.startGameTime = game.Time
+
+	log.Printf("bebot: joined local world %q at %.1f %.1f %.1f entity=%d gamemode=%d\n",
+		game.WorldName, b.pos.X(), b.pos.Y(), b.pos.Z(), b.entityID, game.PlayerGameMode)
+
+	done := make(chan error, 1)
+	go func() { done <- b.readPackets(c) }()
+	t := time.NewTicker(50 * time.Millisecond)
+	defer t.Stop()
+	var afk *time.Ticker
+	var afkChannel <-chan time.Time
+	if b.cfg.Behaviour.AfkJumpIntervalMs > 0 {
+		afk = time.NewTicker(time.Duration(b.cfg.Behaviour.AfkJumpIntervalMs) * time.Millisecond)
+		defer afk.Stop()
+		afkChannel = afk.C
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case err := <-done:
+			return fmt.Errorf("connection reader: %s", explainError(err))
+		case <-t.C:
+			b.moveTick(c, false)
+		case <-afkChannel:
+			b.moveTick(c, true)
+		}
+	}
 }
 
 func (b *Bot) connect(ctx context.Context) error {
+	if b.local {
+		return b.connectLocal(ctx)
+	}
 	address := fmt.Sprintf("%s:%d", b.cfg.Server.Host, b.cfg.Server.Port)
 	// Stage 1: ping to learn the server's identity and whether it is actually up.
 	log.Printf("bebot: pinging %s...\n", address)
-	pong, err := pingServer(ctx, address)
+	pong, transport, dialAddress, err := pingServer(ctx, address)
 	if err != nil {
 		return err
 	}
@@ -621,7 +901,7 @@ func (b *Bot) connect(ctx context.Context) error {
 	if b.cfg.Server.Version != "" && b.cfg.Server.Version != pong.Version {
 		log.Printf("bebot: warning: config version %s differs from server %s; using server version\n", b.cfg.Server.Version, pong.Version)
 	}
-	log.Printf("bebot: server=%s motd=%q protocol=%d version=%s players=%d/%d\n", pong.Edition, pong.MOTD, pong.ProtocolID, pong.Version, pong.Players, pong.MaxPlayers)
+	log.Printf("bebot: server=%s motd=%q protocol=%d version=%s transport=%s players=%d/%d\n", pong.Edition, pong.MOTD, pong.ProtocolID, pong.Version, transport, pong.Players, pong.MaxPlayers)
 	// Stage 2: detect an offline lobby. Aternos (and similar hosts) expose a
 	// lightweight proxy with MOTD "Offline" while the real server is stopped.
 	// Connecting to that lobby accepts the connection but never produces a
@@ -636,7 +916,7 @@ func (b *Bot) connect(ctx context.Context) error {
 				return ctx.Err()
 			case <-time.After(5 * time.Second):
 			}
-			pong, err = pingServer(ctx, address)
+			pong, transport, dialAddress, err = pingServer(ctx, address)
 			if err != nil {
 				log.Printf("bebot:   ping failed: %v (retrying)\n", err)
 				continue
@@ -650,7 +930,7 @@ func (b *Bot) connect(ctx context.Context) error {
 			}
 		}
 	}
-	log.Printf("bebot: connecting to %s using Minecraft %s...\n", address, version)
+	log.Printf("bebot: connecting to %s via %s using Minecraft %s...\n", dialAddress, transport, version)
 	clientData := login.ClientData{
 		DeviceOS: protocol.DeviceOrbis, DeviceModel: "playstation_5_emu", DeviceID: login.DeviceID(uuid.NewString()),
 		LanguageCode: "en_US", GameVersion: version, CurrentInputMode: packet.InputModeGamePad,
@@ -665,11 +945,25 @@ func (b *Bot) connect(ctx context.Context) error {
 		log.Printf("bebot: loaded skin type=%s path=%s (%dx%d)\n", b.cfg.Skin.Type, b.cfg.Skin.Path, clientData.SkinImageWidth, clientData.SkinImageHeight)
 	}
 
+	var identityData login.IdentityData
+	if b.offline || b.source == nil {
+		botUUID := uuid.New()
+		b.selfUUID = botUUID
+		name := b.botName
+		if name == "" {
+			name = "Bebot"
+		}
+		identityData = login.IdentityData{
+			DisplayName: name,
+			Identity:    botUUID.String(),
+		}
+	}
 
 	logger := slog.New(slog.NewTextHandler(log.Writer(), &slog.HandlerOptions{Level: slog.LevelDebug}))
 	d := minecraft.Dialer{
 		ErrorLog:                   logger,
 		TokenSource:                b.source,
+		IdentityData:               identityData,
 		ClientData:                 clientData,
 		Protocol:                   serverProtocol{id: pong.ProtocolID, version: pong.Version},
 		DisconnectOnUnknownPackets: false,
@@ -683,13 +977,13 @@ func (b *Bot) connect(ctx context.Context) error {
 	}
 	// Stage 3: RakNet/NetherNet handshake + login handshake + resource packs. This is the
 	// phase most likely to stall on a freshly started host, so surface it.
-	log.Println("bebot: stage: connecting via RakNet...")
+	log.Printf("bebot: stage: %s handshake + login...\n", transport)
 	dialCtx, cancelDial := context.WithTimeout(ctx, 5*time.Minute)
 	if b.source != nil && b.xblCache != nil {
 		dialCtx = auth.WithXBLTokenCache(dialCtx, b.xblCache)
 	}
 	defer cancelDial()
-	c, err := d.DialContext(dialCtx, "raknet", address)
+	c, err := d.DialContext(dialCtx, transport, dialAddress)
 	if err != nil {
 		return fmt.Errorf("dial: %s", explainError(err))
 	}

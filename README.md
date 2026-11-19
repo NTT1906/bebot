@@ -64,6 +64,29 @@ go build -o bebot.exe .
 ./bebot.exe
 ```
 
+### Joining a Local / Single-Player World (LAN)
+
+To have the bot join your local single-player Bedrock world:
+
+1. Open your world in Minecraft Bedrock.
+2. In game settings, ensure **Multiplayer Game** and **Visible to LAN Players** are enabled.
+3. Run the bot with the `-local` flag:
+   ```bash
+   .\bebot.exe -local
+   ```
+   *(By default, `-local` uses offline/LAN mode so it doesn't conflict with your active player account, connects to `127.0.0.1:19132`, and auto-discovers ports 19133-19140 if the primary port was taken).*
+
+### Command-Line Arguments
+
+* **`-local`**: Connects to a local/LAN single-player world on `127.0.0.1`.
+* **`-offline`**: Connects in offline/LAN mode without requiring Microsoft Live authentication.
+* **`-name <name>`**: Sets the bot's username in offline/LAN mode (default: `Bebot`).
+* **`-host <host>`**: Overrides the target server host (e.g. `127.0.0.1` or LAN IP `192.168.1.5`).
+* **`-port <port>`**: Overrides the target server port (e.g. `19132`).
+* **`-config <file>`**: Path to custom config file (default: `config.json`).
+* **`-skin <file>`**: Path to custom skin config file (default: `skin.json`).
+* **`-debug`**: Prints packet-level diagnostics.
+
 When you first run the bot, it will prompt you for Microsoft Live / Xbox authentication. Follow the OAuth link provided in the console to authorize the bot's account.
 
 Once connected, join the server on the same server to see the bot. If you are the `superuser`, you can issue commands directly to it in-game via chat!
