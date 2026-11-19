@@ -258,14 +258,16 @@ func main() {
 		offline:     *offlineFlag,
 		botName:     *botNameFlag,
 		offlineUUID: offlineUUID,
-		local:       *localFlag,
-		players:     make(map[string]player),
-		entities:    make(map[int64]string),
-		mode:        modeIdle,
-		waypoints:   loadWaypoints(waypointsFile),
-		configPath:  *configPath,
-		skinPath:    *skinFile,
-		xblCache:    xblCache,
+		local:         *localFlag,
+		players:       make(map[string]player),
+		entities:      make(map[int64]string),
+		mode:          modeIdle,
+		waypoints:     loadWaypoints(waypointsFile),
+		configPath:    *configPath,
+		skinPath:      *skinFile,
+		xblCache:      xblCache,
+		itemNamesByID: make(map[int32]string),
+		mineAttempts:  make(map[protocol.BlockPos]int),
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -655,6 +657,8 @@ type Bot struct {
 	botName                      string
 	offlineUUID                  uuid.UUID
 	local                        bool
+	itemNamesByID                map[int32]string
+	mineAttempts                 map[protocol.BlockPos]int
 }
 
 func (b *Bot) run(ctx context.Context) {
@@ -896,6 +900,10 @@ DiscoveryLoop:
 	b.serverAuthoritativeInventory = game.ServerAuthoritativeInventory
 	b.worldTime = game.Time
 	b.startGameTime = game.Time
+	b.itemNamesByID = make(map[int32]string)
+	for _, it := range game.Items {
+		b.itemNamesByID[int32(it.RuntimeID)] = it.Name
+	}
 
 	log.Printf("bebot: joined local world %q at %.1f %.1f %.1f entity=%d gamemode=%d\n",
 		game.WorldName, b.pos.X(), b.pos.Y(), b.pos.Z(), b.entityID, game.PlayerGameMode)
@@ -1103,6 +1111,10 @@ func (b *Bot) connect(ctx context.Context) error {
 	b.serverAuthoritativeInventory = game.ServerAuthoritativeInventory
 	b.worldTime = game.Time
 	b.startGameTime = game.Time
+	b.itemNamesByID = make(map[int32]string)
+	for _, it := range game.Items {
+		b.itemNamesByID[int32(it.RuntimeID)] = it.Name
+	}
 	var daylightCycle bool
 	for _, gr := range game.GameRules {
 		if strings.EqualFold(gr.Name, "dodaylightcycle") {
@@ -1178,6 +1190,9 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 							log.Printf("bebot: block broken (%d mined)\n", b.mineCount)
 						}
 					}
+					if b.mineAttempts != nil {
+						delete(b.mineAttempts, pos)
+					}
 					filtered := make([]protocol.BlockPos, 0, len(b.mineQueue))
 					for _, q := range b.mineQueue {
 						if q != pos {
@@ -1186,25 +1201,29 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 					}
 					b.mineQueue = filtered
 				} else if b.isInMineBox(pos) {
-					alreadyQueued := false
-					if b.mineCurrent != nil && *b.mineCurrent == pos {
-						alreadyQueued = true
-					}
-					if b.breakTarget != nil && *b.breakTarget == pos {
-						alreadyQueued = true
-					}
-					if !alreadyQueued {
-						for _, q := range b.mineQueue {
-							if q == pos {
-								alreadyQueued = true
-								break
+					if b.mineAttempts != nil && b.mineAttempts[pos] >= 3 {
+						// Block failed to break 3 times, do not re-queue
+					} else {
+						alreadyQueued := false
+						if b.mineCurrent != nil && *b.mineCurrent == pos {
+							alreadyQueued = true
+						}
+						if b.breakTarget != nil && *b.breakTarget == pos {
+							alreadyQueued = true
+						}
+						if !alreadyQueued {
+							for _, q := range b.mineQueue {
+								if q == pos {
+									alreadyQueued = true
+									break
+								}
 							}
 						}
-					}
-					if !alreadyQueued {
-						b.mineQueue = append(b.mineQueue, pos)
-						b.mineTotal++
-						log.Printf("bebot: new block detected at (%d, %d, %d), added to mine queue\n", pos.X(), pos.Y(), pos.Z())
+						if !alreadyQueued {
+							b.mineQueue = append(b.mineQueue, pos)
+							b.mineTotal++
+							log.Printf("bebot: new block detected at (%d, %d, %d), added to mine queue\n", pos.X(), pos.Y(), pos.Z())
+						}
 					}
 				}
 			}
@@ -1659,7 +1678,7 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 				b.cfg.Target.Z = float32(cur.Z()) + 0.5
 				b.mode = modeMoving
 				b.mineStuckTicks++
-				if b.mineStuckTicks > 40 {
+				if b.mineStuckTicks > 100 {
 					log.Printf("bebot: skipping unreachable block at %d %d %d\n", cur.X(), cur.Y(), cur.Z())
 					b.mineCurrent = nil
 					b.mineStuckTicks = 0
@@ -1970,6 +1989,13 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 			abortFace = determineBlockFace(eyePos, *abortBt)
 		}
 		actions = append(actions, protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionAbortBreak), BlockPos: *abortBt, Face: abortFace})
+		_ = c.WritePacket(&packet.PlayerAction{
+			EntityRuntimeID: b.entityID,
+			ActionType:      protocol.PlayerActionAbortBreak,
+			BlockPosition:   *abortBt,
+			ResultPosition:  *abortBt,
+			BlockFace:       abortFace,
+		})
 	}
 
 	if bt != nil {
@@ -1977,7 +2003,6 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 		if !b.mineActive || b.mineFaceAccurate {
 			btFace = determineBlockFace(eyePos, *bt)
 		}
-		action := protocol.PlayerActionContinueDestroyBlock
 		if actions == nil {
 			actions = make([]protocol.PlayerBlockAction, 0, 2)
 		}
@@ -1987,27 +2012,39 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 		b.mu.Unlock()
 
 		if ticks == 0 {
-			action = protocol.PlayerActionStartBreak
 			b.mu.Lock()
 			mineSwing = b.breakAnimation
 			b.mu.Unlock()
 			actions = append(actions,
 				protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionStartBreak), BlockPos: *bt, Face: btFace},
 			)
-		}
-		if len(actions) == 0 || (abortBt != nil && len(actions) == 1) {
-			actions = append(actions, protocol.PlayerBlockAction{Action: int32(action), BlockPos: *bt, Face: btFace})
+			_ = c.WritePacket(&packet.PlayerAction{
+				EntityRuntimeID: b.entityID,
+				ActionType:      protocol.PlayerActionStartBreak,
+				BlockPosition:   *bt,
+				ResultPosition:  *bt,
+				BlockFace:       btFace,
+			})
+		} else {
+			actions = append(actions,
+				protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionCrackBreak), BlockPos: *bt, Face: btFace},
+			)
 		}
 
-		maxTicks := 40
-		if b.mineActive && b.mineTicksReq > 0 {
-			maxTicks = b.mineTicksReq
-		} else if b.gameMode == 1 || b.gameMode == 4 {
-			maxTicks = 2
-		}
+		maxTicks := b.getBreakDuration()
 
 		if ticks >= maxTicks {
-			actions = append(actions, protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionPredictDestroyBlock), BlockPos: *bt, Face: btFace})
+			actions = append(actions,
+				protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionPredictDestroyBlock), BlockPos: *bt, Face: btFace},
+				protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionStopBreak), BlockPos: *bt, Face: btFace},
+			)
+			_ = c.WritePacket(&packet.PlayerAction{
+				EntityRuntimeID: b.entityID,
+				ActionType:      protocol.PlayerActionStopBreak,
+				BlockPosition:   *bt,
+				ResultPosition:  *bt,
+				BlockFace:       btFace,
+			})
 			_ = c.WritePacket(&packet.InventoryTransaction{
 				TransactionData: &protocol.UseItemTransactionData{
 					ActionType:    protocol.UseItemActionBreakBlock,
@@ -2030,15 +2067,18 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 			if b.breakRepeat {
 				b.breakTicks = 0
 			} else {
-				b.breakTarget = nil
-				b.breakTicks = 0
 				if b.mineActive {
+					if b.mineAttempts != nil {
+						b.mineAttempts[*bt]++
+					}
 					b.mineCurrent = nil
 					b.mineCount++
 					if b.mineCount%25 == 0 || len(b.mineQueue) == 0 {
 						log.Printf("bebot: mined %d/%d blocks\n", b.mineCount, b.mineTotal)
 					}
 				}
+				b.breakTarget = nil
+				b.breakTicks = 0
 			}
 			b.mu.Unlock()
 		} else {
@@ -3330,6 +3370,42 @@ func (b *Bot) stopBreaking() {
 	log.Printf("bebot: stopped breaking block at %d %d %d\n", pos.X(), pos.Y(), pos.Z())
 }
 
+func (b *Bot) getBreakDuration() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.mineActive && b.mineTicksReq > 0 {
+		return b.mineTicksReq
+	}
+	if b.gameMode == 1 || b.gameMode == 4 {
+		return 2
+	}
+	netID := b.heldItem.Stack.NetworkID
+	name := b.itemNamesByID[netID]
+
+	switch {
+	case strings.Contains(name, "netherite_pickaxe"):
+		return 8
+	case strings.Contains(name, "diamond_pickaxe"):
+		return 10
+	case strings.Contains(name, "golden_pickaxe"):
+		return 10
+	case strings.Contains(name, "iron_pickaxe"):
+		return 14
+	case strings.Contains(name, "stone_pickaxe"):
+		return 20
+	case strings.Contains(name, "wooden_pickaxe"):
+		return 35
+	case strings.Contains(name, "axe"):
+		return 40
+	case strings.Contains(name, "shovel"):
+		return 15
+	default:
+		// Bare hands or unadapted tool: cobblestone/stone requires 150 ticks (7.5s).
+		// Use 160 ticks (8.0s) so it comfortably completes on the server without being rejected.
+		return 160
+	}
+}
+
 func (b *Bot) isInMineBox(pos protocol.BlockPos) bool {
 	return pos.X() >= b.mineBoxMin.X() && pos.X() <= b.mineBoxMax.X() &&
 		pos.Y() >= b.mineBoxMin.Y() && pos.Y() <= b.mineBoxMax.Y() &&
@@ -3385,6 +3461,7 @@ func (b *Bot) startMiningArea(ax, ay, az, bx, by, bz int32, ticksReq int, contin
 	b.mineBoxMax = protocol.BlockPos{maxX, maxY, maxZ}
 	b.mineContinuous = continuous
 	b.mineFaceAccurate = faceAccurate
+	b.mineAttempts = make(map[protocol.BlockPos]int)
 	b.mu.Unlock()
 
 	modeStr := "top-down"
@@ -3410,6 +3487,7 @@ func (b *Bot) stopMiningArea() {
 	b.mineQueue = nil
 	b.mineCurrent = nil
 	b.mineStuckTicks = 0
+	b.mineAttempts = nil
 	b.mu.Unlock()
 	b.reply("Stopped area mining.")
 }
@@ -3442,6 +3520,13 @@ func determineBlockFace(eyePos mgl32.Vec3, blockPos protocol.BlockPos) int32 {
 }
 
 func (b *Bot) pickNextMineBlock() *protocol.BlockPos {
+	// Skip blocks that have failed to break 3 times (likely unbreakable or protected)
+	for len(b.mineQueue) > 0 && b.mineAttempts != nil && b.mineAttempts[b.mineQueue[0]] >= 3 {
+		skipped := b.mineQueue[0]
+		b.mineQueue = b.mineQueue[1:]
+		log.Printf("bebot: skipping block at (%d, %d, %d) (failed 3 times, likely unbreakable)\n", skipped.X(), skipped.Y(), skipped.Z())
+	}
+
 	if len(b.mineQueue) == 0 {
 		return nil
 	}
@@ -3458,6 +3543,9 @@ func (b *Bot) pickNextMineBlock() *protocol.BlockPos {
 	var bestHDist float32 = math.MaxFloat32
 
 	for i, pos := range b.mineQueue {
+		if b.mineAttempts != nil && b.mineAttempts[pos] >= 3 {
+			continue
+		}
 		distY := float32(pos.Y()) + 0.5 - eyeY
 		// Can reach if vertical distance is within maxReach
 		if distY <= maxReach+1.0 && distY >= -maxReach {
