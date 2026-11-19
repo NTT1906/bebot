@@ -134,6 +134,34 @@ func saveXBLCache(path string, cache *auth.XBLTokenCache) {
 	}
 }
 
+const offlineUUIDFile = "offline_uuid.json"
+
+func loadOrGenerateOfflineUUID(path string, botName string, renew bool) uuid.UUID {
+	cache := make(map[string]string)
+	if !renew {
+		if data, err := os.ReadFile(path); err == nil {
+			_ = json.Unmarshal(data, &cache)
+			if idStr, ok := cache[botName]; ok {
+				if parsed, err := uuid.Parse(idStr); err == nil {
+					log.Printf("bebot: restored saved offline UUID %s for %q from %s\n", parsed.String(), botName, path)
+					return parsed
+				}
+			}
+		}
+	}
+	newUUID := uuid.New()
+	cache[botName] = newUUID.String()
+	if data, err := json.MarshalIndent(cache, "", "  "); err == nil {
+		_ = os.WriteFile(path, data, 0644)
+	}
+	if renew {
+		log.Printf("bebot: (-renew) generated fresh offline UUID %s for %q\n", newUUID.String(), botName)
+	} else {
+		log.Printf("bebot: generated and saved offline UUID %s for %q to %s\n", newUUID.String(), botName, path)
+	}
+	return newUUID
+}
+
 func isFlagPassed(name string) bool {
 	found := false
 	flag.Visit(func(f *flag.Flag) {
@@ -154,6 +182,7 @@ func main() {
 	portFlag := flag.Int("port", 0, "override server port (e.g. 19132)")
 	offlineFlag := flag.Bool("offline", false, "connect without Microsoft authentication (LAN mode)")
 	botNameFlag := flag.String("name", "Bebot", "bot display name (used in offline/LAN mode)")
+	renewFlag := flag.Bool("renew", false, "generate a fresh identity/UUID for offline/LAN mode instead of reusing saved UUID")
 	flag.Parse()
 
 	// Initialize file logger
@@ -209,6 +238,7 @@ func main() {
 
 	var source oauth2.TokenSource
 	var xblCache *auth.XBLTokenCache
+	var offlineUUID uuid.UUID
 	if !*offlineFlag {
 		var err error
 		source, err = loadAuthSource(*authCachePath)
@@ -218,7 +248,8 @@ func main() {
 		}
 		xblCache = loadXBLCache("xsts_cache.json", source)
 	} else {
-		log.Printf("bebot: running in offline/LAN mode as %q (no Microsoft authentication)\n", *botNameFlag)
+		offlineUUID = loadOrGenerateOfflineUUID(offlineUUIDFile, *botNameFlag, *renewFlag)
+		log.Printf("bebot: running in offline/LAN mode as %q [UUID: %s] (no Microsoft authentication)\n", *botNameFlag, offlineUUID.String())
 	}
 
 	bot := &Bot{
@@ -226,6 +257,7 @@ func main() {
 		source:      source,
 		offline:     *offlineFlag,
 		botName:     *botNameFlag,
+		offlineUUID: offlineUUID,
 		local:       *localFlag,
 		players:     make(map[string]player),
 		entities:    make(map[int64]string),
@@ -618,8 +650,10 @@ type Bot struct {
 	mineBoxMin                   protocol.BlockPos
 	mineBoxMax                   protocol.BlockPos
 	mineContinuous               bool
+	mineFaceAccurate             bool
 	offline                      bool
 	botName                      string
+	offlineUUID                  uuid.UUID
 	local                        bool
 }
 
@@ -749,7 +783,11 @@ DiscoveryLoop:
 	log.Printf("bebot: found local world %q by %s (version %s, protocol %d, players %d/%d)\n",
 		serverData.LevelName, serverData.ServerName, serverData.Version, serverData.Protocol, serverData.PlayerCount, serverData.MaxPlayerCount)
 
-	botUUID := uuid.New()
+	botUUID := b.offlineUUID
+	if botUUID == uuid.Nil {
+		botUUID = loadOrGenerateOfflineUUID(offlineUUIDFile, b.botName, false)
+		b.offlineUUID = botUUID
+	}
 	b.selfUUID = botUUID
 	name := b.botName
 	if name == "" {
@@ -761,7 +799,7 @@ DiscoveryLoop:
 		LanguageCode: "en_US", GameVersion: serverData.Version, CurrentInputMode: packet.InputModeGamePad,
 		DefaultInputMode: packet.InputModeGamePad, UIProfile: 0, MaxViewDistance: 16, MemoryTier: 3,
 		PlatformType: 2, GraphicsMode: 1, TrustedSkin: true, CompatibleWithClientSideChunkGen: true,
-		SelfSignedID: uuid.NewString(), ArmSize: "slim", SkinID: "Standard_Alex",
+		SelfSignedID: botUUID.String(), ArmSize: "slim", SkinID: "Standard_Alex",
 		Nonce: serverData.Nonce,
 	}
 	if skin, err := loadSkinFromConfig(b.cfg.Skin); err != nil {
@@ -850,6 +888,7 @@ DiscoveryLoop:
 	b.stackPending = nil
 	b.containerOpen = make(chan struct{}, 1)
 	b.mineActive = false
+	b.mineFaceAccurate = false
 	b.mineQueue = nil
 	b.mineCurrent = nil
 	b.mineStuckTicks = 0
@@ -947,7 +986,11 @@ func (b *Bot) connect(ctx context.Context) error {
 
 	var identityData login.IdentityData
 	if b.offline || b.source == nil {
-		botUUID := uuid.New()
+		botUUID := b.offlineUUID
+		if botUUID == uuid.Nil {
+			botUUID = loadOrGenerateOfflineUUID(offlineUUIDFile, b.botName, false)
+			b.offlineUUID = botUUID
+		}
 		b.selfUUID = botUUID
 		name := b.botName
 		if name == "" {
@@ -957,6 +1000,7 @@ func (b *Bot) connect(ctx context.Context) error {
 			DisplayName: name,
 			Identity:    botUUID.String(),
 		}
+		clientData.SelfSignedID = botUUID.String()
 	}
 
 	logger := slog.New(slog.NewTextHandler(log.Writer(), &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -1051,6 +1095,7 @@ func (b *Bot) connect(ctx context.Context) error {
 	b.stackPending = nil
 	b.containerOpen = make(chan struct{}, 1)
 	b.mineActive = false
+	b.mineFaceAccurate = false
 	b.mineQueue = nil
 	b.mineCurrent = nil
 	b.mineStuckTicks = 0
@@ -1123,40 +1168,43 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 			b.mu.Lock()
 			if b.mineActive {
 				pos := p.Position
-				if b.breakTarget != nil && pos == *b.breakTarget {
-					b.breakTarget = nil
-					b.breakTicks = 0
-					b.mineCurrent = nil
-					b.mineCount++
-					if b.mineCount%25 == 0 || len(b.mineQueue) == 0 {
-						log.Printf("bebot: block broken (%d mined)\n", b.mineCount)
+				if p.NewBlockRuntimeID == 0 {
+					if b.breakTarget != nil && pos == *b.breakTarget {
+						b.breakTarget = nil
+						b.breakTicks = 0
+						b.mineCurrent = nil
+						b.mineCount++
+						if b.mineCount%25 == 0 || len(b.mineQueue) == 0 {
+							log.Printf("bebot: block broken (%d mined)\n", b.mineCount)
+						}
 					}
+					filtered := make([]protocol.BlockPos, 0, len(b.mineQueue))
+					for _, q := range b.mineQueue {
+						if q != pos {
+							filtered = append(filtered, q)
+						}
+					}
+					b.mineQueue = filtered
 				} else if b.isInMineBox(pos) {
-					if p.NewBlockRuntimeID != 0 {
-						alreadyQueued := false
-						if b.mineCurrent != nil && *b.mineCurrent == pos {
-							alreadyQueued = true
-						} else {
-							for _, q := range b.mineQueue {
-								if q == pos {
-									alreadyQueued = true
-									break
-								}
-							}
-						}
-						if !alreadyQueued {
-							b.mineQueue = append(b.mineQueue, pos)
-							b.mineTotal++
-							log.Printf("bebot: new block detected at (%d, %d, %d), added to mine queue\n", pos.X(), pos.Y(), pos.Z())
-						}
-					} else {
-						filtered := make([]protocol.BlockPos, 0, len(b.mineQueue))
+					alreadyQueued := false
+					if b.mineCurrent != nil && *b.mineCurrent == pos {
+						alreadyQueued = true
+					}
+					if b.breakTarget != nil && *b.breakTarget == pos {
+						alreadyQueued = true
+					}
+					if !alreadyQueued {
 						for _, q := range b.mineQueue {
-							if q != pos {
-								filtered = append(filtered, q)
+							if q == pos {
+								alreadyQueued = true
+								break
 							}
 						}
-						b.mineQueue = filtered
+					}
+					if !alreadyQueued {
+						b.mineQueue = append(b.mineQueue, pos)
+						b.mineTotal++
+						log.Printf("bebot: new block detected at (%d, %d, %d), added to mine queue\n", pos.X(), pos.Y(), pos.Z())
 					}
 				}
 			}
@@ -1890,8 +1938,8 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 	}
 	b.mu.Unlock()
 
-	// If actively breaking a block, ensure crosshair (Yaw & Pitch) aims directly at the block
-	if bt != nil {
+	// If actively breaking a block, ensure crosshair (Yaw & Pitch) aims directly at the block when face-accurate
+	if bt != nil && (!b.mineActive || b.mineFaceAccurate) {
 		eyePos := b.pos.Add(mgl32.Vec3{0, 1.62, 0})
 		tX := float32(bt.X()) + 0.5
 		tY := float32(bt.Y()) + 0.5
@@ -1917,12 +1965,18 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 	var actions []protocol.PlayerBlockAction
 	eyePos := b.pos.Add(mgl32.Vec3{0, 1.62, 0})
 	if abortBt != nil {
-		abortFace := determineBlockFace(eyePos, *abortBt)
+		abortFace := int32(1)
+		if !b.mineActive || b.mineFaceAccurate {
+			abortFace = determineBlockFace(eyePos, *abortBt)
+		}
 		actions = append(actions, protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionAbortBreak), BlockPos: *abortBt, Face: abortFace})
 	}
 
 	if bt != nil {
-		btFace := determineBlockFace(eyePos, *bt)
+		btFace := int32(1)
+		if !b.mineActive || b.mineFaceAccurate {
+			btFace = determineBlockFace(eyePos, *bt)
+		}
 		action := protocol.PlayerActionContinueDestroyBlock
 		if actions == nil {
 			actions = make([]protocol.PlayerBlockAction, 0, 2)
@@ -2498,26 +2552,31 @@ func (b *Bot) command(line string) {
 		log.Printf("bebot: sleep/spawn checkpoint requested at %d %d %d\n", x, y, z)
 	case "break", "breakat", "breakcoord", "mine", "mineat", "minearea", "minespace", "breakarea", "breakspace", "mineloop", "minefarm":
 		continuous := strings.EqualFold(p[0], "mineloop") || strings.EqualFold(p[0], "minefarm")
-		if len(p) >= 7 && len(p) <= 9 {
+		if len(p) >= 7 && len(p) <= 10 {
 			var ax, ay, az, bx, by, bz int32
 			if _, err := fmt.Sscanf(strings.Join(p[1:7], " "), "%d %d %d %d %d %d", &ax, &ay, &az, &bx, &by, &bz); err != nil {
-				b.reply("Usage: mine <ax> <ay> <az> <bx> <by> <bz> [ticksPerBlock] [continuous: true|false]")
+				b.reply("Usage: mine <ax> <ay> <az> <bx> <by> <bz> [ticksPerBlock] [continuous: true|false] [faceAccurate: true|false]")
 				return
 			}
 			ticks := 0
-			if len(p) >= 8 {
-				if t, err := strconv.Atoi(p[7]); err == nil && t >= 0 {
+			faceAccurate := false
+			boolIdx := 0
+			for _, arg := range p[7:] {
+				if t, err := strconv.Atoi(arg); err == nil && t >= 0 {
 					ticks = t
-				} else if bVal, err := strconv.ParseBool(p[7]); err == nil {
-					continuous = bVal
+				} else if strings.EqualFold(arg, "face") || strings.EqualFold(arg, "faceaccurate") || strings.EqualFold(arg, "accurate") {
+					faceAccurate = true
+				} else if bVal, err := strconv.ParseBool(arg); err == nil {
+					if boolIdx == 0 && !strings.EqualFold(p[0], "mineloop") && !strings.EqualFold(p[0], "minefarm") {
+						continuous = bVal
+						boolIdx++
+					} else {
+						faceAccurate = bVal
+						boolIdx++
+					}
 				}
 			}
-			if len(p) == 9 {
-				if bVal, err := strconv.ParseBool(p[8]); err == nil {
-					continuous = bVal
-				}
-			}
-			b.startMiningArea(ax, ay, az, bx, by, bz, ticks, continuous)
+			b.startMiningArea(ax, ay, az, bx, by, bz, ticks, continuous, faceAccurate)
 			return
 		}
 		if len(p) < 5 || len(p) > 6 {
@@ -3277,7 +3336,7 @@ func (b *Bot) isInMineBox(pos protocol.BlockPos) bool {
 		pos.Z() >= b.mineBoxMin.Z() && pos.Z() <= b.mineBoxMax.Z()
 }
 
-func (b *Bot) startMiningArea(ax, ay, az, bx, by, bz int32, ticksReq int, continuous bool) {
+func (b *Bot) startMiningArea(ax, ay, az, bx, by, bz int32, ticksReq int, continuous bool, faceAccurate bool) {
 	minX, maxX := ax, bx
 	if minX > maxX {
 		minX, maxX = maxX, minX
@@ -3325,13 +3384,18 @@ func (b *Bot) startMiningArea(ax, ay, az, bx, by, bz int32, ticksReq int, contin
 	b.mineBoxMin = protocol.BlockPos{minX, minY, minZ}
 	b.mineBoxMax = protocol.BlockPos{maxX, maxY, maxZ}
 	b.mineContinuous = continuous
+	b.mineFaceAccurate = faceAccurate
 	b.mu.Unlock()
 
 	modeStr := "top-down"
 	if continuous {
 		modeStr = "continuous/generator mode"
 	}
-	b.reply(fmt.Sprintf("Mining space (%d, %d, %d) to (%d, %d, %d): %d blocks queued (%s).", minX, minY, minZ, maxX, maxY, maxZ, total, modeStr))
+	faceStr := "standard face"
+	if faceAccurate {
+		faceStr = "face-accurate"
+	}
+	b.reply(fmt.Sprintf("Mining space (%d, %d, %d) to (%d, %d, %d): %d blocks queued (%s, %s).", minX, minY, minZ, maxX, maxY, maxZ, total, modeStr, faceStr))
 }
 
 func (b *Bot) stopMiningArea() {
@@ -3342,6 +3406,7 @@ func (b *Bot) stopMiningArea() {
 	}
 	b.mineActive = false
 	b.mineContinuous = false
+	b.mineFaceAccurate = false
 	b.mineQueue = nil
 	b.mineCurrent = nil
 	b.mineStuckTicks = 0

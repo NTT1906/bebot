@@ -8,6 +8,7 @@ xsts_cache.json
 config.json
 skin.json
 waypoints.json
+offline_uuid.json
 
 # Certs
 cert/
