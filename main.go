@@ -1989,13 +1989,6 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 			abortFace = determineBlockFace(eyePos, *abortBt)
 		}
 		actions = append(actions, protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionAbortBreak), BlockPos: *abortBt, Face: abortFace})
-		_ = c.WritePacket(&packet.PlayerAction{
-			EntityRuntimeID: b.entityID,
-			ActionType:      protocol.PlayerActionAbortBreak,
-			BlockPosition:   *abortBt,
-			ResultPosition:  *abortBt,
-			BlockFace:       abortFace,
-		})
 	}
 
 	if bt != nil {
@@ -2018,16 +2011,9 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 			actions = append(actions,
 				protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionStartBreak), BlockPos: *bt, Face: btFace},
 			)
-			_ = c.WritePacket(&packet.PlayerAction{
-				EntityRuntimeID: b.entityID,
-				ActionType:      protocol.PlayerActionStartBreak,
-				BlockPosition:   *bt,
-				ResultPosition:  *bt,
-				BlockFace:       btFace,
-			})
 		} else {
 			actions = append(actions,
-				protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionCrackBreak), BlockPos: *bt, Face: btFace},
+				protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionContinueDestroyBlock), BlockPos: *bt, Face: btFace},
 			)
 		}
 
@@ -2036,15 +2022,7 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 		if ticks >= maxTicks {
 			actions = append(actions,
 				protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionPredictDestroyBlock), BlockPos: *bt, Face: btFace},
-				protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionStopBreak), BlockPos: *bt, Face: btFace},
 			)
-			_ = c.WritePacket(&packet.PlayerAction{
-				EntityRuntimeID: b.entityID,
-				ActionType:      protocol.PlayerActionStopBreak,
-				BlockPosition:   *bt,
-				ResultPosition:  *bt,
-				BlockFace:       btFace,
-			})
 			_ = c.WritePacket(&packet.InventoryTransaction{
 				TransactionData: &protocol.UseItemTransactionData{
 					ActionType:    protocol.UseItemActionBreakBlock,
