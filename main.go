@@ -266,8 +266,10 @@ func main() {
 		configPath:    *configPath,
 		skinPath:      *skinFile,
 		xblCache:      xblCache,
-		itemNamesByID: make(map[int32]string),
-		mineAttempts:  make(map[protocol.BlockPos]int),
+		itemNamesByID:     make(map[int32]string),
+		mineAttempts:      make(map[protocol.BlockPos]int),
+		mineRecentBroken:  make(map[protocol.BlockPos]uint64),
+		mineAirRuntimeIDs: make(map[uint32]bool),
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -659,6 +661,8 @@ type Bot struct {
 	local                        bool
 	itemNamesByID                map[int32]string
 	mineAttempts                 map[protocol.BlockPos]int
+	mineRecentBroken             map[protocol.BlockPos]uint64
+	mineAirRuntimeIDs            map[uint32]bool
 	mineLastFinishedPos          protocol.BlockPos
 	mineLastFinishedTick         uint64
 }
@@ -1183,9 +1187,20 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 			if b.mineActive {
 				pos := p.Position
 				isCurrentBreak := b.breakTarget != nil && pos == *b.breakTarget
-				isRecentFinish := pos == b.mineLastFinishedPos && b.tick-b.mineLastFinishedTick < 40
-				if isCurrentBreak || isRecentFinish {
+				_, isRecentBreak := b.mineRecentBroken[pos]
+				isRecentFinish := pos == b.mineLastFinishedPos && b.tick-b.mineLastFinishedTick < 200
+
+				if isCurrentBreak || isRecentBreak || isRecentFinish {
+					// This block was broken into AIR by the bot. Register runtime ID as air.
+					if b.mineAirRuntimeIDs == nil {
+						b.mineAirRuntimeIDs = make(map[uint32]bool)
+					}
+					b.mineAirRuntimeIDs[p.NewBlockRuntimeID] = true
+
 					if isCurrentBreak {
+						if b.mineRecentBroken != nil {
+							b.mineRecentBroken[*b.breakTarget] = b.tick
+						}
 						b.mineLastFinishedPos = *b.breakTarget
 						b.mineLastFinishedTick = b.tick
 						b.breakTarget = nil
@@ -1206,9 +1221,32 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 						}
 					}
 					b.mineQueue = filtered
+				} else if b.mineAirRuntimeIDs != nil && b.mineAirRuntimeIDs[p.NewBlockRuntimeID] {
+					// Update is for an AIR block (broken by player, explosion, or previously broken).
+					// Air must NEVER be added to the mine queue!
+					if b.mineAttempts != nil {
+						delete(b.mineAttempts, pos)
+					}
+					filtered := make([]protocol.BlockPos, 0, len(b.mineQueue))
+					for _, q := range b.mineQueue {
+						if q != pos {
+							filtered = append(filtered, q)
+						}
+					}
+					b.mineQueue = filtered
+
+					// If the bot is currently targeting this position, it's already air! Move on immediately.
+					if b.breakTarget != nil && *b.breakTarget == pos {
+						b.breakTarget = nil
+						b.breakTicks = 0
+						b.mineCurrent = nil
+					} else if b.mineCurrent != nil && *b.mineCurrent == pos {
+						b.mineCurrent = nil
+					}
 				} else if b.isInMineBox(pos) {
-					if b.mineAttempts != nil && b.mineAttempts[pos] >= 3 {
-						// Block failed to break 3 times, do not re-queue
+					// Genuine solid block placed or generated in the mine area
+					if b.mineAttempts != nil && b.mineAttempts[pos] >= 2 {
+						// Block failed to break, do not re-queue
 					} else {
 						alreadyQueued := false
 						if b.mineCurrent != nil && *b.mineCurrent == pos {
@@ -2054,6 +2092,9 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 				if b.mineActive {
 					if b.mineAttempts != nil {
 						b.mineAttempts[*bt]++
+					}
+					if b.mineRecentBroken != nil {
+						b.mineRecentBroken[*bt] = b.tick
 					}
 					b.mineLastFinishedPos = *bt
 					b.mineLastFinishedTick = b.tick
@@ -3448,6 +3489,7 @@ func (b *Bot) startMiningArea(ax, ay, az, bx, by, bz int32, ticksReq int, contin
 	b.mineContinuous = continuous
 	b.mineFaceAccurate = faceAccurate
 	b.mineAttempts = make(map[protocol.BlockPos]int)
+	b.mineRecentBroken = make(map[protocol.BlockPos]uint64)
 	b.mu.Unlock()
 
 	modeStr := "top-down"
@@ -3474,6 +3516,7 @@ func (b *Bot) stopMiningArea() {
 	b.mineCurrent = nil
 	b.mineStuckTicks = 0
 	b.mineAttempts = nil
+	b.mineRecentBroken = nil
 	b.mu.Unlock()
 	b.reply("Stopped area mining.")
 }
@@ -3506,11 +3549,11 @@ func determineBlockFace(eyePos mgl32.Vec3, blockPos protocol.BlockPos) int32 {
 }
 
 func (b *Bot) pickNextMineBlock() *protocol.BlockPos {
-	// Skip blocks that have failed to break 3 times (likely unbreakable or protected)
-	for len(b.mineQueue) > 0 && b.mineAttempts != nil && b.mineAttempts[b.mineQueue[0]] >= 3 {
+	// Skip blocks that have failed to break 2 times (likely unbreakable, air, or protected)
+	for len(b.mineQueue) > 0 && b.mineAttempts != nil && b.mineAttempts[b.mineQueue[0]] >= 2 {
 		skipped := b.mineQueue[0]
 		b.mineQueue = b.mineQueue[1:]
-		log.Printf("bebot: skipping block at (%d, %d, %d) (failed 3 times, likely unbreakable)\n", skipped.X(), skipped.Y(), skipped.Z())
+		log.Printf("bebot: skipping block at (%d, %d, %d) (failed 2 times, likely air or unbreakable)\n", skipped.X(), skipped.Y(), skipped.Z())
 	}
 
 	if len(b.mineQueue) == 0 {
