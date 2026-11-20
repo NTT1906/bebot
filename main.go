@@ -676,6 +676,7 @@ type Bot struct {
 	hasteLevel                   int32
 	mineTimeoutSec               float64
 	mineBlockStart               time.Time
+	mineInitialDone              bool
 	mineLastFinishedPos          protocol.BlockPos
 	mineLastFinishedTick         uint64
 }
@@ -1196,92 +1197,18 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 		case *packet.Disconnect:
 			log.Printf("bebot: server disconnected: %q\n", p.Message)
 		case *packet.UpdateBlock:
-			b.mu.Lock()
-			if b.mineActive {
-				pos := p.Position
-				isCurrentBreak := b.breakTarget != nil && pos == *b.breakTarget
-				isRecentFinish := pos == b.mineLastFinishedPos && b.tick-b.mineLastFinishedTick < 40
-
-				if isCurrentBreak || isRecentFinish {
-					// Block was broken into AIR by the bot. Register runtime ID as air.
-					if b.mineAirRuntimeIDs == nil {
-						b.mineAirRuntimeIDs = make(map[uint32]bool)
-					}
-					b.mineAirRuntimeIDs[p.NewBlockRuntimeID] = true
-
-					if isCurrentBreak {
-						if b.breakTicks <= 3 {
-							b.mineFastBreak = true
-						}
-						b.mineLastFinishedPos = *b.breakTarget
-						b.mineLastFinishedTick = b.tick
-						b.breakTarget = nil
-						b.breakTicks = 0
-						b.mineCurrent = nil
-						b.mineCount++
-						if b.mineCount%25 == 0 || len(b.mineQueue) == 0 {
-							log.Printf("bebot: block broken (%d mined)\n", b.mineCount)
-						}
-					}
-					if b.mineAttempts != nil {
-						delete(b.mineAttempts, pos)
-					}
-					filtered := make([]protocol.BlockPos, 0, len(b.mineQueue))
-					for _, q := range b.mineQueue {
-						if q != pos {
-							filtered = append(filtered, q)
-						}
-					}
-					b.mineQueue = filtered
-				} else {
-					isAir := p.NewBlockRuntimeID == 0 || (b.mineAirRuntimeIDs != nil && b.mineAirRuntimeIDs[p.NewBlockRuntimeID])
-					if isAir {
-						// Air block update (neighbor update, player break, etc.)
-						filtered := make([]protocol.BlockPos, 0, len(b.mineQueue))
-						for _, q := range b.mineQueue {
-							if q != pos {
-								filtered = append(filtered, q)
-							}
-						}
-						b.mineQueue = filtered
-
-						// If targeting this position, it's already air! Move on immediately.
-						if b.breakTarget != nil && *b.breakTarget == pos {
-							b.breakTarget = nil
-							b.breakTicks = 0
-							b.mineCurrent = nil
-						} else if b.mineCurrent != nil && *b.mineCurrent == pos {
-							b.mineCurrent = nil
-						}
-					} else if b.isInMineBox(pos) {
-						// Genuine solid block placed or generated in the mine area
-						if b.mineAttempts != nil {
-							delete(b.mineAttempts, pos)
-						}
-						alreadyQueued := false
-						if b.mineCurrent != nil && *b.mineCurrent == pos {
-							alreadyQueued = true
-						}
-						if b.breakTarget != nil && *b.breakTarget == pos {
-							alreadyQueued = true
-						}
-						if !alreadyQueued {
-							for _, q := range b.mineQueue {
-								if q == pos {
-									alreadyQueued = true
-									break
-								}
-							}
-						}
-						if !alreadyQueued {
-							b.mineQueue = append(b.mineQueue, pos)
-							b.mineTotal++
-							log.Printf("bebot: new block detected at (%d, %d, %d), added to mine queue\n", pos.X(), pos.Y(), pos.Z())
-						}
-					}
-				}
+			b.handleUpdateBlock(p.Position, p.NewBlockRuntimeID)
+		case *packet.UpdateBlockSynced:
+			b.handleUpdateBlock(p.Position, p.NewBlockRuntimeID)
+		case *packet.UpdateSubChunkBlocks:
+			for _, entry := range p.Blocks {
+				pos := b.resolveSubChunkBlockPos(p.Position, entry.BlockPos)
+				b.handleUpdateBlock(pos, entry.BlockRuntimeID)
 			}
-			b.mu.Unlock()
+			for _, entry := range p.Extra {
+				pos := b.resolveSubChunkBlockPos(p.Position, entry.BlockPos)
+				b.handleUpdateBlock(pos, entry.BlockRuntimeID)
+			}
 		case *packet.CommandOutput:
 			msgs := make([]string, 0, len(p.OutputMessages))
 			var capKey string
@@ -1706,21 +1633,17 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 	if b.mineActive {
 		if b.mineCurrent == nil {
 			if len(b.mineQueue) == 0 {
-				if !b.mineContinuous {
-					b.mineActive = false
+				if b.mode == modeMoving {
 					b.mode = modeIdle
-					b.breakTarget = nil
-					b.breakTicks = 0
+				}
+				b.breakTarget = nil
+				b.breakTicks = 0
+				if !b.mineInitialDone {
+					b.mineInitialDone = true
 					count := b.mineCount
 					b.mu.Unlock()
 					b.reply(fmt.Sprintf("Area mining complete! Mined %d blocks.", count))
 					b.mu.Lock()
-				} else {
-					if b.mode == modeMoving {
-						b.mode = modeIdle
-					}
-					b.breakTarget = nil
-					b.breakTicks = 0
 				}
 			} else {
 				b.mineCurrent = b.pickNextMineBlock()
@@ -2089,6 +2012,11 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 		}
 		b.mu.Unlock()
 
+		maxTicks := b.getBreakDuration()
+		if timeoutTicks < maxTicks {
+			timeoutTicks = maxTicks
+		}
+
 		if b.mineActive && ticks >= timeoutTicks {
 			log.Printf("bebot: block at (%d, %d, %d) timed out after %.1fs (cannot be mined: air/water/bedrock), skipping\n", bt.X(), bt.Y(), bt.Z(), timeoutSec)
 			b.mu.Lock()
@@ -2120,8 +2048,6 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 				)
 			}
 
-			maxTicks := b.getBreakDuration()
-
 			if ticks >= maxTicks {
 				actions = append(actions,
 					protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionPredictDestroyBlock), BlockPos: *bt, Face: btFace},
@@ -2148,11 +2074,22 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 				if b.breakRepeat {
 					b.breakTicks = 0
 				} else {
-					if !b.mineActive {
+					if b.mineActive {
+						if b.mineAttempts != nil {
+							b.mineAttempts[*bt] = 2
+						}
+						b.mineLastFinishedPos = *bt
+						b.mineLastFinishedTick = b.tick
+						b.mineCurrent = nil
 						b.breakTarget = nil
 						b.breakTicks = 0
+						b.mineCount++
+						if b.mineCount%25 == 0 || len(b.mineQueue) == 0 {
+							log.Printf("bebot: mined %d/%d blocks\n", b.mineCount, b.mineTotal)
+						}
 					} else {
-						b.breakTicks++
+						b.breakTarget = nil
+						b.breakTicks = 0
 					}
 				}
 				b.mu.Unlock()
@@ -3583,6 +3520,7 @@ func (b *Bot) startMiningArea(ax, ay, az, bx, by, bz int32, ticksReq int, contin
 	b.mineTotal = total
 	b.mineCount = 0
 	b.mineActive = true
+	b.mineInitialDone = false
 	b.mineCurrent = nil
 	b.mineStuckTicks = 0
 	b.mineTicksReq = ticksReq
@@ -3621,8 +3559,133 @@ func (b *Bot) stopMiningArea() {
 	b.mineCurrent = nil
 	b.mineStuckTicks = 0
 	b.mineAttempts = nil
+	b.breakTarget = nil
+	b.breakTicks = 0
+	b.mineInitialDone = false
 	b.mu.Unlock()
 	b.reply("Stopped area mining.")
+}
+
+func sortMineQueue(queue []protocol.BlockPos) {
+	sort.SliceStable(queue, func(i, j int) bool {
+		if queue[i].Y() != queue[j].Y() {
+			return queue[i].Y() > queue[j].Y()
+		}
+		if queue[i].X() != queue[j].X() {
+			return queue[i].X() < queue[j].X()
+		}
+		return queue[i].Z() < queue[j].Z()
+	})
+}
+
+func (b *Bot) resolveSubChunkBlockPos(subPos protocol.BlockPos, blockPos protocol.BlockPos) protocol.BlockPos {
+	if b.isInMineBox(blockPos) {
+		return blockPos
+	}
+	candidateA := protocol.BlockPos{subPos.X()*16 + blockPos.X(), subPos.Y()*16 + blockPos.Y(), subPos.Z()*16 + blockPos.Z()}
+	if b.isInMineBox(candidateA) {
+		return candidateA
+	}
+	candidateB := protocol.BlockPos{subPos.X() + blockPos.X(), subPos.Y() + blockPos.Y(), subPos.Z() + blockPos.Z()}
+	if b.isInMineBox(candidateB) {
+		return candidateB
+	}
+	if blockPos.X() >= 0 && blockPos.X() <= 15 && blockPos.Z() >= 0 && blockPos.Z() <= 15 {
+		if subPos.X() > -1000 && subPos.X() < 1000 {
+			return candidateA
+		}
+		return candidateB
+	}
+	return blockPos
+}
+
+func (b *Bot) handleUpdateBlock(pos protocol.BlockPos, runtimeID uint32) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.mineActive {
+		return
+	}
+	isCurrentBreak := b.breakTarget != nil && pos == *b.breakTarget
+	isRecentFinish := pos == b.mineLastFinishedPos && b.tick-b.mineLastFinishedTick < 40
+
+	if isCurrentBreak || isRecentFinish {
+		if b.mineAirRuntimeIDs == nil {
+			b.mineAirRuntimeIDs = make(map[uint32]bool)
+		}
+		b.mineAirRuntimeIDs[runtimeID] = true
+		if isCurrentBreak {
+			if b.breakTicks <= 3 {
+				b.mineFastBreak = true
+			}
+			b.mineLastFinishedPos = *b.breakTarget
+			b.mineLastFinishedTick = b.tick
+			b.breakTarget = nil
+			b.breakTicks = 0
+			b.mineCurrent = nil
+			b.mineCount++
+			if b.mineCount%25 == 0 || len(b.mineQueue) == 0 {
+				log.Printf("bebot: block broken (%d mined)\n", b.mineCount)
+			}
+		}
+		if isRecentFinish {
+			b.mineLastFinishedPos = protocol.BlockPos{}
+			b.mineLastFinishedTick = 0
+		}
+		if b.mineAttempts != nil {
+			delete(b.mineAttempts, pos)
+		}
+		filtered := make([]protocol.BlockPos, 0, len(b.mineQueue))
+		for _, q := range b.mineQueue {
+			if q != pos {
+				filtered = append(filtered, q)
+			}
+		}
+		b.mineQueue = filtered
+	} else {
+		isAir := runtimeID == 0 || (b.mineAirRuntimeIDs != nil && b.mineAirRuntimeIDs[runtimeID])
+		if isAir {
+			filtered := make([]protocol.BlockPos, 0, len(b.mineQueue))
+			for _, q := range b.mineQueue {
+				if q != pos {
+					filtered = append(filtered, q)
+				}
+			}
+			b.mineQueue = filtered
+			if b.breakTarget != nil && *b.breakTarget == pos {
+				b.breakTarget = nil
+				b.breakTicks = 0
+				b.mineCurrent = nil
+			} else if b.mineCurrent != nil && *b.mineCurrent == pos {
+				b.mineCurrent = nil
+			}
+		} else if b.isInMineBox(pos) {
+			if b.mineAttempts != nil {
+				delete(b.mineAttempts, pos)
+			}
+			alreadyQueued := false
+			if b.mineCurrent != nil && *b.mineCurrent == pos {
+				alreadyQueued = true
+			}
+			if b.breakTarget != nil && *b.breakTarget == pos {
+				alreadyQueued = true
+			}
+			if !alreadyQueued {
+				for _, q := range b.mineQueue {
+					if q == pos {
+						alreadyQueued = true
+						break
+					}
+				}
+			}
+			if !alreadyQueued {
+				b.mineQueue = append(b.mineQueue, pos)
+				b.mineTotal++
+				b.mineInitialDone = false
+				sortMineQueue(b.mineQueue)
+				log.Printf("bebot: new block detected at (%d, %d, %d), added to mine queue (queue len=%d)\n", pos.X(), pos.Y(), pos.Z(), len(b.mineQueue))
+			}
+		}
+	}
 }
 
 func determineBlockFace(eyePos mgl32.Vec3, blockPos protocol.BlockPos) int32 {
