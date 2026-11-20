@@ -684,6 +684,8 @@ type Bot struct {
 	mineLastFinishedTick         uint64
 	mineLastWasBroken            bool
 	mineWaitingForBlocks         bool
+	mineLearnActive              bool
+	mineLearnPos                 protocol.BlockPos
 }
 
 func (b *Bot) run(ctx context.Context) {
@@ -2637,7 +2639,38 @@ func (b *Bot) command(line string) {
 		b.spawnPos = protocol.BlockPos{x, y, z}
 		b.interactBlock(b.spawnPos)
 		log.Printf("bebot: sleep/spawn checkpoint requested at %d %d %d\n", x, y, z)
-	case "break", "breakat", "breakcoord", "mine", "mineat", "minearea", "minespace", "breakarea", "breakspace", "mineloop", "minefarm", "minetimeout":
+	case "break", "breakat", "breakcoord", "mine", "mineat", "minearea", "minespace", "breakarea", "breakspace", "mineloop", "minefarm", "minetimeout", "learn", "learnair", "calibrate", "minelearn", "minecalibrate":
+		if strings.EqualFold(p[0], "learn") || strings.EqualFold(p[0], "learnair") || strings.EqualFold(p[0], "calibrate") ||
+			strings.EqualFold(p[0], "minelearn") || strings.EqualFold(p[0], "minecalibrate") ||
+			(len(p) >= 2 && (strings.EqualFold(p[1], "learn") || strings.EqualFold(p[1], "calibrate"))) {
+			var target *protocol.BlockPos
+			startIdx := 2
+			if strings.EqualFold(p[0], "learn") || strings.EqualFold(p[0], "learnair") || strings.EqualFold(p[0], "calibrate") ||
+				strings.EqualFold(p[0], "minelearn") || strings.EqualFold(p[0], "minecalibrate") {
+				startIdx = 1
+				if len(p) >= 2 && strings.EqualFold(p[1], "air") {
+					startIdx = 2
+				}
+			}
+			if len(p) >= startIdx+3 {
+				var x, y, z int32
+				if _, err := fmt.Sscanf(strings.Join(p[startIdx:startIdx+3], " "), "%d %d %d", &x, &y, &z); err == nil {
+					target = &protocol.BlockPos{x, y, z}
+				}
+			}
+			b.startLearningAir(target)
+			return
+		}
+		if len(p) == 2 && strings.EqualFold(p[1], "air") {
+			b.mu.Lock()
+			var ids []uint32
+			for id := range b.mineAirRuntimeIDs {
+				ids = append(ids, id)
+			}
+			b.mu.Unlock()
+			b.reply(fmt.Sprintf("Known air runtime IDs: %v", ids))
+			return
+		}
 		if strings.EqualFold(p[0], "minetimeout") || (len(p) >= 2 && strings.EqualFold(p[1], "timeout")) {
 			argIdx := 2
 			if strings.EqualFold(p[0], "minetimeout") {
@@ -3452,6 +3485,7 @@ func (b *Bot) startBreaking(pos protocol.BlockPos, animate bool, repeat bool) {
 func (b *Bot) stopBreaking() {
 	b.mu.Lock()
 	if b.breakTarget == nil {
+		b.mineLearnActive = false
 		b.mu.Unlock()
 		log.Println("bebot: no block breaking operation is active")
 		return
@@ -3460,6 +3494,7 @@ func (b *Bot) stopBreaking() {
 	b.abortBreakTarget = &pos
 	b.breakTarget = nil
 	b.breakTicks = 0
+	b.mineLearnActive = false
 	b.mu.Unlock()
 
 	log.Printf("bebot: stopped breaking block at %d %d %d\n", pos.X(), pos.Y(), pos.Z())
@@ -3703,6 +3738,24 @@ func (b *Bot) handleUpdateBlock(pos protocol.BlockPos, runtimeID uint32) {
 	if tracePackets {
 		log.Printf("bebot: debug UpdateBlock pos=(%d, %d, %d) runtimeID=%d\n", pos.X(), pos.Y(), pos.Z(), runtimeID)
 	}
+
+	if b.mineLearnActive && pos == b.mineLearnPos {
+		if b.mineAirRuntimeIDs == nil {
+			b.mineAirRuntimeIDs = make(map[uint32]bool)
+		}
+		b.mineAirRuntimeIDs[runtimeID] = true
+		if b.knownAirBlocks == nil {
+			b.knownAirBlocks = make(map[protocol.BlockPos]bool)
+		}
+		b.knownAirBlocks[pos] = true
+		b.mineLearnActive = false
+		b.breakTarget = nil
+		b.breakTicks = 0
+		log.Printf("bebot: calibration complete! Confirmed air block runtime ID: %d\n", runtimeID)
+		b.reply(fmt.Sprintf("Calibration complete! Confirmed air block runtime ID: %d.", runtimeID))
+		return
+	}
+
 	if !b.mineActive {
 		return
 	}
@@ -3854,6 +3907,36 @@ func (b *Bot) startBreakingFront(animate bool, repeat bool) {
 	b.startBreaking(protocol.BlockPos{x, y, z}, animate, repeat)
 }
 
+func (b *Bot) startLearningAir(pos *protocol.BlockPos) {
+	b.mu.Lock()
+	var target protocol.BlockPos
+	if pos != nil {
+		target = *pos
+	} else {
+		yaw := b.facingYaw
+		if b.mode == modeMimic {
+			if p := b.players[strings.ToLower(b.mimicTarget)]; p.id != 0 {
+				yaw = p.yaw
+			}
+		}
+		rad := float64(yaw) * math.Pi / 180
+		x := int32(math.Floor(float64(b.pos.X() - float32(math.Sin(rad)))))
+		y := int32(math.Floor(float64(b.pos.Y())))
+		z := int32(math.Floor(float64(b.pos.Z() + float32(math.Cos(rad)))))
+		target = protocol.BlockPos{x, y, z}
+	}
+	b.mineLearnActive = true
+	b.mineLearnPos = target
+	b.breakTarget = &target
+	b.breakTicks = 0
+	b.breakAnimation = true
+	b.breakRepeat = false
+	b.mu.Unlock()
+
+	log.Printf("bebot: calibrating air block runtime ID at (%d, %d, %d)...\n", target.X(), target.Y(), target.Z())
+	b.reply(fmt.Sprintf("Calibrating air block runtime ID at (%d, %d, %d)... breaking block.", target.X(), target.Y(), target.Z()))
+}
+
 func (b *Bot) help() {
 	lines := []string{
 		"Commands:",
@@ -3879,6 +3962,8 @@ func (b *Bot) help() {
 		"break <x y z> <animation: true|false> - break a block",
 		"mine <ax ay az> <bx by bz> [repeat: true|false] [faceAccurate: true|false] - mine all blocks in a space (top-down)",
 		"mine timeout <seconds> - set per-block break timeout (default: 3.0s)",
+		"mine learn [x y z] - calibrate and learn air block runtime ID from broken block",
+		"mine air - display currently known air runtime IDs",
 		"stopmine / stopbreak - stop mining",
 		"hotbar <0-9> - select a hotbar slot",
 		"dropall - drop all inventory items",
