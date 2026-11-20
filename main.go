@@ -664,6 +664,7 @@ type Bot struct {
 	mineBoxMin                   protocol.BlockPos
 	mineBoxMax                   protocol.BlockPos
 	mineContinuous               bool
+	mineRepeat                   bool
 	mineFaceAccurate             bool
 	offline                      bool
 	botName                      string
@@ -1638,9 +1639,21 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 				}
 				b.breakTarget = nil
 				b.breakTicks = 0
-				if !b.mineInitialDone {
-					b.mineInitialDone = true
-					count := b.mineCount
+				count := b.mineCount
+				if b.mineRepeat {
+					b.mu.Unlock()
+					b.reply(fmt.Sprintf("Area mining complete! Mined %d blocks. Repeating...", count))
+					b.mu.Lock()
+					b.restartMiningQueue()
+				} else {
+					b.mineActive = false
+					b.mineContinuous = false
+					b.mineRepeat = false
+					b.mineFaceAccurate = false
+					b.mineQueue = nil
+					b.mineCurrent = nil
+					b.mineStuckTicks = 0
+					b.mineAttempts = nil
 					b.mu.Unlock()
 					b.reply(fmt.Sprintf("Area mining complete! Mined %d blocks.", count))
 					b.mu.Lock()
@@ -2006,16 +2019,13 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 		if timeoutSec <= 0 {
 			timeoutSec = 3.0
 		}
-		timeoutTicks := int(timeoutSec * 20)
+		timeoutTicks := int(math.Round(timeoutSec * 20))
 		if timeoutTicks < 1 {
 			timeoutTicks = 1
 		}
 		b.mu.Unlock()
 
 		maxTicks := b.getBreakDuration()
-		if timeoutTicks < maxTicks {
-			timeoutTicks = maxTicks
-		}
 
 		if b.mineActive && ticks >= timeoutTicks {
 			log.Printf("bebot: block at (%d, %d, %d) timed out after %.1fs (cannot be mined: air/water/bedrock), skipping\n", bt.X(), bt.Y(), bt.Z(), timeoutSec)
@@ -2632,36 +2642,43 @@ func (b *Bot) command(line string) {
 			b.reply(fmt.Sprintf("Mine timeout set to %.1fs", sec))
 			return
 		}
-		continuous := strings.EqualFold(p[0], "mineloop") || strings.EqualFold(p[0], "minefarm")
-		if len(p) >= 7 && len(p) <= 10 {
+		repeat := strings.EqualFold(p[0], "mineloop") || strings.EqualFold(p[0], "minefarm")
+		if len(p) >= 7 && len(p) <= 11 {
 			var ax, ay, az, bx, by, bz int32
 			if _, err := fmt.Sscanf(strings.Join(p[1:7], " "), "%d %d %d %d %d %d", &ax, &ay, &az, &bx, &by, &bz); err != nil {
-				b.reply("Usage: mine <ax> <ay> <az> <bx> <by> <bz> [ticksPerBlock] [continuous: true|false] [faceAccurate: true|false]")
+				b.reply("Usage: mine <ax> <ay> <az> <bx> <by> <bz> [repeat: true|false] [faceAccurate: true|false]")
 				return
 			}
 			ticks := 0
 			faceAccurate := false
 			boolIdx := 0
-			for _, arg := range p[7:] {
-				if t, err := strconv.Atoi(arg); err == nil && t >= 0 {
-					ticks = t
-				} else if strings.EqualFold(arg, "face") || strings.EqualFold(arg, "faceaccurate") || strings.EqualFold(arg, "accurate") {
+			for _, rawArg := range p[7:] {
+				arg := strings.ToLower(rawArg)
+				if arg == "repeat" || arg == "loop" || arg == "repeat:true" || arg == "repeat=true" {
+					repeat = true
+				} else if arg == "repeat:false" || arg == "repeat=false" || arg == "norepeat" || arg == "once" {
+					repeat = false
+				} else if arg == "face" || arg == "faceaccurate" || arg == "accurate" || arg == "face:true" || arg == "face=true" {
 					faceAccurate = true
+				} else if arg == "face:false" || arg == "face=false" {
+					faceAccurate = false
 				} else if bVal, err := strconv.ParseBool(arg); err == nil {
 					if boolIdx == 0 && !strings.EqualFold(p[0], "mineloop") && !strings.EqualFold(p[0], "minefarm") {
-						continuous = bVal
+						repeat = bVal
 						boolIdx++
 					} else {
 						faceAccurate = bVal
 						boolIdx++
 					}
+				} else if t, err := strconv.Atoi(arg); err == nil && t >= 0 {
+					ticks = t
 				}
 			}
-			b.startMiningArea(ax, ay, az, bx, by, bz, ticks, continuous, faceAccurate)
+			b.startMiningArea(ax, ay, az, bx, by, bz, ticks, repeat, faceAccurate)
 			return
 		}
 		if len(p) < 5 || len(p) > 6 {
-			b.reply("Usage: break <x> <y> <z> <animation: true|false> [repeat: true|false] OR mine <ax> <ay> <az> <bx> <by> <bz> [ticks]")
+			b.reply("Usage: break <x> <y> <z> <animation: true|false> [repeat: true|false] OR mine <ax> <ay> <az> <bx> <by> <bz> [repeat: true|false] [faceAccurate: true|false]")
 			return
 		}
 		var x, y, z int32
@@ -2674,7 +2691,7 @@ func (b *Bot) command(line string) {
 			b.reply("Usage: break <x> <y> <z> <animation: true|false> [repeat: true|false]")
 			return
 		}
-		repeat := false
+		repeat = false
 		if len(p) == 6 {
 			repeat, err = strconv.ParseBool(p[5])
 			if err != nil {
@@ -3427,17 +3444,17 @@ func (b *Bot) stopBreaking() {
 func (b *Bot) getBreakDuration() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.mineActive && b.mineTicksReq > 0 {
-		return b.mineTicksReq
-	}
-	if b.gameMode == 1 || b.gameMode == 4 {
-		return 2
-	}
 	if b.hasteLevel >= 2 {
 		return 1
 	}
 	if b.hasteLevel == 1 {
 		return 2
+	}
+	if b.gameMode == 1 || b.gameMode == 4 {
+		return 2
+	}
+	if b.mineActive && b.mineTicksReq > 0 {
+		return b.mineTicksReq
 	}
 	if b.mineActive && b.mineFastBreak {
 		return 2
@@ -3478,7 +3495,7 @@ func (b *Bot) isInMineBox(pos protocol.BlockPos) bool {
 		pos.Z() >= b.mineBoxMin.Z() && pos.Z() <= b.mineBoxMax.Z()
 }
 
-func (b *Bot) startMiningArea(ax, ay, az, bx, by, bz int32, ticksReq int, continuous bool, faceAccurate bool) {
+func (b *Bot) startMiningArea(ax, ay, az, bx, by, bz int32, ticksReq int, repeat bool, faceAccurate bool) {
 	minX, maxX := ax, bx
 	if minX > maxX {
 		minX, maxX = maxX, minX
@@ -3526,7 +3543,8 @@ func (b *Bot) startMiningArea(ax, ay, az, bx, by, bz int32, ticksReq int, contin
 	b.mineTicksReq = ticksReq
 	b.mineBoxMin = protocol.BlockPos{minX, minY, minZ}
 	b.mineBoxMax = protocol.BlockPos{maxX, maxY, maxZ}
-	b.mineContinuous = continuous
+	b.mineRepeat = repeat
+	b.mineContinuous = repeat
 	b.mineFaceAccurate = faceAccurate
 	b.mineAttempts = make(map[protocol.BlockPos]int)
 	if b.mineAirRuntimeIDs == nil {
@@ -3535,9 +3553,9 @@ func (b *Bot) startMiningArea(ax, ay, az, bx, by, bz int32, ticksReq int, contin
 	b.mineFastBreak = false
 	b.mu.Unlock()
 
-	modeStr := "top-down"
-	if continuous {
-		modeStr = "continuous/generator mode"
+	modeStr := "once"
+	if repeat {
+		modeStr = "repeat"
 	}
 	faceStr := "standard face"
 	if faceAccurate {
@@ -3553,6 +3571,7 @@ func (b *Bot) stopMiningArea() {
 		return
 	}
 	b.mineActive = false
+	b.mineRepeat = false
 	b.mineContinuous = false
 	b.mineFaceAccurate = false
 	b.mineQueue = nil
@@ -3564,6 +3583,39 @@ func (b *Bot) stopMiningArea() {
 	b.mineInitialDone = false
 	b.mu.Unlock()
 	b.reply("Stopped area mining.")
+}
+
+func (b *Bot) restartMiningQueue() {
+	minX, maxX := b.mineBoxMin.X(), b.mineBoxMax.X()
+	minY, maxY := b.mineBoxMin.Y(), b.mineBoxMax.Y()
+	minZ, maxZ := b.mineBoxMin.Z(), b.mineBoxMax.Z()
+	total := int((maxX - minX + 1) * (maxY - minY + 1) * (maxZ - minZ + 1))
+	queue := make([]protocol.BlockPos, 0, total)
+	for y := maxY; y >= minY; y-- {
+		forward := true
+		for x := minX; x <= maxX; x++ {
+			if forward {
+				for z := minZ; z <= maxZ; z++ {
+					queue = append(queue, protocol.BlockPos{x, y, z})
+				}
+			} else {
+				for z := maxZ; z >= minZ; z-- {
+					queue = append(queue, protocol.BlockPos{x, y, z})
+				}
+			}
+			forward = !forward
+		}
+	}
+	b.mineQueue = queue
+	b.mineTotal = total
+	b.mineCount = 0
+	b.mineCurrent = nil
+	b.breakTarget = nil
+	b.breakTicks = 0
+	b.mineStuckTicks = 0
+	b.mineInitialDone = false
+	b.mineAttempts = make(map[protocol.BlockPos]int)
+	log.Printf("bebot: repeating area mining (%d blocks re-queued)\n", total)
 }
 
 func sortMineQueue(queue []protocol.BlockPos) {
@@ -3773,7 +3825,8 @@ func (b *Bot) help() {
 		"idle / stop - stop movement (keeps current facing)",
 		"idle reset - idle and reset facing to default",
 		"break <x y z> <animation: true|false> - break a block",
-		"mine <ax ay az> <bx by bz> [ticks] - mine all blocks in a space (top-down)",
+		"mine <ax ay az> <bx by bz> [repeat: true|false] [faceAccurate: true|false] - mine all blocks in a space (top-down)",
+		"mine timeout <seconds> - set per-block break timeout (default: 3.0s)",
 		"stopmine / stopbreak - stop mining",
 		"hotbar <0-9> - select a hotbar slot",
 		"dropall - drop all inventory items",
