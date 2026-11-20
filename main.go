@@ -1100,6 +1100,9 @@ func (b *Bot) connect(ctx context.Context) error {
 	}
 	_ = c.WritePacket(&packet.RequestChunkRadius{ChunkRadius: int32(renderDist), MaxChunkRadius: uint8(renderDist)})
 	log.Printf("bebot: requested updated chunk radius of %d chunks\n", renderDist)
+	if tracePackets {
+		log.Printf("bebot: server UseBlockNetworkIDHashes = %v (ServerBlockStateChecksum = %d)\n", c.GameData().UseBlockNetworkIDHashes, c.GameData().ServerBlockStateChecksum)
+	}
 
 	b.pos = c.GameData().PlayerPosition
 	b.last = b.pos
@@ -3697,6 +3700,9 @@ func (b *Bot) resolveSubChunkBlockPos(subPos protocol.BlockPos, blockPos protoco
 func (b *Bot) handleUpdateBlock(pos protocol.BlockPos, runtimeID uint32) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if tracePackets {
+		log.Printf("bebot: debug UpdateBlock pos=(%d, %d, %d) runtimeID=%d\n", pos.X(), pos.Y(), pos.Z(), runtimeID)
+	}
 	if !b.mineActive {
 		return
 	}
