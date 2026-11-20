@@ -279,6 +279,7 @@ func main() {
 		itemNamesByID:     make(map[int32]string),
 		mineAttempts:      make(map[protocol.BlockPos]int),
 		mineAirRuntimeIDs: map[uint32]bool{0: true},
+		knownAirBlocks:    make(map[protocol.BlockPos]bool),
 		mineTimeoutSec:    mineTimeout,
 	}
 	defer func() {
@@ -673,6 +674,9 @@ type Bot struct {
 	itemNamesByID                map[int32]string
 	mineAttempts                 map[protocol.BlockPos]int
 	mineAirRuntimeIDs            map[uint32]bool
+	knownAirBlocks               map[protocol.BlockPos]bool
+	breakPredictedTick           int
+	breakRejected                bool
 	mineFastBreak                bool
 	hasteLevel                   int32
 	mineTimeoutSec               float64
@@ -2034,11 +2038,17 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 			if b.mineAttempts != nil {
 				b.mineAttempts[*bt] = 2 // Mark finished so it is not retried
 			}
+			if b.knownAirBlocks == nil {
+				b.knownAirBlocks = make(map[protocol.BlockPos]bool)
+			}
+			b.knownAirBlocks[*bt] = true
 			b.mineLastFinishedPos = *bt
 			b.mineLastFinishedTick = b.tick
 			b.mineCurrent = nil
 			b.breakTarget = nil
 			b.breakTicks = 0
+			b.breakPredictedTick = 0
+			b.breakRejected = false
 			b.mineCount++
 			if b.mineCount%25 == 0 || len(b.mineQueue) == 0 {
 				log.Printf("bebot: mined %d/%d blocks\n", b.mineCount, b.mineTotal)
@@ -2048,6 +2058,8 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 			if ticks == 0 {
 				b.mu.Lock()
 				mineSwing = b.breakAnimation
+				b.breakPredictedTick = 0
+				b.breakRejected = false
 				b.mu.Unlock()
 				actions = append(actions,
 					protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionStartBreak), BlockPos: *bt, Face: btFace},
@@ -2059,7 +2071,12 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 			}
 
 			if ticks >= maxTicks {
-				shouldPredict := ticks == maxTicks || (ticks > maxTicks && (ticks-maxTicks)%4 == 0)
+				b.mu.Lock()
+				predTick := b.breakPredictedTick
+				rejected := b.breakRejected
+				b.mu.Unlock()
+
+				shouldPredict := predTick == 0 || (rejected && (ticks-maxTicks)%4 == 0)
 				if shouldPredict {
 					actions = append(actions,
 						protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionPredictDestroyBlock), BlockPos: *bt, Face: btFace},
@@ -2082,9 +2099,39 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 							BlockFace:       btFace,
 						})
 					}
+					b.mu.Lock()
+					b.breakPredictedTick = int(b.tick)
+					b.breakRejected = false
+					b.mu.Unlock()
 				}
+
 				b.mu.Lock()
-				if b.breakRepeat {
+				predTick = b.breakPredictedTick
+				rejected = b.breakRejected
+				currTick := int(b.tick)
+
+				// If we predicted destruction at least 2 ticks ago and the server didn't reject with solid UpdateBlock,
+				// the block is destroyed (or was air). Mark it completed.
+				if predTick > 0 && !rejected && currTick-predTick >= 2 {
+					if b.mineAttempts != nil {
+						b.mineAttempts[*bt] = 2
+					}
+					if b.knownAirBlocks == nil {
+						b.knownAirBlocks = make(map[protocol.BlockPos]bool)
+					}
+					b.knownAirBlocks[*bt] = true
+					b.mineLastFinishedPos = *bt
+					b.mineLastFinishedTick = b.tick
+					b.mineCurrent = nil
+					b.breakTarget = nil
+					b.breakTicks = 0
+					b.breakPredictedTick = 0
+					b.breakRejected = false
+					b.mineCount++
+					if b.mineCount%25 == 0 || len(b.mineQueue) == 0 {
+						log.Printf("bebot: mined %d/%d blocks\n", b.mineCount, b.mineTotal)
+					}
+				} else if b.breakRepeat {
 					b.breakTicks = 0
 				} else if !b.mineActive {
 					b.breakTarget = nil
@@ -3536,10 +3583,13 @@ func (b *Bot) startMiningArea(ax, ay, az, bx, by, bz int32, ticksReq int, repeat
 	b.mineContinuous = repeat
 	b.mineFaceAccurate = faceAccurate
 	b.mineAttempts = make(map[protocol.BlockPos]int)
+	b.knownAirBlocks = make(map[protocol.BlockPos]bool)
 	if b.mineAirRuntimeIDs == nil {
 		b.mineAirRuntimeIDs = map[uint32]bool{0: true}
 	}
 	b.mineFastBreak = false
+	b.breakPredictedTick = 0
+	b.breakRejected = false
 	b.mu.Unlock()
 
 	modeStr := "once"
@@ -3569,6 +3619,8 @@ func (b *Bot) stopMiningArea() {
 	b.mineAttempts = nil
 	b.breakTarget = nil
 	b.breakTicks = 0
+	b.breakPredictedTick = 0
+	b.breakRejected = false
 	b.mineInitialDone = false
 	b.mu.Unlock()
 	b.reply("Stopped area mining.")
@@ -3585,26 +3637,40 @@ func (b *Bot) restartMiningQueue() {
 		for x := minX; x <= maxX; x++ {
 			if forward {
 				for z := minZ; z <= maxZ; z++ {
-					queue = append(queue, protocol.BlockPos{x, y, z})
+					pos := protocol.BlockPos{x, y, z}
+					if b.knownAirBlocks != nil && b.knownAirBlocks[pos] {
+						continue
+					}
+					queue = append(queue, pos)
 				}
 			} else {
 				for z := maxZ; z >= minZ; z-- {
-					queue = append(queue, protocol.BlockPos{x, y, z})
+					pos := protocol.BlockPos{x, y, z}
+					if b.knownAirBlocks != nil && b.knownAirBlocks[pos] {
+						continue
+					}
+					queue = append(queue, pos)
 				}
 			}
 			forward = !forward
 		}
 	}
 	b.mineQueue = queue
-	b.mineTotal = total
+	b.mineTotal = len(queue)
 	b.mineCount = 0
 	b.mineCurrent = nil
 	b.breakTarget = nil
 	b.breakTicks = 0
+	b.breakPredictedTick = 0
+	b.breakRejected = false
 	b.mineStuckTicks = 0
 	b.mineInitialDone = false
 	b.mineAttempts = make(map[protocol.BlockPos]int)
-	log.Printf("bebot: repeating area mining (%d blocks re-queued)\n", total)
+	if len(queue) > 0 {
+		log.Printf("bebot: repeating area mining (%d blocks re-queued)\n", len(queue))
+	} else {
+		log.Printf("bebot: repeating area mining: area is clear, waiting for new blocks to appear\n")
+	}
 }
 
 func sortMineQueue(queue []protocol.BlockPos) {
@@ -3650,6 +3716,11 @@ func (b *Bot) handleUpdateBlock(pos protocol.BlockPos, runtimeID uint32) {
 	isAir := runtimeID == 0 || (b.mineAirRuntimeIDs != nil && b.mineAirRuntimeIDs[runtimeID])
 
 	if isAir {
+		if b.knownAirBlocks == nil {
+			b.knownAirBlocks = make(map[protocol.BlockPos]bool)
+		}
+		b.knownAirBlocks[pos] = true
+
 		// The block at pos has become air (broken by bot, by another player, or cleared)
 		isCurrentBreak := b.breakTarget != nil && pos == *b.breakTarget
 		if isCurrentBreak {
@@ -3658,6 +3729,8 @@ func (b *Bot) handleUpdateBlock(pos protocol.BlockPos, runtimeID uint32) {
 			}
 			b.breakTarget = nil
 			b.breakTicks = 0
+			b.breakPredictedTick = 0
+			b.breakRejected = false
 			b.mineCurrent = nil
 			b.mineCount++
 			if b.mineCount%25 == 0 || len(b.mineQueue) == 0 {
@@ -3677,32 +3750,43 @@ func (b *Bot) handleUpdateBlock(pos protocol.BlockPos, runtimeID uint32) {
 			}
 		}
 		b.mineQueue = filtered
-	} else if b.isInMineBox(pos) {
-		// A solid block was placed or pushed into the mining area
-		if b.mineAttempts != nil {
-			delete(b.mineAttempts, pos)
-		}
-		alreadyQueued := false
-		if b.mineCurrent != nil && *b.mineCurrent == pos {
-			alreadyQueued = true
+	} else {
+		if b.knownAirBlocks != nil {
+			delete(b.knownAirBlocks, pos)
 		}
 		if b.breakTarget != nil && *b.breakTarget == pos {
-			alreadyQueued = true
+			// Solid block update at our current break target indicates server rejection of premature destroy
+			b.breakRejected = true
+			b.breakPredictedTick = 0
+			b.mineFastBreak = false
 		}
-		if !alreadyQueued {
-			for _, q := range b.mineQueue {
-				if q == pos {
-					alreadyQueued = true
-					break
+		if b.isInMineBox(pos) {
+			// A solid block was placed or pushed into the mining area
+			if b.mineAttempts != nil {
+				delete(b.mineAttempts, pos)
+			}
+			alreadyQueued := false
+			if b.mineCurrent != nil && *b.mineCurrent == pos {
+				alreadyQueued = true
+			}
+			if b.breakTarget != nil && *b.breakTarget == pos {
+				alreadyQueued = true
+			}
+			if !alreadyQueued {
+				for _, q := range b.mineQueue {
+					if q == pos {
+						alreadyQueued = true
+						break
+					}
 				}
 			}
-		}
-		if !alreadyQueued {
-			b.mineQueue = append(b.mineQueue, pos)
-			b.mineTotal++
-			b.mineInitialDone = false
-			sortMineQueue(b.mineQueue)
-			log.Printf("bebot: new block detected at (%d, %d, %d), added to mine queue (queue len=%d)\n", pos.X(), pos.Y(), pos.Z(), len(b.mineQueue))
+			if !alreadyQueued {
+				b.mineQueue = append(b.mineQueue, pos)
+				b.mineTotal++
+				b.mineInitialDone = false
+				sortMineQueue(b.mineQueue)
+				log.Printf("bebot: new block detected at (%d, %d, %d), added to mine queue (queue len=%d)\n", pos.X(), pos.Y(), pos.Z(), len(b.mineQueue))
+			}
 		}
 	}
 }
