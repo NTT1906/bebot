@@ -675,8 +675,6 @@ type Bot struct {
 	mineAttempts                 map[protocol.BlockPos]int
 	mineAirRuntimeIDs            map[uint32]bool
 	knownAirBlocks               map[protocol.BlockPos]bool
-	breakPredictedTick           int
-	breakRejected                bool
 	mineFastBreak                bool
 	hasteLevel                   int32
 	mineTimeoutSec               float64
@@ -2047,8 +2045,6 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 			b.mineCurrent = nil
 			b.breakTarget = nil
 			b.breakTicks = 0
-			b.breakPredictedTick = 0
-			b.breakRejected = false
 			b.mineCount++
 			if b.mineCount%25 == 0 || len(b.mineQueue) == 0 {
 				log.Printf("bebot: mined %d/%d blocks\n", b.mineCount, b.mineTotal)
@@ -2058,8 +2054,6 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 			if ticks == 0 {
 				b.mu.Lock()
 				mineSwing = b.breakAnimation
-				b.breakPredictedTick = 0
-				b.breakRejected = false
 				b.mu.Unlock()
 				actions = append(actions,
 					protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionStartBreak), BlockPos: *bt, Face: btFace},
@@ -2071,48 +2065,32 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 			}
 
 			if ticks >= maxTicks {
-				b.mu.Lock()
-				predTick := b.breakPredictedTick
-				rejected := b.breakRejected
-				b.mu.Unlock()
-
-				shouldPredict := predTick == 0 || (rejected && (ticks-maxTicks)%4 == 0)
-				if shouldPredict {
-					actions = append(actions,
-						protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionPredictDestroyBlock), BlockPos: *bt, Face: btFace},
-					)
-					_ = c.WritePacket(&packet.InventoryTransaction{
-						TransactionData: &protocol.UseItemTransactionData{
-							ActionType:    protocol.UseItemActionBreakBlock,
-							BlockPosition: *bt,
-							BlockFace:     btFace,
-							HotBarSlot:    int32(b.hotbarSlot),
-							HeldItem:      b.heldItem,
-						},
+				actions = append(actions,
+					protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionPredictDestroyBlock), BlockPos: *bt, Face: btFace},
+				)
+				_ = c.WritePacket(&packet.InventoryTransaction{
+					TransactionData: &protocol.UseItemTransactionData{
+						ActionType:    protocol.UseItemActionBreakBlock,
+						BlockPosition: *bt,
+						BlockFace:     btFace,
+						HotBarSlot:    int32(b.hotbarSlot),
+						HeldItem:      b.heldItem,
+					},
+				})
+				if b.gameMode == 1 || b.gameMode == 4 {
+					_ = c.WritePacket(&packet.PlayerAction{
+						EntityRuntimeID: b.entityID,
+						ActionType:      protocol.PlayerActionCreativePlayerDestroyBlock,
+						BlockPosition:   *bt,
+						ResultPosition:  *bt,
+						BlockFace:       btFace,
 					})
-					if b.gameMode == 1 || b.gameMode == 4 {
-						_ = c.WritePacket(&packet.PlayerAction{
-							EntityRuntimeID: b.entityID,
-							ActionType:      protocol.PlayerActionCreativePlayerDestroyBlock,
-							BlockPosition:   *bt,
-							ResultPosition:  *bt,
-							BlockFace:       btFace,
-						})
-					}
-					b.mu.Lock()
-					b.breakPredictedTick = int(b.tick)
-					b.breakRejected = false
-					b.mu.Unlock()
 				}
 
 				b.mu.Lock()
-				predTick = b.breakPredictedTick
-				rejected = b.breakRejected
-				currTick := int(b.tick)
-
-				// If we predicted destruction at least 2 ticks ago and the server didn't reject with solid UpdateBlock,
-				// the block is destroyed (or was air). Mark it completed.
-				if predTick > 0 && !rejected && currTick-predTick >= 2 {
+				if b.breakRepeat {
+					b.breakTicks = 0
+				} else if b.mineActive {
 					if b.mineAttempts != nil {
 						b.mineAttempts[*bt] = 2
 					}
@@ -2125,19 +2103,13 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 					b.mineCurrent = nil
 					b.breakTarget = nil
 					b.breakTicks = 0
-					b.breakPredictedTick = 0
-					b.breakRejected = false
 					b.mineCount++
 					if b.mineCount%25 == 0 || len(b.mineQueue) == 0 {
 						log.Printf("bebot: mined %d/%d blocks\n", b.mineCount, b.mineTotal)
 					}
-				} else if b.breakRepeat {
-					b.breakTicks = 0
-				} else if !b.mineActive {
+				} else {
 					b.breakTarget = nil
 					b.breakTicks = 0
-				} else {
-					b.breakTicks++
 				}
 				b.mu.Unlock()
 			} else {
@@ -3588,8 +3560,6 @@ func (b *Bot) startMiningArea(ax, ay, az, bx, by, bz int32, ticksReq int, repeat
 		b.mineAirRuntimeIDs = map[uint32]bool{0: true}
 	}
 	b.mineFastBreak = false
-	b.breakPredictedTick = 0
-	b.breakRejected = false
 	b.mu.Unlock()
 
 	modeStr := "once"
@@ -3619,8 +3589,6 @@ func (b *Bot) stopMiningArea() {
 	b.mineAttempts = nil
 	b.breakTarget = nil
 	b.breakTicks = 0
-	b.breakPredictedTick = 0
-	b.breakRejected = false
 	b.mineInitialDone = false
 	b.mu.Unlock()
 	b.reply("Stopped area mining.")
@@ -3661,8 +3629,6 @@ func (b *Bot) restartMiningQueue() {
 	b.mineCurrent = nil
 	b.breakTarget = nil
 	b.breakTicks = 0
-	b.breakPredictedTick = 0
-	b.breakRejected = false
 	b.mineStuckTicks = 0
 	b.mineInitialDone = false
 	b.mineAttempts = make(map[protocol.BlockPos]int)
@@ -3729,8 +3695,6 @@ func (b *Bot) handleUpdateBlock(pos protocol.BlockPos, runtimeID uint32) {
 			}
 			b.breakTarget = nil
 			b.breakTicks = 0
-			b.breakPredictedTick = 0
-			b.breakRejected = false
 			b.mineCurrent = nil
 			b.mineCount++
 			if b.mineCount%25 == 0 || len(b.mineQueue) == 0 {
@@ -3753,12 +3717,6 @@ func (b *Bot) handleUpdateBlock(pos protocol.BlockPos, runtimeID uint32) {
 	} else {
 		if b.knownAirBlocks != nil {
 			delete(b.knownAirBlocks, pos)
-		}
-		if b.breakTarget != nil && *b.breakTarget == pos {
-			// Solid block update at our current break target indicates server rejection of premature destroy
-			b.breakRejected = true
-			b.breakPredictedTick = 0
-			b.mineFastBreak = false
 		}
 		if b.isInMineBox(pos) {
 			// A solid block was placed or pushed into the mining area
