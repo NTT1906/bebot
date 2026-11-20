@@ -2059,48 +2059,38 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 			}
 
 			if ticks >= maxTicks {
-				actions = append(actions,
-					protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionPredictDestroyBlock), BlockPos: *bt, Face: btFace},
-				)
-				_ = c.WritePacket(&packet.InventoryTransaction{
-					TransactionData: &protocol.UseItemTransactionData{
-						ActionType:    protocol.UseItemActionBreakBlock,
-						BlockPosition: *bt,
-						BlockFace:     btFace,
-						HotBarSlot:    int32(b.hotbarSlot),
-						HeldItem:      b.heldItem,
-					},
-				})
-				if b.gameMode == 1 || b.gameMode == 4 {
-					_ = c.WritePacket(&packet.PlayerAction{
-						EntityRuntimeID: b.entityID,
-						ActionType:      protocol.PlayerActionCreativePlayerDestroyBlock,
-						BlockPosition:   *bt,
-						ResultPosition:  *bt,
-						BlockFace:       btFace,
+				shouldPredict := ticks == maxTicks || (ticks > maxTicks && (ticks-maxTicks)%4 == 0)
+				if shouldPredict {
+					actions = append(actions,
+						protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionPredictDestroyBlock), BlockPos: *bt, Face: btFace},
+					)
+					_ = c.WritePacket(&packet.InventoryTransaction{
+						TransactionData: &protocol.UseItemTransactionData{
+							ActionType:    protocol.UseItemActionBreakBlock,
+							BlockPosition: *bt,
+							BlockFace:     btFace,
+							HotBarSlot:    int32(b.hotbarSlot),
+							HeldItem:      b.heldItem,
+						},
 					})
+					if b.gameMode == 1 || b.gameMode == 4 {
+						_ = c.WritePacket(&packet.PlayerAction{
+							EntityRuntimeID: b.entityID,
+							ActionType:      protocol.PlayerActionCreativePlayerDestroyBlock,
+							BlockPosition:   *bt,
+							ResultPosition:  *bt,
+							BlockFace:       btFace,
+						})
+					}
 				}
 				b.mu.Lock()
 				if b.breakRepeat {
 					b.breakTicks = 0
+				} else if !b.mineActive {
+					b.breakTarget = nil
+					b.breakTicks = 0
 				} else {
-					if b.mineActive {
-						if b.mineAttempts != nil {
-							b.mineAttempts[*bt] = 2
-						}
-						b.mineLastFinishedPos = *bt
-						b.mineLastFinishedTick = b.tick
-						b.mineCurrent = nil
-						b.breakTarget = nil
-						b.breakTicks = 0
-						b.mineCount++
-						if b.mineCount%25 == 0 || len(b.mineQueue) == 0 {
-							log.Printf("bebot: mined %d/%d blocks\n", b.mineCount, b.mineTotal)
-						}
-					} else {
-						b.breakTarget = nil
-						b.breakTicks = 0
-					}
+					b.breakTicks++
 				}
 				b.mu.Unlock()
 			} else {
@@ -3464,28 +3454,27 @@ func (b *Bot) getBreakDuration() int {
 
 	switch {
 	case strings.Contains(name, "netherite_pickaxe"):
-		return 8
+		return 4
 	case strings.Contains(name, "diamond_pickaxe"):
-		return 10
+		return 5
 	case strings.Contains(name, "golden_pickaxe"):
-		return 10
+		return 4
 	case strings.Contains(name, "iron_pickaxe"):
-		return 14
+		return 8
 	case strings.Contains(name, "stone_pickaxe"):
-		return 20
+		return 12
 	case strings.Contains(name, "wooden_pickaxe"):
-		return 35
+		return 20
 	case strings.Contains(name, "axe"):
-		return 40
+		return 4
 	case strings.Contains(name, "shovel"):
-		return 15
+		return 4
+	case strings.Contains(name, "hoe"):
+		return 4
+	case strings.Contains(name, "shears"):
+		return 2
 	default:
-		if b.mineActive {
-			return 10
-		}
-		// Bare hands or unadapted tool: cobblestone/stone requires 150 ticks (7.5s).
-		// Use 160 ticks (8.0s) so it comfortably completes on the server without being rejected.
-		return 160
+		return 10
 	}
 }
 
