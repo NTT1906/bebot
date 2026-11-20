@@ -37,7 +37,10 @@ Before running the bot, configure the `config.json` file in the project root. If
     "walkSpeed": 0.15,
     "renderDistance": 5
   },
-  "commands_via_chat": false
+  "commands_via_chat": false,
+  "mine": {
+    "timeout_sec": 3.0
+  }
 }
 ```
 
@@ -118,6 +121,8 @@ Commands can be typed directly into the bot's terminal console or sent via in-ga
   * **Continuous Farm Mode** (`continuous: true`, `mineloop`, or `minefarm`): Keeps the mining area active indefinitely, waiting for and breaking new blocks as soon as they regenerate (ideal for automated cobble/stone farms).
   * `[ticks]` *(optional)*: Break duration per block in ticks (default: 2 ticks in creative mode, 40 ticks in survival mode).
   * `[faceAccurate]` *(optional, default: `false`)*: When `false`, uses standard Face 1 mining. When `true`, calculates the exact visible block face (`Face 0` for overhead/bottom face, side faces, top face) and points camera directly at the block.
+* **`mine timeout <seconds>`** *(Alias: `minetimeout`)*
+  Gets or sets the per-block mining timeout in seconds (default: `3.0`s). When a block cannot be mined because it is air, water/lava liquid, bedrock, or protected, the bot halts breaking after this timeout, marks the block as unmineable, and skips immediately to the next block in the queue.
 * **`break <x> <y> <z> [animate: true|false] [repeat: true|false]`**
   *(Aliases: `breakat`, `breakcoord`, `mineat`)*
   Breaks a single block at the given coordinate. Optional arm animation and repeat flag.
