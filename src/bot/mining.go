@@ -371,13 +371,6 @@ func (b *Bot) handleUpdateBlock(pos protocol.BlockPos, runtimeID uint32) {
 		if b.mineAttempts != nil {
 			b.mineAttempts[pos] = 2
 		}
-		filtered := make([]protocol.BlockPos, 0, len(b.mineQueue))
-		for _, q := range b.mineQueue {
-			if q != pos {
-				filtered = append(filtered, q)
-			}
-		}
-		b.mineQueue = filtered
 	} else if b.isInMineBox(pos) && !isRecentFinish && !isCurrentBreak {
 		if b.knownAirBlocks != nil {
 			delete(b.knownAirBlocks, pos)
