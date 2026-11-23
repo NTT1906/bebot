@@ -96,7 +96,7 @@ func (b *Bot) bundleTestCmd(p []string) {
 		))
 		log.Printf("bebot: [bundletest] starting %d attempts on droppers A=%v B=%v\n", attempts, posA, posB)
 
-		var okCount, rejectCount, noBundle int
+		var okCount, rejectCount, noBundle, emptyBundleCount int
 
 		for attempt := 0; attempt < attempts; attempt++ {
 			select {
@@ -177,39 +177,35 @@ func (b *Bot) bundleTestCmd(p []string) {
 
 			// Bundle found. Inspect its NBT to inspect inner stored items.
 			bundleNBT := bundleItem.Stack.NBTData
-			var innerItems []map[string]any
+			innerItems := extractBundleInnerItems(bundleNBT)
 			var innerSummary []string
-			if bundleNBT != nil {
-				if rawItems, ok := bundleNBT["Items"]; ok {
-					switch items := rawItems.(type) {
-					case []any:
-						for _, it := range items {
-							if m, ok := it.(map[string]any); ok {
-								innerItems = append(innerItems, m)
-								n, _ := m["Name"].(string)
-								cnt, _ := m["Count"].(byte)
-								innerSummary = append(innerSummary, fmt.Sprintf("%dx %s", cnt, strings.TrimPrefix(n, "minecraft:")))
-							}
-						}
-					case []map[string]any:
-						for _, m := range items {
-							innerItems = append(innerItems, m)
-							n, _ := m["Name"].(string)
-							cnt, _ := m["Count"].(byte)
-							innerSummary = append(innerSummary, fmt.Sprintf("%dx %s", cnt, strings.TrimPrefix(n, "minecraft:")))
-						}
-					}
+			for _, m := range innerItems {
+				n, _ := m["Name"].(string)
+				cnt := byte(1)
+				if c, ok := m["Count"].(byte); ok && c > 0 {
+					cnt = c
+				} else if c, ok := m["Count"].(int32); ok && c > 0 {
+					cnt = byte(c)
+				} else if c, ok := m["Count"].(int16); ok && c > 0 {
+					cnt = byte(c)
 				}
+				innerSummary = append(innerSummary, fmt.Sprintf("%dx %s", cnt, strings.TrimPrefix(n, "minecraft:")))
 			}
 
 			if len(innerItems) == 0 {
 				b.closeBlockContainer(c, wID)
 				b.invMu.Unlock()
-				log.Printf("bebot: [bundletest] attempt %d: bundle at %v slot=%d is empty (put items inside it first)\n", attempt+1, targetPos, bundleSlot)
+				log.Printf("bebot: [bundletest] attempt %d: bundle at %v slot=%d has no inner items (NBT=%+v)\n", attempt+1, targetPos, bundleSlot, bundleNBT)
 				noBundle++
+				emptyBundleCount++
+				if emptyBundleCount >= 3 {
+					b.reply(fmt.Sprintf("Bundle found at (%d, %d, %d) slot %d, but it has no items inside it! Please put items into the bundle first.", targetPos.X(), targetPos.Y(), targetPos.Z(), bundleSlot))
+					return
+				}
 				time.Sleep(50 * time.Millisecond)
 				continue
 			}
+			emptyBundleCount = 0
 
 			firstItem := innerItems[0]
 			innerName, _ := firstItem["Name"].(string)
@@ -349,4 +345,46 @@ func (b *Bot) itemNetworkIDByName(name string) int32 {
 		}
 	}
 	return 0
+}
+
+func extractBundleInnerItems(nbt map[string]any) []map[string]any {
+	if nbt == nil {
+		return nil
+	}
+	for _, key := range []string{"Items", "items", "bundle_contents", "minecraft:storage_item", "contents"} {
+		if raw, ok := nbt[key]; ok {
+			items := parseItemList(raw)
+			if len(items) > 0 {
+				return items
+			}
+		}
+	}
+	if tag, ok := nbt["tag"].(map[string]any); ok {
+		items := extractBundleInnerItems(tag)
+		if len(items) > 0 {
+			return items
+		}
+	}
+	for _, val := range nbt {
+		items := parseItemList(val)
+		if len(items) > 0 {
+			return items
+		}
+	}
+	return nil
+}
+
+func parseItemList(raw any) []map[string]any {
+	var result []map[string]any
+	switch list := raw.(type) {
+	case []any:
+		for _, it := range list {
+			if m, ok := it.(map[string]any); ok {
+				result = append(result, m)
+			}
+		}
+	case []map[string]any:
+		result = append(result, list...)
+	}
+	return result
 }
