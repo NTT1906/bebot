@@ -201,6 +201,7 @@ DiscoveryLoop:
 
 	renderDist := b.cfg.RenderDistance()
 	_ = c.WritePacket(&packet.RequestChunkRadius{ChunkRadius: renderDist, MaxChunkRadius: uint8(renderDist)})
+	b.markPacketReceived()
 
 	b.pos = c.GameData().PlayerPosition
 	b.last = b.pos
@@ -389,6 +390,7 @@ func (b *Bot) connect(ctx context.Context) error {
 
 	renderDist := b.cfg.RenderDistance()
 	_ = c.WritePacket(&packet.RequestChunkRadius{ChunkRadius: renderDist, MaxChunkRadius: uint8(renderDist)})
+	b.markPacketReceived()
 	log.Printf("bebot: requested updated chunk radius of %d chunks\n", renderDist)
 	if tracePackets {
 		log.Printf("bebot: server UseBlockNetworkIDHashes = %v (ServerBlockStateChecksum = %d)\n", c.GameData().UseBlockNetworkIDHashes, c.GameData().ServerBlockStateChecksum)
@@ -471,6 +473,7 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 		if err != nil {
 			return err
 		}
+		b.markPacketReceived()
 		switch p := pk.(type) {
 		case *packet.Text:
 			switch p.TextType {

@@ -180,6 +180,25 @@ type Bot struct {
 	mineWaitingForBlocks         bool
 	mineLearnActive              bool
 	mineLearnPos                 protocol.BlockPos
+	lastPacketTime               atomic.Int64
+	stallTicks                   int
+}
+
+// ServerStallThreshold is the duration without server packets before considering the server stalled.
+const ServerStallThreshold = 250 * time.Millisecond
+
+// isServerStalled returns true if no packets have been received from the server within ServerStallThreshold.
+func (b *Bot) isServerStalled() bool {
+	last := b.lastPacketTime.Load()
+	if last == 0 {
+		return false
+	}
+	return time.Since(time.Unix(0, last)) > ServerStallThreshold
+}
+
+// markPacketReceived records the current timestamp as the latest server packet arrival.
+func (b *Bot) markPacketReceived() {
+	b.lastPacketTime.Store(time.Now().UnixNano())
 }
 
 // Options contains the configuration and initial state needed to create a Bot.

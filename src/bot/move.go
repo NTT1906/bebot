@@ -64,6 +64,7 @@ func playerMetadataState(metadata protocol.EntityMetadata) (sneaking, sprinting,
 }
 
 func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
+	stalled := b.isServerStalled()
 	b.mu.Lock()
 	if b.mineActive {
 		if b.mineCurrent == nil {
@@ -225,7 +226,7 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 	if b.mode == modeIdle {
 		b.moving = false
 	}
-	if b.moving {
+	if b.moving && !stalled {
 		step := b.cfg.Behaviour.WalkSpeed
 		if step > hDist {
 			step = hDist
@@ -455,7 +456,7 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 			timeoutTicks = maxTicks + 4
 		}
 
-		if b.mineActive && ticks >= timeoutTicks {
+		if b.mineActive && ticks >= timeoutTicks && !stalled {
 			log.Printf("bebot: block at (%d, %d, %d) timed out after %.1fs (cannot be mined: air/water/bedrock), skipping\n", bt.X(), bt.Y(), bt.Z(), timeoutSec)
 			b.mu.Lock()
 			b.abortBreakTarget = bt
@@ -542,7 +543,9 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 				b.mu.Unlock()
 			} else {
 				b.mu.Lock()
-				b.breakTicks++
+				if !stalled {
+					b.breakTicks++
+				}
 				b.mu.Unlock()
 			}
 		}
@@ -551,6 +554,25 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 		auth.InputData.Set(packet.InputFlagPerformBlockActions)
 		auth.BlockActions = protocol.Option(actions)
 	}
+
+	if stalled {
+		b.mu.Lock()
+		b.stallTicks++
+		curStall := b.stallTicks
+		b.mu.Unlock()
+
+		isContinuous := len(actions) == 1 && actions[0].Action == int32(protocol.PlayerActionContinueDestroyBlock)
+		// During server stalls, throttle empty keepalive auth packets and repetitive continuous break
+		// packets to ~4 Hz (every 5th tick) to prevent buffer bursts and anti-cheat kicks on unfreeze.
+		if curStall%5 != 0 && (len(actions) == 0 || isContinuous) && !mineSwing {
+			return
+		}
+	} else {
+		b.mu.Lock()
+		b.stallTicks = 0
+		b.mu.Unlock()
+	}
+
 	_ = c.WritePacket(&auth)
 	if mineSwing || (bt != nil && b.mineActive && b.breakTicks%4 == 0) {
 		_ = c.WritePacket(&packet.Animate{ActionType: packet.AnimateActionSwingArm, EntityRuntimeID: b.entityID, SwingSource: packet.AnimateSwingSourceMine})

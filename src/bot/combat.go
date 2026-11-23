@@ -144,6 +144,9 @@ func (b *Bot) killLoop(targetName string, cps int) {
 	defer ticker.Stop()
 	for {
 		<-ticker.C
+		if b.isServerStalled() {
+			continue
+		}
 		b.mu.Lock()
 		if b.killTarget != targetName {
 			b.mu.Unlock()
