@@ -869,6 +869,7 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 				}
 				b.dynamicContainerItems[dynID] = append([]protocol.ItemInstance(nil), p.Content...)
 				b.mu.Unlock()
+				log.Printf("bebot: received dynamic InventoryContent dynID=%d items=%d ContainerID=%d\n", dynID, len(p.Content), p.Container.ContainerID)
 			}
 			if tracePackets {
 				log.Printf("bebot: trace: InventoryContent WindowID=%d ContainerID=%d DynamicID=%d items=%d\n", p.WindowID, p.Container.ContainerID, dynID, len(p.Content))
@@ -929,8 +930,13 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 						b.containerItems = make(map[byte]protocol.ItemInstance)
 					}
 					b.containerItems[byte(p.Slot)] = p.NewItem
-					if container, ok := p.Container.Value(); ok && container.ContainerID != 0 {
-						b.containerContainerID = container.ContainerID
+					if container, ok := p.Container.Value(); ok {
+						if container.ContainerID != 0 {
+							b.containerContainerID = container.ContainerID
+						}
+						if dyn, hasDyn := container.DynamicContainerID.Value(); hasDyn && dyn != 0 {
+							log.Printf("bebot: received dynamic InventorySlot dynID=%d slot=%d item=%v netID=%d\n", dyn, p.Slot, p.NewItem.Stack.ItemType.NetworkID, p.NewItem.StackNetworkID)
+						}
 					}
 				}
 				b.mu.Unlock()

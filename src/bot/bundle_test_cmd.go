@@ -247,6 +247,7 @@ func (b *Bot) bundleTestCmd(p []string) {
 
 			// Bundle found. Inspect its NBT to inspect inner stored items or dynamic bundle_id.
 			bundleNBT := bundleItem.Stack.NBTData
+			log.Printf("bebot: [bundletest] attempt %d: full bundle NBT: %+v\n", attempt+1, bundleNBT)
 			var bundleID uint32
 			if bundleNBT != nil {
 				if rawID, ok := bundleNBT["bundle_id"]; ok {
