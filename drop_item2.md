@@ -159,6 +159,21 @@ Bedrock Dedicated Server strictly enforces that `Source.StackNetworkID` matches 
 
 ---
 
+### Pitfall 4: Action Count Range Assertion `[1, 64]`
+In Bedrock's C++ binary packet deserializer (`ItemStackRequestPacket::read` / `readNoHeader`), the item `Count` field in `DropStackRequestAction`, `TakeStackRequestAction`, and `PlaceStackRequestAction` has an explicit stream-level bounds check:
+* **Strict Range:** The count value **must be in the closed range $[1, 64]$**.
+* **What Happens if Violated:**
+  If an action specifies `Count: 0` or `Count > 64` (e.g. `Count: 66` after two successive bundle item extractions merged into one oversized slot), BDS's `ReadOnlyBinaryStream` throws an unrecoverable deserialization exception:
+  ```
+  PacketViolationWarning Type=0 Severity=2 PacketID=147 Context="the input is outside of the accepted range [1, 64]\nreadNoHeader failed! packetId: 147"
+  ```
+  The server flags this as a critical protocol violation and immediately terminates the SCTP network channel (`nethernet: SCTP transport closed`).
+* **Solution**:
+  1. `findPlayerSlotForCount(netID, incomingCount)` ensures placing items into player inventory never allows a slot stack to exceed 64 items (automatically spilling into a new empty slot).
+  2. `dropSlots` chunks every drop action into slices of at most 64 items (`rem = 66 -> [64, 2]`), ensuring every transmitted `DropStackRequestAction` strictly complies with $[1, 64]$.
+
+---
+
 ## 4. Bebot Implementation & Command Reference
 
 Implemented in [src/bot/inventory.go](file:///d:/code/goland/bebot/src/bot/inventory.go):

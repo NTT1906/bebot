@@ -276,6 +276,7 @@ func (b *Bot) dropSlots(start, count, requested int, useCursor bool) {
 	if useCursor {
 		// Cursor drag & drop: Take to cursor (#59), then Drop from cursor (#59).
 		// Executed slot-by-slot without opening dummy containers.
+		// Note: Every action count is strictly capped to [1, 64] per Bedrock packet specification.
 		var droppedSlots []dropRequest
 		var lastStatus uint8
 		for _, drop := range drops {
@@ -283,34 +284,45 @@ func (b *Bot) dropSlots(start, count, requested int, useCursor bool) {
 			if !ok {
 				continue
 			}
-			cnt := drop.count
-			if cnt > 255 {
-				cnt = 255
-			}
-			fromSlot := stackReqSlotInfo(container, slotIn, drop.item.StackNetworkID)
-			cursorEmpty := stackReqSlotInfo(protocol.ContainerCursor, 0, 0)
-			cursorFull := stackReqSlotInfo(protocol.ContainerCursor, 0, drop.item.StackNetworkID)
+			rem := drop.count
+			slotSuccess := true
+			for rem > 0 {
+				cnt := rem
+				if cnt > 64 {
+					cnt = 64
+				}
+				rem -= cnt
 
-			take := &protocol.TakeStackRequestAction{}
-			take.Count = byte(cnt)
-			take.Source = fromSlot
-			take.Destination = cursorEmpty
-			dropAction := &protocol.DropStackRequestAction{
-				Count:    byte(cnt),
-				Source:   cursorFull,
-				Randomly: false,
-			}
+				fromSlot := stackReqSlotInfo(container, slotIn, drop.item.StackNetworkID)
+				cursorEmpty := stackReqSlotInfo(protocol.ContainerCursor, 0, 0)
+				cursorFull := stackReqSlotInfo(protocol.ContainerCursor, 0, drop.item.StackNetworkID)
 
-			ok, status := b.sendItemStackRequest(c, []protocol.StackRequestAction{take, dropAction})
-			if !ok {
-				log.Printf("bebot: drop2 slot %d failed: status=%d (%s)\n", drop.slot, status, stackStatusName(status))
-				lastStatus = status
+				take := &protocol.TakeStackRequestAction{}
+				take.Count = byte(cnt)
+				take.Source = fromSlot
+				take.Destination = cursorEmpty
+				dropAction := &protocol.DropStackRequestAction{
+					Count:    byte(cnt),
+					Source:   cursorFull,
+					Randomly: false,
+				}
+
+				ok, status := b.sendItemStackRequest(c, []protocol.StackRequestAction{take, dropAction})
+				if !ok {
+					log.Printf("bebot: drop2 slot %d failed: status=%d (%s)\n", drop.slot, status, stackStatusName(status))
+					lastStatus = status
+					slotSuccess = false
+					break
+				}
+				time.Sleep(30 * time.Millisecond)
+			}
+			if !slotSuccess {
 				continue
 			}
 
 			b.mu.Lock()
-			if b.inventory[drop.slot].Stack.Count > cnt {
-				b.inventory[drop.slot].Stack.Count -= cnt
+			if b.inventory[drop.slot].Stack.Count > drop.count {
+				b.inventory[drop.slot].Stack.Count -= drop.count
 			} else {
 				b.inventory[drop.slot] = protocol.ItemInstance{}
 			}
@@ -319,7 +331,6 @@ func (b *Bot) dropSlots(start, count, requested int, useCursor bool) {
 			}
 			b.mu.Unlock()
 			droppedSlots = append(droppedSlots, drop)
-			time.Sleep(30 * time.Millisecond)
 		}
 		b.sendHeldItem(c)
 		if len(droppedSlots) == 0 {
@@ -332,6 +343,7 @@ func (b *Bot) dropSlots(start, count, requested int, useCursor bool) {
 
 	// Direct Slot Drop (Q in GUI): 1 action per slot directly from source slot.
 	// Sent as a single batch ItemStackRequest containing all drops.
+	// Every action count is strictly chunked to [1, 64] per BDS packet range assertion.
 	var actions []protocol.StackRequestAction
 	var validDrops []dropRequest
 
@@ -340,18 +352,22 @@ func (b *Bot) dropSlots(start, count, requested int, useCursor bool) {
 		if !ok {
 			continue
 		}
-		cnt := drop.count
-		if cnt > 255 {
-			cnt = 255
-		}
+		rem := drop.count
+		for rem > 0 {
+			cnt := rem
+			if cnt > 64 {
+				cnt = 64
+			}
+			rem -= cnt
 
-		fromSlot := stackReqSlotInfo(container, slotIn, drop.item.StackNetworkID)
-		dropAction := &protocol.DropStackRequestAction{
-			Count:    byte(cnt),
-			Source:   fromSlot,
-			Randomly: false,
+			fromSlot := stackReqSlotInfo(container, slotIn, drop.item.StackNetworkID)
+			dropAction := &protocol.DropStackRequestAction{
+				Count:    byte(cnt),
+				Source:   fromSlot,
+				Randomly: false,
+			}
+			actions = append(actions, dropAction)
 		}
-		actions = append(actions, dropAction)
 		validDrops = append(validDrops, drop)
 	}
 
@@ -370,12 +386,8 @@ func (b *Bot) dropSlots(start, count, requested int, useCursor bool) {
 
 	b.mu.Lock()
 	for _, drop := range validDrops {
-		cnt := drop.count
-		if cnt > 255 {
-			cnt = 255
-		}
-		if b.inventory[drop.slot].Stack.Count > cnt {
-			b.inventory[drop.slot].Stack.Count -= cnt
+		if b.inventory[drop.slot].Stack.Count > drop.count {
+			b.inventory[drop.slot].Stack.Count -= drop.count
 		} else {
 			b.inventory[drop.slot] = protocol.ItemInstance{}
 		}
@@ -386,7 +398,7 @@ func (b *Bot) dropSlots(start, count, requested int, useCursor bool) {
 	b.mu.Unlock()
 	b.sendHeldItem(c)
 
-	b.reply(fmt.Sprintf("Dropped items from %d slot(s) [direct batch].", len(validDrops)))
+	b.reply(fmt.Sprintf("Dropped items from %d slot(s) in single batch [direct].", len(validDrops)))
 }
 
 func (b *Bot) sendHeldItem(c *minecraft.Conn) {
@@ -690,7 +702,7 @@ func (b *Bot) findFreePlayerSlot() (int, bool) {
 	return -1, false
 }
 
-func (b *Bot) findPlayerSlotForItem(netID int32) (int, bool) {
+func (b *Bot) findPlayerSlotForCount(netID int32, incoming int) (int, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if len(b.inventory) < 36 {
@@ -698,22 +710,26 @@ func (b *Bot) findPlayerSlotForItem(netID int32) (int, bool) {
 		copy(grown, b.inventory)
 		b.inventory = grown
 	}
-	// First preference: existing stack of the same item with room (< 64).
-	if netID != 0 {
+	// First preference: existing stack of the same item that will not exceed 64 items
+	if netID != 0 && incoming > 0 {
 		for i := 0; i < 36; i++ {
 			item := b.inventory[i]
-			if item.Stack.ItemType.NetworkID == netID && item.Stack.Count > 0 && item.Stack.Count < 64 {
+			if item.Stack.ItemType.NetworkID == netID && item.Stack.Count > 0 && int(item.Stack.Count)+incoming <= 64 {
 				return i, true
 			}
 		}
 	}
-	// Second preference: first empty slot.
+	// Second preference: first empty slot
 	for i := 0; i < 36; i++ {
 		if b.inventory[i].Stack.Count == 0 {
 			return i, true
 		}
 	}
 	return -1, false
+}
+
+func (b *Bot) findPlayerSlotForItem(netID int32) (int, bool) {
+	return b.findPlayerSlotForCount(netID, 1)
 }
 
 func (b *Bot) lootCmd(p []string) {

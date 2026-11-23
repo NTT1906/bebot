@@ -355,7 +355,7 @@ func (b *Bot) bundleTestCmd(p []string) {
 			log.Printf("bebot: [bundletest] attempt %d: bundle at %v slot=%d (bundle_id=%d, bundleStackNetID=%d) inner slot=%d has %dx %s (innerNetID=%d, innerStackNetID=%d) — extracting item from bundle...\n",
 				attempt+1, targetPos, bundleSlot, targetDynID, bundleItem.StackNetworkID, dynSlot, fullCount, innerName, innerNetID, innerStackNetID)
 
-			dstSlot, hasDst := b.findPlayerSlotForItem(innerNetID)
+			dstSlot, hasDst := b.findPlayerSlotForCount(innerNetID, int(fullCount))
 			var reqOk bool
 			var status uint8
 			var extractedCount byte
