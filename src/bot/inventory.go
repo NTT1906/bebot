@@ -353,13 +353,17 @@ func (b *Bot) interactBlock(pos protocol.BlockPos) {
 	_ = b.conn.Flush()
 }
 
-func (b *Bot) itemName(netID int32) string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+func (b *Bot) itemNameLocked(netID int32) string {
 	if name, ok := b.itemNamesByID[netID]; ok && name != "" {
 		return strings.TrimPrefix(name, "minecraft:")
 	}
 	return fmt.Sprintf("item_%d", netID)
+}
+
+func (b *Bot) itemName(netID int32) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.itemNameLocked(netID)
 }
 
 func (b *Bot) getFrontBlockPos() protocol.BlockPos {
@@ -497,6 +501,11 @@ func (b *Bot) openBlockContainer(c *minecraft.Conn, pos protocol.BlockPos) (byte
 
 	sendOpenWithFace := func(f int32) {
 		cp := faceClickPosition(f)
+		b.mu.Lock()
+		curRuntimeID := b.blockRuntimeIDs[pos]
+		b.mu.Unlock()
+
+		b.markPacketSent(fmt.Sprintf("InventoryTransaction (UseItemActionClickBlock pos=%v face=%d runtimeID=%d)", pos, f, curRuntimeID))
 		_ = c.WritePacket(&packet.InventoryTransaction{
 			TransactionData: &protocol.UseItemTransactionData{
 				ActionType:       protocol.UseItemActionClickBlock,
@@ -507,7 +516,7 @@ func (b *Bot) openBlockContainer(c *minecraft.Conn, pos protocol.BlockPos) (byte
 				HeldItem:         heldItem,
 				Position:         botPos,
 				ClickedPosition:  cp,
-				BlockRuntimeID:   runtimeID,
+				BlockRuntimeID:   curRuntimeID,
 				ClientPrediction: protocol.ClientPredictionSuccess,
 			},
 		})
@@ -540,6 +549,15 @@ func (b *Bot) openBlockContainer(c *minecraft.Conn, pos protocol.BlockPos) (byte
 				}
 			}
 			return wID, nil
+
+		case rid := <-b.containerRuntimeIDUpdated:
+			b.mu.Lock()
+			active := b.containerActive
+			b.mu.Unlock()
+			if !active {
+				log.Printf("bebot: received container UpdateBlock pos=%v runtimeID=%d, immediately re-trying open...\n", pos, rid)
+				sendOpenWithFace(face)
+			}
 
 		case <-retryTimer.C:
 			b.mu.Lock()
@@ -887,7 +905,7 @@ func (b *Bot) viewContainerCmd(p []string) {
 	b.mu.Lock()
 	for _, s := range slots {
 		it := b.containerItems[s]
-		name := b.itemName(it.Stack.ItemType.NetworkID)
+		name := b.itemNameLocked(it.Stack.ItemType.NetworkID)
 		itemsSummary = append(itemsSummary, fmt.Sprintf("Slot %d: %dx %s", s, it.Stack.Count, name))
 		if len(itemsSummary) >= 10 {
 			remaining := len(slots) - 10

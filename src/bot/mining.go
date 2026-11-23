@@ -306,14 +306,23 @@ func (b *Bot) resolveSubChunkBlockPos(subPos protocol.BlockPos, blockPos protoco
 
 func (b *Bot) handleUpdateBlock(pos protocol.BlockPos, runtimeID uint32) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if b.blockRuntimeIDs == nil {
 		b.blockRuntimeIDs = make(map[protocol.BlockPos]uint32)
 	}
 	b.blockRuntimeIDs[pos] = runtimeID
-	if tracePackets {
-		log.Printf("bebot: debug UpdateBlock pos=(%d, %d, %d) runtimeID=%d\n", pos.X(), pos.Y(), pos.Z(), runtimeID)
+	isContainerTarget := b.containerOpening && pos == b.containerPos
+	ch := b.containerRuntimeIDUpdated
+	b.mu.Unlock()
+
+	if isContainerTarget && ch != nil {
+		select {
+		case ch <- runtimeID:
+		default:
+		}
 	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
 
 	if b.mineLearnActive && pos == b.mineLearnPos {
 		if b.mineAirRuntimeIDs == nil {

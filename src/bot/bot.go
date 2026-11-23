@@ -9,6 +9,7 @@ import (
 	"net"
 	"runtime"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -125,6 +126,12 @@ type Bot struct {
 	containerContainerID         byte
 	containerItems               map[byte]protocol.ItemInstance
 	containerTileEntities        map[protocol.BlockPos]map[string]any
+	containerRuntimeIDUpdated    chan uint32
+	lastSentPacketDesc           string
+	lastSentPacketTime           time.Time
+	lastRecvPacketDesc           string
+	lastRecvPacketTime           time.Time
+	lastDisconnectMsg            string
 	blockRuntimeIDs              map[protocol.BlockPos]uint32
 	invMu                        sync.Mutex
 	facingYaw, facingPitch       float32
@@ -271,11 +278,72 @@ func New(opts Options) *Bot {
 		itemNamesByID:     make(map[int32]string),
 		mineAttempts:      make(map[protocol.BlockPos]int),
 		mineAirRuntimeIDs: map[uint32]bool{0: true},
-		knownAirBlocks:        make(map[protocol.BlockPos]bool),
-		mineTimeoutSec:        mineTimeout,
-		blockRuntimeIDs:       make(map[protocol.BlockPos]uint32),
-		containerTileEntities: make(map[protocol.BlockPos]map[string]any),
+		knownAirBlocks:            make(map[protocol.BlockPos]bool),
+		mineTimeoutSec:            mineTimeout,
+		blockRuntimeIDs:           make(map[protocol.BlockPos]uint32),
+		containerTileEntities:     make(map[protocol.BlockPos]map[string]any),
+		containerRuntimeIDUpdated: make(chan uint32, 1),
 	}
+}
+
+func (b *Bot) markPacketSent(desc string) {
+	b.mu.Lock()
+	b.lastSentPacketDesc = desc
+	b.lastSentPacketTime = time.Now()
+	b.mu.Unlock()
+}
+
+func (b *Bot) markPacketReceivedDesc(desc string) {
+	b.lastPacketTime.Store(time.Now().UnixNano())
+	b.mu.Lock()
+	b.lastRecvPacketDesc = desc
+	b.lastRecvPacketTime = time.Now()
+	b.mu.Unlock()
+}
+
+func (b *Bot) logDisconnectDiagnostics(err error) {
+	b.mu.Lock()
+	lastSent := b.lastSentPacketDesc
+	lastSentTime := b.lastSentPacketTime
+	lastRecv := b.lastRecvPacketDesc
+	lastRecvTime := b.lastRecvPacketTime
+	disconnectMsg := b.lastDisconnectMsg
+	pos := b.pos
+	mode := b.mode
+	tick := b.tick
+	containerOpening := b.containerOpening
+	containerActive := b.containerActive
+	containerPos := b.containerPos
+	b.mu.Unlock()
+
+	now := time.Now()
+	var sentAgo, recvAgo string
+	if !lastSentTime.IsZero() {
+		sentAgo = fmt.Sprintf("%v ago", now.Sub(lastSentTime).Round(time.Millisecond))
+	} else {
+		sentAgo = "none"
+	}
+	if !lastRecvTime.IsZero() {
+		recvAgo = fmt.Sprintf("%v ago", now.Sub(lastRecvTime).Round(time.Millisecond))
+	} else {
+		recvAgo = "none"
+	}
+
+	log.Printf("bebot: ===== DISCONNECT DIAGNOSTICS =====\n")
+	log.Printf("bebot: error: %v\n", err)
+	if disconnectMsg != "" {
+		log.Printf("bebot: server message: %q\n", disconnectMsg)
+	}
+	log.Printf("bebot: last packet sent: %s (%s)\n", lastSent, sentAgo)
+	log.Printf("bebot: last packet recv: %s (%s)\n", lastRecv, recvAgo)
+	log.Printf("bebot: bot state: pos=(%.2f, %.2f, %.2f) mode=%d tick=%d\n", pos.X(), pos.Y(), pos.Z(), mode, tick)
+	if containerOpening || containerActive {
+		log.Printf("bebot: container interaction: active=%v opening=%v target=%v\n", containerActive, containerOpening, containerPos)
+	}
+	if err != nil && strings.Contains(err.Error(), "SCTP transport closed") {
+		log.Printf("bebot: hint: remote host (Bedrock client/server) closed the SCTP channel. Common causes: host closed/paused LAN world, or host anti-cheat rejected an invalid packet/out-of-range action.\n")
+	}
+	log.Printf("bebot: ===================================\n")
 }
 
 // playerEyePos returns the player's eye/camera position.

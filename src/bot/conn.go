@@ -235,6 +235,7 @@ DiscoveryLoop:
 	b.containerContent = make(chan struct{}, 1)
 	b.containerItems = make(map[byte]protocol.ItemInstance)
 	b.containerTileEntities = make(map[protocol.BlockPos]map[string]any)
+	b.containerRuntimeIDUpdated = make(chan uint32, 1)
 	b.blockRuntimeIDs = make(map[protocol.BlockPos]uint32)
 	b.mineActive = false
 	b.mineFaceAccurate = false
@@ -269,6 +270,7 @@ DiscoveryLoop:
 		case <-ctx.Done():
 			return ctx.Err()
 		case err := <-done:
+			b.logDisconnectDiagnostics(err)
 			return fmt.Errorf("connection reader: %s", ExplainError(err))
 		case <-t.C:
 			b.moveTick(c, false)
@@ -444,6 +446,7 @@ func (b *Bot) connect(ctx context.Context) error {
 	b.containerContent = make(chan struct{}, 1)
 	b.containerItems = make(map[byte]protocol.ItemInstance)
 	b.containerTileEntities = make(map[protocol.BlockPos]map[string]any)
+	b.containerRuntimeIDUpdated = make(chan uint32, 1)
 	b.blockRuntimeIDs = make(map[protocol.BlockPos]uint32)
 	b.mineActive = false
 	b.mineFaceAccurate = false
@@ -485,6 +488,7 @@ func (b *Bot) connect(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case err := <-done:
+			b.logDisconnectDiagnostics(err)
 			return fmt.Errorf("connection reader: %s", ExplainError(err))
 		case <-t.C:
 			b.moveTick(c, false)
@@ -500,7 +504,7 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 		if err != nil {
 			return err
 		}
-		b.markPacketReceived()
+		b.markPacketReceivedDesc(fmt.Sprintf("%T", pk))
 		switch p := pk.(type) {
 		case *packet.Text:
 			switch p.TextType {
@@ -517,6 +521,9 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 		case *packet.Transfer:
 			return fmt.Errorf("server requested transfer to %s:%d; reconnecting to configured target", p.Address, p.Port)
 		case *packet.Disconnect:
+			b.mu.Lock()
+			b.lastDisconnectMsg = p.Message
+			b.mu.Unlock()
 			log.Printf("bebot: server disconnected: %q\n", p.Message)
 		case *packet.UpdateBlock:
 			b.handleUpdateBlock(p.Position, p.NewBlockRuntimeID)
