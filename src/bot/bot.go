@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"runtime"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
@@ -301,13 +302,16 @@ func (b *Bot) Run(ctx context.Context) {
 // Close disconnects and stops the bot connection cleanly.
 func (b *Bot) Close() {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.conn != nil {
-		_ = b.conn.WritePacket(&packet.Disconnect{HideDisconnectionScreen: true, Message: "Client shutting down"})
-		_ = b.conn.Flush()
-		time.Sleep(100 * time.Millisecond)
-		_ = b.conn.Close()
-		b.conn = nil
+	c := b.conn
+	b.conn = nil
+	b.quitting = true
+	b.mu.Unlock()
+
+	if c != nil {
+		_ = c.WritePacket(&packet.Disconnect{HideDisconnectionScreen: true, Message: "Client shutting down"})
+		_ = c.Flush()
+		_ = c.Close()
+		runtime.GC()
 	}
 }
 

@@ -184,6 +184,9 @@ func (b *Bot) whisper(target, message string) {
 }
 
 func cleanChatName(name string) string {
+	if !strings.ContainsRune(name, '§') {
+		return strings.TrimSpace(name)
+	}
 	runes := []rune(name)
 	out := make([]rune, 0, len(runes))
 	for i := 0; i < len(runes); i++ {

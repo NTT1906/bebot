@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -182,7 +183,16 @@ DiscoveryLoop:
 	b.mu.Lock()
 	b.conn = c
 	b.mu.Unlock()
-	defer func() { c.Close(); b.mu.Lock(); b.conn = nil; b.mu.Unlock() }()
+	defer func() {
+		b.mu.Lock()
+		connToClose := b.conn
+		b.conn = nil
+		b.mu.Unlock()
+		if connToClose != nil {
+			_ = connToClose.Close()
+		}
+		runtime.GC()
+	}()
 
 	if err := c.WritePacket(&packet.ServerBoundLoadingScreen{Type: packet.LoadingScreenTypeEnd}); err != nil {
 		return fmt.Errorf("finish loading screen: %s", ExplainError(err))
@@ -371,7 +381,16 @@ func (b *Bot) connect(ctx context.Context) error {
 	b.mu.Lock()
 	b.conn = c
 	b.mu.Unlock()
-	defer func() { c.Close(); b.mu.Lock(); b.conn = nil; b.mu.Unlock() }()
+	defer func() {
+		b.mu.Lock()
+		connToClose := b.conn
+		b.conn = nil
+		b.mu.Unlock()
+		if connToClose != nil {
+			_ = connToClose.Close()
+		}
+		runtime.GC()
+	}()
 
 	if err := c.WritePacket(&packet.ServerBoundLoadingScreen{Type: packet.LoadingScreenTypeEnd}); err != nil {
 		return fmt.Errorf("finish loading screen: %s", ExplainError(err))

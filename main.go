@@ -3,9 +3,12 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"io"
 	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"strings"
@@ -42,7 +45,17 @@ func main() {
 	offlineFlag := flag.Bool("offline", false, "connect without Microsoft authentication (LAN mode)")
 	botNameFlag := flag.String("name", "Bebot", "bot display name (used in offline/LAN mode)")
 	renewFlag := flag.Bool("renew", false, "generate a fresh identity/UUID for offline/LAN mode instead of reusing saved UUID")
+	pprofFlag := flag.String("pprof", "", "bind address for net/http/pprof diagnostics (e.g. :6060 or localhost:6060)")
 	flag.Parse()
+
+	if *pprofFlag != "" {
+		go func() {
+			log.Printf("bebot: starting pprof diagnostics server on %s\n", *pprofFlag)
+			if err := http.ListenAndServe(*pprofFlag, nil); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("bebot: pprof server error: %v\n", err)
+			}
+		}()
+	}
 
 	// Initialize file logger
 	fileLogger := logger.NewDailyLogger("logs")
