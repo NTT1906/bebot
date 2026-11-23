@@ -402,6 +402,21 @@ func (b *Bot) parseContainerPos(p []string) (protocol.BlockPos, []string, error)
 	return b.getFrontBlockPos(), p[1:], nil
 }
 
+func horizontalBlockFace(eyePos mgl32.Vec3, blockPos protocol.BlockPos) int32 {
+	dx := float32(blockPos.X()) + 0.5 - eyePos.X()
+	dz := float32(blockPos.Z()) + 0.5 - eyePos.Z()
+	if math.Abs(float64(dx)) >= math.Abs(float64(dz)) {
+		if dx > 0 {
+			return 4
+		}
+		return 5
+	}
+	if dz > 0 {
+		return 2
+	}
+	return 3
+}
+
 func (b *Bot) openBlockContainer(c *minecraft.Conn, pos protocol.BlockPos) (byte, error) {
 	b.mu.Lock()
 	botPos := b.pos
@@ -439,10 +454,15 @@ func (b *Bot) openBlockContainer(c *minecraft.Conn, pos protocol.BlockPos) (byte
 
 	face := determineBlockFace(eyePos, pos)
 	clickPos := faceClickPosition(face)
+	targetPos := mgl32.Vec3{
+		float32(pos.X()) + clickPos.X(),
+		float32(pos.Y()) + clickPos.Y(),
+		float32(pos.Z()) + clickPos.Z(),
+	}
 
-	dx := float64(centerPos.X()) - float64(eyePos.X())
-	dy := float64(centerPos.Y()) - float64(eyePos.Y())
-	dz := float64(centerPos.Z()) - float64(eyePos.Z())
+	dx := float64(targetPos.X()) - float64(eyePos.X())
+	dy := float64(targetPos.Y()) - float64(eyePos.Y())
+	dz := float64(targetPos.Z()) - float64(eyePos.Z())
 	horizontal := math.Sqrt(dx*dx + dz*dz)
 	yaw := float32(0)
 	if horizontal > 0.001 {
@@ -471,57 +491,25 @@ func (b *Bot) openBlockContainer(c *minecraft.Conn, pos protocol.BlockPos) (byte
 	botPos = b.pos
 	hotbarSlot = b.hotbarSlot
 	heldItem = b.heldItem
-	curTick := b.tick
 	b.mu.Unlock()
 
 	log.Printf("bebot: opening container at %v from bot pos (%.2f, %.2f, %.2f) (dist=%.2f, face=%d, yaw=%.1f, pitch=%.1f, runtimeID=%d)\n", pos, botPos.X(), botPos.Y(), botPos.Z(), dist, face, yaw, pitch, runtimeID)
 
-	sendOpen := func() {
-		authFlags := baseIdleInputFlags
-		authFlags.Set(packet.InputFlagPerformItemInteraction)
-		authFlags.Set(packet.InputFlagPerformBlockActions)
-
-		auth := packet.PlayerAuthInput{
-			Pitch:            pitch,
-			Yaw:              yaw,
-			HeadYaw:          yaw,
-			Position:         botPos,
-			MoveVector:       mgl32.Vec2{0, 0},
-			InputData:        authFlags,
-			InputMode:        packet.InputModeGamePad,
-			PlayMode:         packet.PlayModeScreen,
-			InteractionModel: packet.InteractionModelTouch,
-			Tick:             curTick,
-			Delta:            mgl32.Vec3{0, 0, 0},
-			BlockActions: protocol.Option([]protocol.PlayerBlockAction{
-				{
-					Action:   int32(protocol.PlayerActionStartItemUseOn),
-					BlockPos: pos,
-					Face:     face,
-				},
-			}),
-		}
-		_ = c.WritePacket(&auth)
+	sendOpenWithFace := func(f int32) {
+		cp := faceClickPosition(f)
 		_ = c.WritePacket(&packet.InventoryTransaction{
 			TransactionData: &protocol.UseItemTransactionData{
 				ActionType:       protocol.UseItemActionClickBlock,
 				TriggerType:      protocol.TriggerTypePlayerInput,
 				BlockPosition:    pos,
-				BlockFace:        face,
+				BlockFace:        f,
 				HotBarSlot:       int32(hotbarSlot),
 				HeldItem:         heldItem,
 				Position:         botPos,
-				ClickedPosition:  clickPos,
+				ClickedPosition:  cp,
 				BlockRuntimeID:   runtimeID,
 				ClientPrediction: protocol.ClientPredictionSuccess,
 			},
-		})
-		_ = c.WritePacket(&packet.PlayerAction{
-			EntityRuntimeID: entityID,
-			ActionType:      protocol.PlayerActionStartItemUseOn,
-			BlockPosition:   pos,
-			ResultPosition:  pos,
-			BlockFace:       face,
 		})
 		_ = c.WritePacket(&packet.Animate{
 			ActionType:      packet.AnimateActionSwingArm,
@@ -530,7 +518,7 @@ func (b *Bot) openBlockContainer(c *minecraft.Conn, pos protocol.BlockPos) (byte
 		_ = c.Flush()
 	}
 
-	sendOpen()
+	sendOpenWithFace(face)
 
 	timer := time.NewTimer(3500 * time.Millisecond)
 	defer timer.Stop()
@@ -558,8 +546,9 @@ func (b *Bot) openBlockContainer(c *minecraft.Conn, pos protocol.BlockPos) (byte
 			active := b.containerActive
 			b.mu.Unlock()
 			if !active {
-				log.Printf("bebot: retrying container open at %v...\n", pos)
-				sendOpen()
+				altFace := horizontalBlockFace(eyePos, pos)
+				log.Printf("bebot: retrying container open at %v with face=%d...\n", pos, altFace)
+				sendOpenWithFace(altFace)
 			}
 
 		case <-timer.C:
@@ -572,21 +561,11 @@ func (b *Bot) closeBlockContainer(c *minecraft.Conn, windowID byte) {
 	b.mu.Lock()
 	cType := b.containerType
 	b.containerActive = false
-	entityID := b.entityID
-	pos := b.containerPos
-	face := int32(1)
 	b.mu.Unlock()
 	_ = c.WritePacket(&packet.ContainerClose{
 		WindowID:      windowID,
 		ContainerType: cType,
 		ServerSide:    false,
-	})
-	_ = c.WritePacket(&packet.PlayerAction{
-		EntityRuntimeID: entityID,
-		ActionType:      protocol.PlayerActionStopItemUseOn,
-		BlockPosition:   pos,
-		ResultPosition:  pos,
-		BlockFace:       face,
 	})
 	_ = c.Flush()
 }
