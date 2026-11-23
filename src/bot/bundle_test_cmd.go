@@ -269,13 +269,21 @@ func (b *Bot) bundleTestCmd(p []string) {
 
 			innerItems := extractBundleInnerItems(bundleNBT)
 			var innerName string
-			var innerCount byte = 1
+			var fullCount byte = 1
 			var innerNetID int32
 
 			if len(innerItems) > 0 {
 				firstItem := innerItems[0]
 				innerName, _ = firstItem["Name"].(string)
-				innerCount = 1 // Right-click extracts 1 item from bundle
+				if cnt, ok := firstItem["Count"].(byte); ok && cnt > 0 {
+					fullCount = cnt
+				} else if cnt, ok := firstItem["Count"].(int32); ok && cnt > 0 {
+					fullCount = byte(cnt)
+				} else if cnt, ok := firstItem["Count"].(int16); ok && cnt > 0 {
+					fullCount = byte(cnt)
+				} else if cnt, ok := firstItem["Count"].(int); ok && cnt > 0 {
+					fullCount = byte(cnt)
+				}
 				innerNetID = b.itemNetworkIDByName(innerName)
 			} else if bundleID != 0 {
 				b.mu.Lock()
@@ -285,10 +293,12 @@ func (b *Bot) bundleTestCmd(p []string) {
 					first := dynItems[0]
 					innerNetID = first.Stack.ItemType.NetworkID
 					innerName = b.itemName(innerNetID)
+					if first.Stack.Count > 0 {
+						fullCount = byte(first.Stack.Count)
+					}
 				} else {
 					innerName = "bundle item"
 				}
-				innerCount = 1 // Right-click extracts 1 item from bundle
 			}
 
 			isEmpty := false
@@ -332,113 +342,129 @@ func (b *Bot) bundleTestCmd(p []string) {
 				targetDynID = uint32(bundleItem.StackNetworkID)
 			}
 
-			log.Printf("bebot: [bundletest] attempt %d: bundle at %v slot=%d (bundle_id=%d, bundleStackNetID=%d) has %s — extracting %dx %s...\n",
-				attempt+1, targetPos, bundleSlot, targetDynID, bundleItem.StackNetworkID, innerName, innerCount, strings.TrimPrefix(innerName, "minecraft:"))
+			bundleCount := byte(bundleItem.Stack.Count)
+			if bundleCount == 0 {
+				bundleCount = 1
+			}
 
-			// RACE: Extract inner item from bundle onto cursor (Right-Click extraction).
-			// As documented in bundle.md & bundle_glitch.md, right-clicking a bundle performs
-			// a single TakeStackRequestAction popping the inner item directly onto the virtual
-			// cursor (ContainerCursor #58). The bundle stays inside the dropper!
+			log.Printf("bebot: [bundletest] attempt %d: bundle at %v slot=%d (bundle_id=%d, bundleStackNetID=%d) has %s (count=%d) — testing extractions...\n",
+				attempt+1, targetPos, bundleSlot, targetDynID, bundleItem.StackNetworkID, innerName, fullCount)
+
 			dstSlot, hasDst := b.findPlayerSlotForItem(innerNetID)
-			cursorEmpty := stackReqSlotInfo(protocol.ContainerCursor, 0, 0)
 			var reqOk bool
 			var status uint8
+			var extractedCount byte
 
-			// Format 1: Dynamic container (ContainerDynamic = 67) with DynamicContainerID, Slot 0, StackNetworkID 0
-			sourceDyn := protocol.StackRequestSlotInfo{
-				Container: protocol.FullContainerName{
-					ContainerID:        protocol.ContainerDynamic,
-					DynamicContainerID: protocol.Option(targetDynID),
-				},
-				Slot:           0,
-				StackNetworkID: 0,
+			// tryTx attempts a transaction for a given candidate source.
+			// It tests balanced take+place (matching Bedrock server-authoritative rules)
+			// with matching StackNetworkID on cursor, and single take.
+			tryTx := func(name string, src protocol.StackRequestSlotInfo, count byte) bool {
+				if count == 0 {
+					count = 1
+				}
+				if hasDst {
+					dstContainer, dstSlotInContainer, mapOk := playerSlotContainer(dstSlot)
+					if mapOk {
+						cursorEmpty := stackReqSlotInfo(protocol.ContainerCursor, 0, 0)
+						cursorFull := stackReqSlotInfo(protocol.ContainerCursor, 0, src.StackNetworkID)
+						dstSlotInfo := stackReqSlotInfo(dstContainer, dstSlotInContainer, 0)
+
+						take := &protocol.TakeStackRequestAction{}
+						take.Count = count
+						take.Source = src
+						take.Destination = cursorEmpty
+
+						place := &protocol.PlaceStackRequestAction{}
+						place.Count = count
+						place.Source = cursorFull
+						place.Destination = dstSlotInfo
+
+						ok, st := b.sendItemStackRequest(c, []protocol.StackRequestAction{take, place})
+						log.Printf("bebot: [bundletest] %s (count=%d, balanced take+place): ok=%v status=%d (%s)\n",
+							name, count, ok, st, stackStatusName(st))
+						if ok {
+							reqOk = true
+							status = st
+							extractedCount = count
+							return true
+						}
+					}
+				}
+
+				takeSingle := &protocol.TakeStackRequestAction{}
+				takeSingle.Count = count
+				takeSingle.Source = src
+				takeSingle.Destination = stackReqSlotInfo(protocol.ContainerCursor, 0, 0)
+				ok, st := b.sendItemStackRequest(c, []protocol.StackRequestAction{takeSingle})
+				log.Printf("bebot: [bundletest] %s (count=%d, single take): ok=%v status=%d (%s)\n",
+					name, count, ok, st, stackStatusName(st))
+				if ok {
+					reqOk = true
+					status = st
+					extractedCount = count
+					return true
+				}
+				return false
 			}
-			take1 := &protocol.TakeStackRequestAction{}
-			take1.Count = innerCount
-			take1.Source = sourceDyn
-			take1.Destination = cursorEmpty
 
-			reqOk, status = b.sendItemStackRequest(c, []protocol.StackRequestAction{take1})
-			log.Printf("bebot: [bundletest] fmt1 (ContainerDynamic 67, dynID=%d, slot=0, netID=0): reqOk=%v status=%d (%s)\n",
-				targetDynID, reqOk, status, stackStatusName(status))
-
-			// Format 2: Dropper container with DynamicContainerID & bundle slot + stackNetworkID
+			// Candidates to test:
+			// 1. "Take all" inner items from DynamicContainer (ContainerDynamic = 67, slot 0)
 			if !reqOk {
-				sourceSlotDyn := protocol.StackRequestSlotInfo{
+				tryTx("fmt1-all", protocol.StackRequestSlotInfo{
+					Container: protocol.FullContainerName{
+						ContainerID:        protocol.ContainerDynamic,
+						DynamicContainerID: protocol.Option(targetDynID),
+					},
+					Slot:           0,
+					StackNetworkID: 0,
+				}, fullCount)
+			}
+
+			// 2. "Take 1" inner item from DynamicContainer (ContainerDynamic = 67, slot 0)
+			if !reqOk && fullCount > 1 {
+				tryTx("fmt1-one", protocol.StackRequestSlotInfo{
+					Container: protocol.FullContainerName{
+						ContainerID:        protocol.ContainerDynamic,
+						DynamicContainerID: protocol.Option(targetDynID),
+					},
+					Slot:           0,
+					StackNetworkID: 0,
+				}, 1)
+			}
+
+			// 3. Dropper container with DynamicContainerID & bundleSlot + bundleStackNetworkID
+			if !reqOk {
+				tryTx("fmt2-all", protocol.StackRequestSlotInfo{
 					Container: protocol.FullContainerName{
 						ContainerID:        containerID,
 						DynamicContainerID: protocol.Option(targetDynID),
 					},
 					Slot:           bundleSlot,
 					StackNetworkID: bundleItem.StackNetworkID,
-				}
-				take2 := &protocol.TakeStackRequestAction{}
-				take2.Count = innerCount
-				take2.Source = sourceSlotDyn
-				take2.Destination = cursorEmpty
-
-				reqOk, status = b.sendItemStackRequest(c, []protocol.StackRequestAction{take2})
-				log.Printf("bebot: [bundletest] fmt2 (containerID=%d, dynID=%d, slot=%d, netID=%d): reqOk=%v status=%d (%s)\n",
-					containerID, targetDynID, bundleSlot, bundleItem.StackNetworkID, reqOk, status, stackStatusName(status))
+				}, fullCount)
 			}
 
-			// Format 3: Dropper container with DynamicContainerID & Slot 0, netID 0
+			// 4. Dropper container with DynamicContainerID & Slot 0, netID 0
 			if !reqOk {
-				sourceDrop := protocol.StackRequestSlotInfo{
+				tryTx("fmt3-all", protocol.StackRequestSlotInfo{
 					Container: protocol.FullContainerName{
 						ContainerID:        containerID,
 						DynamicContainerID: protocol.Option(targetDynID),
 					},
 					Slot:           0,
 					StackNetworkID: 0,
-				}
-				take3 := &protocol.TakeStackRequestAction{}
-				take3.Count = innerCount
-				take3.Source = sourceDrop
-				take3.Destination = cursorEmpty
-
-				reqOk, status = b.sendItemStackRequest(c, []protocol.StackRequestAction{take3})
-				log.Printf("bebot: [bundletest] fmt3 (containerID=%d, dynID=%d, slot=0, netID=0): reqOk=%v status=%d (%s)\n",
-					containerID, targetDynID, reqOk, status, stackStatusName(status))
+				}, fullCount)
 			}
 
-			// Format 4: Dropper container with DynamicContainerID & Slot 0, stackNetworkID
+			// 5. Dropper container direct bundleSlot (taking bundle count) - as in commit 5208bb1
 			if !reqOk {
-				sourceDropNet := protocol.StackRequestSlotInfo{
-					Container: protocol.FullContainerName{
-						ContainerID:        containerID,
-						DynamicContainerID: protocol.Option(targetDynID),
-					},
-					Slot:           0,
-					StackNetworkID: bundleItem.StackNetworkID,
-				}
-				take4 := &protocol.TakeStackRequestAction{}
-				take4.Count = innerCount
-				take4.Source = sourceDropNet
-				take4.Destination = cursorEmpty
-
-				reqOk, status = b.sendItemStackRequest(c, []protocol.StackRequestAction{take4})
-				log.Printf("bebot: [bundletest] fmt4 (containerID=%d, dynID=%d, slot=0, netID=%d): reqOk=%v status=%d (%s)\n",
-					containerID, targetDynID, bundleItem.StackNetworkID, reqOk, status, stackStatusName(status))
-			}
-
-			// Format 5: Dropper container direct bundle slot (count=1)
-			if !reqOk {
-				sourceBundleSlot := protocol.StackRequestSlotInfo{
+				tryTx("fmt4-dropper-bundle", protocol.StackRequestSlotInfo{
 					Container: protocol.FullContainerName{
 						ContainerID: containerID,
 					},
 					Slot:           bundleSlot,
 					StackNetworkID: bundleItem.StackNetworkID,
-				}
-				take5 := &protocol.TakeStackRequestAction{}
-				take5.Count = innerCount
-				take5.Source = sourceBundleSlot
-				take5.Destination = cursorEmpty
-
-				reqOk, status = b.sendItemStackRequest(c, []protocol.StackRequestAction{take5})
-				log.Printf("bebot: [bundletest] fmt5 (containerID=%d, slot=%d, netID=%d): reqOk=%v status=%d (%s)\n",
-					containerID, bundleSlot, bundleItem.StackNetworkID, reqOk, status, stackStatusName(status))
+				}, bundleCount)
 			}
 
 			if reqOk && hasDst {
@@ -452,11 +478,11 @@ func (b *Bot) bundleTestCmd(p []string) {
 					b.inventory[dstSlot] = protocol.ItemInstance{
 						Stack: protocol.ItemStack{
 							ItemType: protocol.ItemType{NetworkID: innerNetID},
-							Count:    uint16(innerCount),
+							Count:    uint16(extractedCount),
 						},
 					}
 				} else {
-					b.inventory[dstSlot].Stack.Count += uint16(innerCount)
+					b.inventory[dstSlot].Stack.Count += uint16(extractedCount)
 				}
 				b.mu.Unlock()
 			}
