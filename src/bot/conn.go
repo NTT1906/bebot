@@ -823,6 +823,9 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 				b.containerActive = false
 			}
 			b.mu.Unlock()
+		case *packet.PacketViolationWarning:
+			log.Printf("bebot: PacketViolationWarning Type=%d Severity=%d PacketID=%d Context=%q\n",
+				p.Type, p.Severity, p.PacketID, p.ViolationContext)
 		case *packet.ItemStackResponse:
 			for _, response := range p.Responses {
 				if response.Status == protocol.ItemStackResponseStatusOK {
