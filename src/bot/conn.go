@@ -235,6 +235,7 @@ DiscoveryLoop:
 	b.containerContent = make(chan struct{}, 1)
 	b.containerItems = make(map[byte]protocol.ItemInstance)
 	b.containerTileEntities = make(map[protocol.BlockPos]map[string]any)
+	b.dynamicContainerItems = make(map[uint32][]protocol.ItemInstance)
 	b.containerRuntimeIDUpdated = make(chan uint32, 1)
 	b.blockRuntimeIDs = make(map[protocol.BlockPos]uint32)
 	b.mineActive = false
@@ -446,6 +447,7 @@ func (b *Bot) connect(ctx context.Context) error {
 	b.containerContent = make(chan struct{}, 1)
 	b.containerItems = make(map[byte]protocol.ItemInstance)
 	b.containerTileEntities = make(map[protocol.BlockPos]map[string]any)
+	b.dynamicContainerItems = make(map[uint32][]protocol.ItemInstance)
 	b.containerRuntimeIDUpdated = make(chan uint32, 1)
 	b.blockRuntimeIDs = make(map[protocol.BlockPos]uint32)
 	b.mineActive = false
@@ -858,8 +860,18 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 				}
 			}
 		case *packet.InventoryContent:
+			dynID := uint32(0)
+			if d, ok := p.Container.DynamicContainerID.Value(); ok && d != 0 {
+				dynID = d
+				b.mu.Lock()
+				if b.dynamicContainerItems == nil {
+					b.dynamicContainerItems = make(map[uint32][]protocol.ItemInstance)
+				}
+				b.dynamicContainerItems[dynID] = append([]protocol.ItemInstance(nil), p.Content...)
+				b.mu.Unlock()
+			}
 			if tracePackets {
-				log.Printf("bebot: trace: InventoryContent WindowID=%d\n", p.WindowID)
+				log.Printf("bebot: trace: InventoryContent WindowID=%d ContainerID=%d DynamicID=%d items=%d\n", p.WindowID, p.Container.ContainerID, dynID, len(p.Content))
 			}
 			if p.WindowID == 0 {
 				b.inventory = append([]protocol.ItemInstance(nil), p.Content...)

@@ -175,24 +175,62 @@ func (b *Bot) bundleTestCmd(p []string) {
 				continue
 			}
 
-			// Bundle found. Inspect its NBT to inspect inner stored items.
+			// Bundle found. Inspect its NBT to inspect inner stored items or dynamic bundle_id.
 			bundleNBT := bundleItem.Stack.NBTData
-			innerItems := extractBundleInnerItems(bundleNBT)
-			var innerSummary []string
-			for _, m := range innerItems {
-				n, _ := m["Name"].(string)
-				cnt := byte(1)
-				if c, ok := m["Count"].(byte); ok && c > 0 {
-					cnt = c
-				} else if c, ok := m["Count"].(int32); ok && c > 0 {
-					cnt = byte(c)
-				} else if c, ok := m["Count"].(int16); ok && c > 0 {
-					cnt = byte(c)
+			var bundleID uint32
+			if bundleNBT != nil {
+				if rawID, ok := bundleNBT["bundle_id"]; ok {
+					switch id := rawID.(type) {
+					case int64:
+						bundleID = uint32(id)
+					case int32:
+						bundleID = uint32(id)
+					case int16:
+						bundleID = uint32(id)
+					case byte:
+						bundleID = uint32(id)
+					case uint32:
+						bundleID = id
+					case int:
+						bundleID = uint32(id)
+					}
 				}
-				innerSummary = append(innerSummary, fmt.Sprintf("%dx %s", cnt, strings.TrimPrefix(n, "minecraft:")))
 			}
 
-			if len(innerItems) == 0 {
+			innerItems := extractBundleInnerItems(bundleNBT)
+			var innerName string
+			var innerCount byte = 1
+			var innerNetID int32
+
+			if len(innerItems) > 0 {
+				firstItem := innerItems[0]
+				innerName, _ = firstItem["Name"].(string)
+				if cnt, ok := firstItem["Count"].(byte); ok && cnt > 0 {
+					innerCount = cnt
+				} else if cnt, ok := firstItem["Count"].(int32); ok && cnt > 0 {
+					innerCount = byte(cnt)
+				} else if cnt, ok := firstItem["Count"].(int16); ok && cnt > 0 {
+					innerCount = byte(cnt)
+				}
+				innerNetID = b.itemNetworkIDByName(innerName)
+			} else if bundleID != 0 {
+				b.mu.Lock()
+				dynItems, hasDyn := b.dynamicContainerItems[bundleID]
+				b.mu.Unlock()
+				if hasDyn && len(dynItems) > 0 {
+					first := dynItems[0]
+					innerNetID = first.Stack.ItemType.NetworkID
+					innerName = b.itemName(innerNetID)
+					if first.Stack.Count > 0 {
+						innerCount = byte(first.Stack.Count)
+					}
+				} else {
+					innerName = "bundle item"
+				}
+			}
+
+			// If neither NBT inner items nor a bundle_id is present, the bundle is truly empty.
+			if len(innerItems) == 0 && bundleID == 0 {
 				b.closeBlockContainer(c, wID)
 				b.invMu.Unlock()
 				log.Printf("bebot: [bundletest] attempt %d: bundle at %v slot=%d has no inner items (NBT=%+v)\n", attempt+1, targetPos, bundleSlot, bundleNBT)
@@ -207,21 +245,13 @@ func (b *Bot) bundleTestCmd(p []string) {
 			}
 			emptyBundleCount = 0
 
-			firstItem := innerItems[0]
-			innerName, _ := firstItem["Name"].(string)
-			innerCount := byte(1)
-			if cnt, ok := firstItem["Count"].(byte); ok && cnt > 0 {
-				innerCount = cnt
-			} else if cnt, ok := firstItem["Count"].(int32); ok && cnt > 0 {
-				innerCount = byte(cnt)
-			} else if cnt, ok := firstItem["Count"].(int16); ok && cnt > 0 {
-				innerCount = byte(cnt)
+			targetDynID := bundleID
+			if targetDynID == 0 {
+				targetDynID = uint32(bundleItem.StackNetworkID)
 			}
-			innerNetID := b.itemNetworkIDByName(innerName)
 
-			contentsStr := strings.Join(innerSummary, ", ")
-			log.Printf("bebot: [bundletest] attempt %d: bundle at %v slot=%d has %s — extracting %dx %s...\n",
-				attempt+1, targetPos, bundleSlot, contentsStr, innerCount, strings.TrimPrefix(innerName, "minecraft:"))
+			log.Printf("bebot: [bundletest] attempt %d: bundle at %v slot=%d (bundle_id=%d) has %s — extracting %dx %s...\n",
+				attempt+1, targetPos, bundleSlot, targetDynID, innerName, innerCount, strings.TrimPrefix(innerName, "minecraft:"))
 
 			// RACE: Extract inner item from bundle onto cursor, then place into player inventory.
 			// The bundle stays inside the dropper!
@@ -240,7 +270,7 @@ func (b *Bot) bundleTestCmd(p []string) {
 					sourceDyn := protocol.StackRequestSlotInfo{
 						Container: protocol.FullContainerName{
 							ContainerID:        protocol.ContainerDynamic,
-							DynamicContainerID: protocol.Option(uint32(bundleItem.StackNetworkID)),
+							DynamicContainerID: protocol.Option(targetDynID),
 						},
 						Slot:           0,
 						StackNetworkID: 0,
@@ -262,7 +292,7 @@ func (b *Bot) bundleTestCmd(p []string) {
 						sourceDrop := protocol.StackRequestSlotInfo{
 							Container: protocol.FullContainerName{
 								ContainerID:        containerID,
-								DynamicContainerID: protocol.Option(uint32(bundleItem.StackNetworkID)),
+								DynamicContainerID: protocol.Option(targetDynID),
 							},
 							Slot:           0,
 							StackNetworkID: 0,
@@ -278,6 +308,29 @@ func (b *Bot) bundleTestCmd(p []string) {
 						placeDrop.Destination = dstSlotInfo
 
 						reqOk, status = b.sendItemStackRequest(c, []protocol.StackRequestAction{takeDrop, placeDrop})
+					}
+
+					// Format 3 fallback: bundleSlot with DynamicContainerID
+					if !reqOk {
+						sourceSlotDyn := protocol.StackRequestSlotInfo{
+							Container: protocol.FullContainerName{
+								ContainerID:        containerID,
+								DynamicContainerID: protocol.Option(targetDynID),
+							},
+							Slot:           bundleSlot,
+							StackNetworkID: bundleItem.StackNetworkID,
+						}
+						takeSlotDyn := &protocol.TakeStackRequestAction{}
+						takeSlotDyn.Count = innerCount
+						takeSlotDyn.Source = sourceSlotDyn
+						takeSlotDyn.Destination = cursorEmpty
+
+						placeSlotDyn := &protocol.PlaceStackRequestAction{}
+						placeSlotDyn.Count = innerCount
+						placeSlotDyn.Source = cursorFull
+						placeSlotDyn.Destination = dstSlotInfo
+
+						reqOk, status = b.sendItemStackRequest(c, []protocol.StackRequestAction{takeSlotDyn, placeSlotDyn})
 					}
 
 					if reqOk {

@@ -126,6 +126,7 @@ type Bot struct {
 	containerPos                 protocol.BlockPos
 	containerContainerID         byte
 	containerItems               map[byte]protocol.ItemInstance
+	dynamicContainerItems        map[uint32][]protocol.ItemInstance
 	containerTileEntities        map[protocol.BlockPos]map[string]any
 	containerRuntimeIDUpdated    chan uint32
 	lastSentPacketDesc           string
@@ -285,6 +286,7 @@ func New(opts Options) *Bot {
 		mineTimeoutSec:            mineTimeout,
 		blockRuntimeIDs:           make(map[protocol.BlockPos]uint32),
 		containerTileEntities:     make(map[protocol.BlockPos]map[string]any),
+		dynamicContainerItems:     make(map[uint32][]protocol.ItemInstance),
 		containerRuntimeIDUpdated: make(chan uint32, 1),
 	}
 }
