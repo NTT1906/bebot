@@ -12,6 +12,23 @@ import (
 	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
 )
 
+var (
+	baseIdleInputFlags = func() protocol.InputFlags {
+		f := protocol.NewInputFlags(packet.InputFlagCount)
+		f.Set(packet.InputFlagBlockBreakingDelayEnabled)
+		f.Set(packet.InputFlagClientAckServerData)
+		return f
+	}()
+
+	baseMiningInputFlags = func() protocol.InputFlags {
+		f := protocol.NewInputFlags(packet.InputFlagCount)
+		f.Set(packet.InputFlagBlockBreakingDelayEnabled)
+		f.Set(packet.InputFlagClientAckServerData)
+		f.Set(packet.InputFlagPerformBlockActions)
+		return f
+	}()
+)
+
 func entityFlagSet(metadata protocol.EntityMetadata, key uint32, flag int) bool {
 	raw, ok := metadata[key]
 	if !ok {
@@ -250,14 +267,7 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 			b.velocityY = 0
 		}
 	}
-	flags := protocol.NewInputFlags(packet.InputFlagCount)
-	flags.Set(packet.InputFlagBlockBreakingDelayEnabled)
-	flags.Set(packet.InputFlagClientAckServerData)
-	if b.moving {
-		flags.Set(packet.InputFlagUp)
-		flags.Set(packet.InputFlagSprinting)
-		flags.Set(packet.InputFlagStartSprinting)
-	}
+
 	progress := b.pos.Sub(b.last)
 	progressLen := float32(math.Sqrt(float64(progress.Dot(progress))))
 	if b.moving && progressLen < .02 {
@@ -268,50 +278,68 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 	if b.stuckTicks > 2 {
 		jump = true
 	}
-	if b.mode == modeMimic && targetPlayer.sprinting {
-		flags.Set(packet.InputFlagSprinting)
-		flags.Set(packet.InputFlagStartSprinting)
-	}
+
 	desiredSneaking := b.sneaking
 	if b.mode == modeMimic {
 		desiredSneaking = targetPlayer.sneaking
 	}
 	sneakStart := desiredSneaking && !b.sentSneaking
 	sneakStop := !desiredSneaking && b.sentSneaking
-	if desiredSneaking {
-		flags.Set(packet.InputFlagSneaking)
-		flags.Set(packet.InputFlagSneakDown)
-		flags.Set(packet.InputFlagPersistSneak)
-		flags.Set(packet.InputFlagSneakCurrentRaw)
-		if sneakStart {
-			flags.Set(packet.InputFlagStartSneaking)
-			flags.Set(packet.InputFlagSneakPressedRaw)
-		}
-	} else if sneakStop {
-		flags.Set(packet.InputFlagStopSneaking)
-		flags.Set(packet.InputFlagSneakReleasedRaw)
-	}
-	if b.mode == modeMimic && targetPlayer.swimming {
-		if !b.mimicSwimming {
-			flags.Set(packet.InputFlagStartSwimming)
-		}
-	} else if b.mode == modeMimic && b.mimicSwimming {
-		flags.Set(packet.InputFlagStopSwimming)
-	}
+
 	mirrorSwing := b.mode == modeMimic && targetPlayer.swinging
 	mirrorUse := b.mode == modeMimic && targetPlayer.usingItem
-	if mirrorSwing {
-		flags.Set(packet.InputFlagMissedSwing)
-	}
-	if mirrorUse {
-		flags.Set(packet.InputFlagPerformItemInteraction)
-		flags.Set(packet.InputFlagStartUsingItem)
-	}
-	if jump {
-		flags.Set(packet.InputFlagJumping)
-		flags.Set(packet.InputFlagAscend)
-		flags.Set(packet.InputFlagWantUp)
-		flags.Set(packet.InputFlagStartJumping)
+	mimicActive := b.mode == modeMimic && (targetPlayer.sprinting || targetPlayer.swimming || b.mimicSwimming || mirrorSwing || mirrorUse)
+	hasDynamicFlags := b.moving || jump || desiredSneaking || sneakStop || mimicActive
+
+	var flags protocol.InputFlags
+	if hasDynamicFlags {
+		flags = protocol.NewInputFlags(packet.InputFlagCount)
+		flags.Set(packet.InputFlagBlockBreakingDelayEnabled)
+		flags.Set(packet.InputFlagClientAckServerData)
+		if b.moving {
+			flags.Set(packet.InputFlagUp)
+			flags.Set(packet.InputFlagSprinting)
+			flags.Set(packet.InputFlagStartSprinting)
+		}
+		if b.mode == modeMimic && targetPlayer.sprinting {
+			flags.Set(packet.InputFlagSprinting)
+			flags.Set(packet.InputFlagStartSprinting)
+		}
+		if desiredSneaking {
+			flags.Set(packet.InputFlagSneaking)
+			flags.Set(packet.InputFlagSneakDown)
+			flags.Set(packet.InputFlagPersistSneak)
+			flags.Set(packet.InputFlagSneakCurrentRaw)
+			if sneakStart {
+				flags.Set(packet.InputFlagStartSneaking)
+				flags.Set(packet.InputFlagSneakPressedRaw)
+			}
+		} else if sneakStop {
+			flags.Set(packet.InputFlagStopSneaking)
+			flags.Set(packet.InputFlagSneakReleasedRaw)
+		}
+		if b.mode == modeMimic && targetPlayer.swimming {
+			if !b.mimicSwimming {
+				flags.Set(packet.InputFlagStartSwimming)
+			}
+		} else if b.mode == modeMimic && b.mimicSwimming {
+			flags.Set(packet.InputFlagStopSwimming)
+		}
+		if mirrorSwing {
+			flags.Set(packet.InputFlagMissedSwing)
+		}
+		if mirrorUse {
+			flags.Set(packet.InputFlagPerformItemInteraction)
+			flags.Set(packet.InputFlagStartUsingItem)
+		}
+		if jump {
+			flags.Set(packet.InputFlagJumping)
+			flags.Set(packet.InputFlagAscend)
+			flags.Set(packet.InputFlagWantUp)
+			flags.Set(packet.InputFlagStartJumping)
+		}
+	} else {
+		flags = baseIdleInputFlags
 	}
 	b.tick++
 	moveZ := float32(0)
@@ -551,8 +579,12 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 		}
 	}
 	if len(actions) > 0 {
-		auth.InputData.Set(packet.InputFlagPerformBlockActions)
 		auth.BlockActions = protocol.Option(actions)
+		if hasDynamicFlags {
+			auth.InputData.Set(packet.InputFlagPerformBlockActions)
+		} else {
+			auth.InputData = baseMiningInputFlags
+		}
 	}
 
 	if stalled {
