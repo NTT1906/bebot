@@ -562,9 +562,10 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 		b.mu.Unlock()
 
 		isContinuous := len(actions) == 1 && actions[0].Action == int32(protocol.PlayerActionContinueDestroyBlock)
+		throttleTicks := b.StallThrottleTicks()
 		// During server stalls, throttle empty keepalive auth packets and repetitive continuous break
-		// packets to ~4 Hz (every 5th tick) to prevent buffer bursts and anti-cheat kicks on unfreeze.
-		if curStall%5 != 0 && (len(actions) == 0 || isContinuous) && !mineSwing {
+		// packets to match the stall threshold to prevent buffer bursts and anti-cheat kicks on unfreeze.
+		if curStall%throttleTicks != 0 && (len(actions) == 0 || isContinuous) && !mineSwing {
 			return
 		}
 	} else {

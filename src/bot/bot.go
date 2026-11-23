@@ -184,16 +184,27 @@ type Bot struct {
 	stallTicks                   int
 }
 
-// ServerStallThreshold is the duration without server packets before considering the server stalled.
-const ServerStallThreshold = 250 * time.Millisecond
+// ServerStallThreshold returns the configured duration without server packets before considering the server stalled.
+func (b *Bot) ServerStallThreshold() time.Duration {
+	return b.cfg.ServerStallThreshold()
+}
 
-// isServerStalled returns true if no packets have been received from the server within ServerStallThreshold.
+// StallThrottleTicks returns the number of 50ms client ticks between throttled packets during stalls.
+func (b *Bot) StallThrottleTicks() int {
+	ticks := int(b.ServerStallThreshold() / (50 * time.Millisecond))
+	if ticks < 2 {
+		return 2
+	}
+	return ticks
+}
+
+// isServerStalled returns true if no packets have been received from the server within the configured stall threshold.
 func (b *Bot) isServerStalled() bool {
 	last := b.lastPacketTime.Load()
 	if last == 0 {
 		return false
 	}
-	return time.Since(time.Unix(0, last)) > ServerStallThreshold
+	return time.Since(time.Unix(0, last)) > b.ServerStallThreshold()
 }
 
 // markPacketReceived records the current timestamp as the latest server packet arrival.

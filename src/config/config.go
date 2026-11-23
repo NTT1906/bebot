@@ -34,6 +34,9 @@ type MineConfig struct {
 // DefaultRenderDistance is the fallback chunk radius if unspecified or <= 0.
 const DefaultRenderDistance = 4
 
+// DefaultServerStallThresholdMs is the fallback duration without server packets before considering the server stalled.
+const DefaultServerStallThresholdMs = 250
+
 // Config represents the top-level configuration loaded from config.json.
 type Config struct {
 	Superuser string `json:"superuser"`
@@ -47,10 +50,20 @@ type Config struct {
 		ReconnectBaseDelayMs, AfkJumpIntervalMs int
 		WalkSpeed                               float32
 		RenderDistance                          int32 `json:"renderDistance"`
+		ServerStallThresholdMs                  int   `json:"serverStallThresholdMs"`
 	} `json:"behaviour"`
 	CommandsViaChat *bool      `json:"commands_via_chat"`
 	Skin            SkinConfig `json:"skin"`
 	Mine            MineConfig `json:"mine"`
+}
+
+// ServerStallThreshold returns the configured duration without server packets before considering the server stalled.
+func (cfg Config) ServerStallThreshold() time.Duration {
+	ms := cfg.Behaviour.ServerStallThresholdMs
+	if ms <= 0 {
+		ms = DefaultServerStallThresholdMs
+	}
+	return time.Duration(ms) * time.Millisecond
 }
 
 // RenderDistance returns the configured chunk radius, falling back to DefaultRenderDistance if <= 0.
@@ -85,6 +98,9 @@ func LoadConfig(path string) (Config, error) {
 	}
 	if cfg.Behaviour.RenderDistance <= 0 {
 		cfg.Behaviour.RenderDistance = DefaultRenderDistance
+	}
+	if cfg.Behaviour.ServerStallThresholdMs <= 0 {
+		cfg.Behaviour.ServerStallThresholdMs = DefaultServerStallThresholdMs
 	}
 	return cfg, nil
 }
