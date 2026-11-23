@@ -607,6 +607,12 @@ func (b *Bot) command(line string) {
 		b.dropSlots(0, len(b.inventory), 0)
 	case "transfer":
 		b.transferCmd(p)
+	case "loot", "steal":
+		b.lootCmd(p)
+	case "take":
+		b.takeCmd(p)
+	case "container", "chest", "viewchest", "viewcontainer":
+		b.viewContainerCmd(p)
 	case "drop":
 		if len(p) < 2 || len(p) > 3 {
 			b.reply("Usage: drop <slot> [amount]")
@@ -776,6 +782,9 @@ func (b *Bot) help() {
 		"dropall - drop all inventory items",
 		"drop <slot> [amount] - drop items from a slot",
 		"transfer <slot a> <slot b> - move items between inventory slots",
+		"loot [x y z] - loot all items from container (chest, dropper, barrel, etc.)",
+		"take [x y z] <slot> [count] - take item from a container slot",
+		"container [x y z] - view items inside a container",
 		"sleep [x y z] - set a sleep/spawn checkpoint",
 		"players / list - list online players",
 		"nearby - list nearby players",

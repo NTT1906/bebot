@@ -115,6 +115,13 @@ type Bot struct {
 	itemRequestID                int32
 	stackPending                 *stackRequest
 	containerOpen                chan struct{}
+	containerContent             chan struct{}
+	containerActive              bool
+	containerWindowID            byte
+	containerType                byte
+	containerPos                 protocol.BlockPos
+	containerContainerID         byte
+	containerItems               map[byte]protocol.ItemInstance
 	invMu                        sync.Mutex
 	facingYaw, facingPitch       float32
 	idleYaw, idlePitch           float32

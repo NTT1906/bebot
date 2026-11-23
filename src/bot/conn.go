@@ -232,6 +232,8 @@ DiscoveryLoop:
 	b.itemRequestID = -859
 	b.stackPending = nil
 	b.containerOpen = make(chan struct{}, 1)
+	b.containerContent = make(chan struct{}, 1)
+	b.containerItems = make(map[byte]protocol.ItemInstance)
 	b.mineActive = false
 	b.mineFaceAccurate = false
 	b.mineQueue = nil
@@ -437,6 +439,8 @@ func (b *Bot) connect(ctx context.Context) error {
 	b.itemRequestID = -859
 	b.stackPending = nil
 	b.containerOpen = make(chan struct{}, 1)
+	b.containerContent = make(chan struct{}, 1)
+	b.containerItems = make(map[byte]protocol.ItemInstance)
 	b.mineActive = false
 	b.mineFaceAccurate = false
 	b.mineQueue = nil
@@ -771,10 +775,24 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 				b.heldItem = p.NewItem
 			}
 		case *packet.ContainerOpen:
+			b.mu.Lock()
+			b.containerActive = true
+			b.containerWindowID = p.WindowID
+			b.containerType = p.ContainerType
+			b.containerPos = p.ContainerPosition
+			b.containerItems = make(map[byte]protocol.ItemInstance)
+			b.containerContainerID = protocol.ContainerLevelEntity
+			b.mu.Unlock()
 			select {
 			case b.containerOpen <- struct{}{}:
 			default:
 			}
+		case *packet.ContainerClose:
+			b.mu.Lock()
+			if b.containerActive && (p.WindowID == b.containerWindowID || p.WindowID == 0) {
+				b.containerActive = false
+			}
+			b.mu.Unlock()
 		case *packet.ItemStackResponse:
 			var resp chan uint8
 			var status uint8
@@ -819,6 +837,24 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 					b.heldItem = b.inventory[b.hotbarSlot]
 				}
 				b.sendHeldItem(c)
+			} else {
+				b.mu.Lock()
+				if b.containerActive && byte(p.WindowID) == b.containerWindowID {
+					if b.containerItems == nil {
+						b.containerItems = make(map[byte]protocol.ItemInstance)
+					}
+					for slot, item := range p.Content {
+						b.containerItems[byte(slot)] = item
+					}
+					if p.Container.ContainerID != 0 {
+						b.containerContainerID = p.Container.ContainerID
+					}
+				}
+				b.mu.Unlock()
+				select {
+				case b.containerContent <- struct{}{}:
+				default:
+				}
 			}
 		case *packet.InventorySlot:
 			log.Printf("bebot: trace: InventorySlot WindowID=%d Slot=%d Item=%v", p.WindowID, p.Slot, p.NewItem.Stack.ItemType.NetworkID)
@@ -833,6 +869,18 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 					b.heldItem = p.NewItem
 					b.sendHeldItem(c)
 				}
+			} else {
+				b.mu.Lock()
+				if b.containerActive && byte(p.WindowID) == b.containerWindowID {
+					if b.containerItems == nil {
+						b.containerItems = make(map[byte]protocol.ItemInstance)
+					}
+					b.containerItems[byte(p.Slot)] = p.NewItem
+					if container, ok := p.Container.Value(); ok && container.ContainerID != 0 {
+						b.containerContainerID = container.ContainerID
+					}
+				}
+				b.mu.Unlock()
 			}
 		case *packet.PlayerHotBar:
 			if p.SelectHotBarSlot && p.SelectedHotBarSlot < 10 {

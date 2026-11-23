@@ -3,9 +3,13 @@ package bot
 import (
 	"fmt"
 	"log"
+	"math"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/go-gl/mathgl/mgl32"
 	"github.com/sandertv/gophertunnel/minecraft"
 	"github.com/sandertv/gophertunnel/minecraft/protocol"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
@@ -347,4 +351,471 @@ func (b *Bot) interactBlock(pos protocol.BlockPos) {
 	_ = b.conn.WritePacket(&packet.PlayerAction{EntityRuntimeID: b.entityID, ActionType: protocol.PlayerActionStartSleeping, BlockPosition: pos, ResultPosition: pos, BlockFace: 1})
 	_ = b.conn.WritePacket(&packet.PlayerAction{EntityRuntimeID: b.entityID, ActionType: protocol.PlayerActionStartItemUseOn, BlockPosition: pos, ResultPosition: pos, BlockFace: 1})
 	_ = b.conn.Flush()
+}
+
+func (b *Bot) itemName(netID int32) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if name, ok := b.itemNamesByID[netID]; ok && name != "" {
+		return strings.TrimPrefix(name, "minecraft:")
+	}
+	return fmt.Sprintf("item_%d", netID)
+}
+
+func (b *Bot) getFrontBlockPos() protocol.BlockPos {
+	b.mu.Lock()
+	pos := b.pos
+	yaw := b.facingYaw
+	pitch := b.facingPitch
+	b.mu.Unlock()
+
+	yawRad := float64(yaw) * math.Pi / 180.0
+	pitchRad := float64(pitch) * math.Pi / 180.0
+
+	dx := -math.Sin(yawRad) * math.Cos(pitchRad)
+	dy := -math.Sin(pitchRad)
+	dz := math.Cos(yawRad) * math.Cos(pitchRad)
+
+	eyeY := float64(pos.Y()) + 1.62
+	fx := float64(pos.X()) + dx*1.5
+	fy := eyeY + dy*1.5
+	fz := float64(pos.Z()) + dz*1.5
+
+	return protocol.BlockPos{
+		int32(math.Floor(fx)),
+		int32(math.Floor(fy)),
+		int32(math.Floor(fz)),
+	}
+}
+
+func (b *Bot) parseContainerPos(p []string) (protocol.BlockPos, []string, error) {
+	if len(p) >= 4 {
+		x, errX := strconv.Atoi(p[1])
+		y, errY := strconv.Atoi(p[2])
+		z, errZ := strconv.Atoi(p[3])
+		if errX == nil && errY == nil && errZ == nil {
+			return protocol.BlockPos{int32(x), int32(y), int32(z)}, p[4:], nil
+		}
+	}
+	if len(p) >= 2 && strings.EqualFold(p[1], "front") {
+		return b.getFrontBlockPos(), p[2:], nil
+	}
+	return b.getFrontBlockPos(), p[1:], nil
+}
+
+func (b *Bot) openBlockContainer(c *minecraft.Conn, pos protocol.BlockPos) (byte, error) {
+	b.mu.Lock()
+	botPos := b.pos
+	hotbarSlot := b.hotbarSlot
+	heldItem := b.heldItem
+	entityID := b.entityID
+	select {
+	case <-b.containerOpen:
+	default:
+	}
+	select {
+	case <-b.containerContent:
+	default:
+	}
+	b.containerActive = false
+	b.containerItems = make(map[byte]protocol.ItemInstance)
+	b.containerPos = pos
+	b.containerContainerID = protocol.ContainerLevelEntity
+	b.mu.Unlock()
+
+	centerPos := mgl32.Vec3{float32(pos.X()) + 0.5, float32(pos.Y()) + 0.5, float32(pos.Z()) + 0.5}
+	eyePos := botPos.Add(mgl32.Vec3{0, 1.62, 0})
+	diff := centerPos.Sub(eyePos)
+	dist := diff.Len()
+	if dist > 6.0 {
+		return 0, fmt.Errorf("container at %v is too far (%.1f blocks, max 6.0)", pos, dist)
+	}
+
+	dx := float64(centerPos.X()) - float64(botPos.X())
+	dy := float64(centerPos.Y()) - float64(eyePos.Y())
+	dz := float64(centerPos.Z()) - float64(botPos.Z())
+	horizontal := math.Sqrt(dx*dx + dz*dz)
+	yaw := float32(0)
+	if horizontal > 0.001 {
+		yaw = float32(math.Atan2(-dx, dz) * 180 / math.Pi)
+		if yaw < 0 {
+			yaw += 360
+		}
+	}
+	pitch := float32(-math.Atan2(dy, horizontal) * 180 / math.Pi)
+	b.mu.Lock()
+	b.facingYaw = yaw
+	b.facingPitch = pitch
+	b.idleYaw = yaw
+	b.idlePitch = pitch
+	b.mu.Unlock()
+
+	face := determineBlockFace(eyePos, pos)
+
+	_ = c.WritePacket(&packet.InventoryTransaction{
+		TransactionData: &protocol.UseItemTransactionData{
+			ActionType:      protocol.UseItemActionClickBlock,
+			BlockPosition:   pos,
+			BlockFace:       face,
+			HotBarSlot:      int32(hotbarSlot),
+			HeldItem:        heldItem,
+			Position:        botPos,
+			ClickedPosition: mgl32.Vec3{0.5, 0.5, 0.5},
+			BlockRuntimeID:  0,
+		},
+	})
+	_ = c.WritePacket(&packet.PlayerAction{
+		EntityRuntimeID: entityID,
+		ActionType:      protocol.PlayerActionStartItemUseOn,
+		BlockPosition:   pos,
+		ResultPosition:  pos,
+		BlockFace:       face,
+	})
+	_ = c.WritePacket(&packet.Animate{
+		ActionType:      packet.AnimateActionSwingArm,
+		EntityRuntimeID: entityID,
+	})
+	if err := c.Flush(); err != nil {
+		return 0, fmt.Errorf("flush failed: %w", err)
+	}
+
+	select {
+	case <-b.containerOpen:
+	case <-time.After(2500 * time.Millisecond):
+		return 0, fmt.Errorf("timeout waiting for container to open at %v (ensure target block has an inventory)", pos)
+	}
+
+	b.mu.Lock()
+	itemsCount := len(b.containerItems)
+	wID := b.containerWindowID
+	b.mu.Unlock()
+
+	if itemsCount == 0 {
+		select {
+		case <-b.containerContent:
+		case <-time.After(1500 * time.Millisecond):
+		}
+	}
+
+	return wID, nil
+}
+
+func (b *Bot) closeBlockContainer(c *minecraft.Conn, windowID byte) {
+	b.mu.Lock()
+	cType := b.containerType
+	b.containerActive = false
+	b.mu.Unlock()
+	_ = c.WritePacket(&packet.ContainerClose{
+		WindowID:      windowID,
+		ContainerType: cType,
+		ServerSide:    false,
+	})
+	_ = c.Flush()
+}
+
+func (b *Bot) findFreePlayerSlot() (int, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.inventory) < 36 {
+		grown := make([]protocol.ItemInstance, 36)
+		copy(grown, b.inventory)
+		b.inventory = grown
+	}
+	for i := 0; i < 36; i++ {
+		if b.inventory[i].Stack.Count == 0 {
+			return i, true
+		}
+	}
+	return -1, false
+}
+
+func (b *Bot) lootCmd(p []string) {
+	b.mu.Lock()
+	c := b.conn
+	b.mu.Unlock()
+	if c == nil {
+		b.reply("Cannot loot: bot is not connected.")
+		return
+	}
+
+	pos, _, err := b.parseContainerPos(p)
+	if err != nil {
+		b.reply("Usage: loot [x y z] or loot front")
+		return
+	}
+
+	b.invMu.Lock()
+	defer b.invMu.Unlock()
+
+	wID, err := b.openBlockContainer(c, pos)
+	if err != nil {
+		b.reply("Failed to open container: " + err.Error())
+		return
+	}
+	defer b.closeBlockContainer(c, wID)
+
+	b.mu.Lock()
+	containerID := b.containerContainerID
+	if containerID == 0 {
+		containerID = protocol.ContainerLevelEntity
+	}
+	var slots []byte
+	for s, item := range b.containerItems {
+		if item.Stack.Count > 0 {
+			slots = append(slots, s)
+		}
+	}
+	b.mu.Unlock()
+
+	if len(slots) == 0 {
+		b.reply(fmt.Sprintf("Container at (%d, %d, %d) is empty.", pos.X(), pos.Y(), pos.Z()))
+		return
+	}
+
+	sort.Slice(slots, func(i, j int) bool { return slots[i] < slots[j] })
+
+	lootedCount := 0
+	var lootedSummary []string
+	for _, cSlot := range slots {
+		b.mu.Lock()
+		if !b.containerActive {
+			b.mu.Unlock()
+			break
+		}
+		cItem := b.containerItems[cSlot]
+		b.mu.Unlock()
+
+		if cItem.Stack.Count == 0 {
+			continue
+		}
+
+		dstSlot, ok := b.findFreePlayerSlot()
+		if !ok {
+			b.reply("Player inventory is full!")
+			break
+		}
+
+		dstContainer, dstSlotInContainer, ok := playerSlotContainer(dstSlot)
+		if !ok {
+			continue
+		}
+
+		count := int(cItem.Stack.Count)
+		if count > 255 {
+			count = 255
+		}
+
+		take := &protocol.TakeStackRequestAction{}
+		take.Count = byte(count)
+		take.Source = stackReqSlotInfo(containerID, cSlot, cItem.StackNetworkID)
+		take.Destination = stackReqSlotInfo(protocol.ContainerCursor, 0, 0)
+		place := &protocol.PlaceStackRequestAction{}
+		place.Count = byte(count)
+		place.Source = stackReqSlotInfo(protocol.ContainerCursor, 0, cItem.StackNetworkID)
+		place.Destination = stackReqSlotInfo(dstContainer, dstSlotInContainer, 0)
+
+		reqOk, status := b.sendItemStackRequest(c, []protocol.StackRequestAction{take, place})
+		if !reqOk {
+			log.Printf("bebot: loot slot %d failed: %s\n", cSlot, stackStatusName(status))
+			continue
+		}
+
+		b.mu.Lock()
+		if len(b.inventory) <= dstSlot {
+			grown := make([]protocol.ItemInstance, dstSlot+1)
+			copy(grown, b.inventory)
+			b.inventory = grown
+		}
+		b.inventory[dstSlot] = cItem
+		delete(b.containerItems, cSlot)
+		b.mu.Unlock()
+
+		lootedCount++
+		name := b.itemName(cItem.Stack.ItemType.NetworkID)
+		if len(lootedSummary) < 5 {
+			lootedSummary = append(lootedSummary, fmt.Sprintf("%dx %s", count, name))
+		}
+
+		time.Sleep(40 * time.Millisecond)
+	}
+
+	if lootedCount == 0 {
+		b.reply(fmt.Sprintf("Could not take any items from container at (%d, %d, %d).", pos.X(), pos.Y(), pos.Z()))
+		return
+	}
+
+	details := strings.Join(lootedSummary, ", ")
+	if lootedCount > len(lootedSummary) {
+		details += fmt.Sprintf(" and %d more", lootedCount-len(lootedSummary))
+	}
+	b.reply(fmt.Sprintf("Looted %d item stack(s) from container at (%d, %d, %d): %s.", lootedCount, pos.X(), pos.Y(), pos.Z(), details))
+}
+
+func (b *Bot) takeCmd(p []string) {
+	b.mu.Lock()
+	c := b.conn
+	b.mu.Unlock()
+	if c == nil {
+		b.reply("Cannot take item: bot is not connected.")
+		return
+	}
+
+	pos, rem, err := b.parseContainerPos(p)
+	if err != nil || len(rem) < 1 {
+		b.reply("Usage: take [x y z] <slot> [count] or take <slot> [count]")
+		return
+	}
+
+	slotNum, err := strconv.Atoi(rem[0])
+	if err != nil || slotNum < 0 || slotNum > 255 {
+		b.reply("Invalid slot number. Expected 0-255.")
+		return
+	}
+	cSlot := byte(slotNum)
+
+	reqCount := 0
+	if len(rem) >= 2 {
+		if val, err := strconv.Atoi(rem[1]); err == nil && val > 0 {
+			reqCount = val
+		}
+	}
+
+	b.invMu.Lock()
+	defer b.invMu.Unlock()
+
+	wID, err := b.openBlockContainer(c, pos)
+	if err != nil {
+		b.reply("Failed to open container: " + err.Error())
+		return
+	}
+	defer b.closeBlockContainer(c, wID)
+
+	b.mu.Lock()
+	containerID := b.containerContainerID
+	if containerID == 0 {
+		containerID = protocol.ContainerLevelEntity
+	}
+	cItem, hasItem := b.containerItems[cSlot]
+	b.mu.Unlock()
+
+	if !hasItem || cItem.Stack.Count == 0 {
+		b.reply(fmt.Sprintf("Slot %d in container at (%d, %d, %d) is empty.", cSlot, pos.X(), pos.Y(), pos.Z()))
+		return
+	}
+
+	count := int(cItem.Stack.Count)
+	if reqCount > 0 && reqCount < count {
+		count = reqCount
+	}
+	if count > 255 {
+		count = 255
+	}
+
+	dstSlot, ok := b.findFreePlayerSlot()
+	if !ok {
+		b.reply("Player inventory is full!")
+		return
+	}
+
+	dstContainer, dstSlotInContainer, ok := playerSlotContainer(dstSlot)
+	if !ok {
+		b.reply("Could not map player destination slot.")
+		return
+	}
+
+	take := &protocol.TakeStackRequestAction{}
+	take.Count = byte(count)
+	take.Source = stackReqSlotInfo(containerID, cSlot, cItem.StackNetworkID)
+	take.Destination = stackReqSlotInfo(protocol.ContainerCursor, 0, 0)
+	place := &protocol.PlaceStackRequestAction{}
+	place.Count = byte(count)
+	place.Source = stackReqSlotInfo(protocol.ContainerCursor, 0, cItem.StackNetworkID)
+	place.Destination = stackReqSlotInfo(dstContainer, dstSlotInContainer, 0)
+
+	reqOk, status := b.sendItemStackRequest(c, []protocol.StackRequestAction{take, place})
+	if !reqOk {
+		b.reply(fmt.Sprintf("Take failed (slot %d): %s.", cSlot, stackStatusName(status)))
+		return
+	}
+
+	b.mu.Lock()
+	if len(b.inventory) <= dstSlot {
+		grown := make([]protocol.ItemInstance, dstSlot+1)
+		copy(grown, b.inventory)
+		b.inventory = grown
+	}
+	newItem := cItem
+	newItem.Stack.Count = uint16(count)
+	b.inventory[dstSlot] = newItem
+
+	if int(cItem.Stack.Count) > count {
+		cItem.Stack.Count -= uint16(count)
+		b.containerItems[cSlot] = cItem
+	} else {
+		delete(b.containerItems, cSlot)
+	}
+	b.mu.Unlock()
+
+	name := b.itemName(cItem.Stack.ItemType.NetworkID)
+	b.reply(fmt.Sprintf("Took %dx %s from slot %d of container at (%d, %d, %d) into inventory slot %d.", count, name, cSlot, pos.X(), pos.Y(), pos.Z(), dstSlot))
+}
+
+func (b *Bot) viewContainerCmd(p []string) {
+	b.mu.Lock()
+	c := b.conn
+	b.mu.Unlock()
+	if c == nil {
+		b.reply("Cannot view container: bot is not connected.")
+		return
+	}
+
+	pos, _, err := b.parseContainerPos(p)
+	if err != nil {
+		b.reply("Usage: container [x y z] or container front")
+		return
+	}
+
+	b.invMu.Lock()
+	defer b.invMu.Unlock()
+
+	wID, err := b.openBlockContainer(c, pos)
+	if err != nil {
+		b.reply("Failed to open container: " + err.Error())
+		return
+	}
+	defer b.closeBlockContainer(c, wID)
+
+	b.mu.Lock()
+	var slots []byte
+	for s, item := range b.containerItems {
+		if item.Stack.Count > 0 {
+			slots = append(slots, s)
+		}
+	}
+	b.mu.Unlock()
+
+	if len(slots) == 0 {
+		b.reply(fmt.Sprintf("Container at (%d, %d, %d) is empty.", pos.X(), pos.Y(), pos.Z()))
+		return
+	}
+
+	sort.Slice(slots, func(i, j int) bool { return slots[i] < slots[j] })
+
+	var itemsSummary []string
+	b.mu.Lock()
+	for _, s := range slots {
+		it := b.containerItems[s]
+		name := b.itemName(it.Stack.ItemType.NetworkID)
+		itemsSummary = append(itemsSummary, fmt.Sprintf("Slot %d: %dx %s", s, it.Stack.Count, name))
+		if len(itemsSummary) >= 10 {
+			remaining := len(slots) - 10
+			if remaining > 0 {
+				itemsSummary = append(itemsSummary, fmt.Sprintf("...and %d more slot(s)", remaining))
+			}
+			break
+		}
+	}
+	b.mu.Unlock()
+
+	b.reply(fmt.Sprintf("Container at (%d, %d, %d) has %d item(s):\n%s", pos.X(), pos.Y(), pos.Z(), len(slots), strings.Join(itemsSummary, "\n")))
 }
