@@ -133,8 +133,6 @@ func (b *Bot) attack(targetID uint64, targetPos mgl32.Vec3) {
 			ClickedPosition:       targetPos,
 		},
 	})
-	_ = b.conn.Flush()
-
 	_ = b.conn.WritePacket(&packet.Animate{ActionType: packet.AnimateActionSwingArm, EntityRuntimeID: b.entityID})
 	_ = b.conn.Flush()
 }
@@ -193,8 +191,6 @@ func (b *Bot) useItemInHand() {
 			BlockRuntimeID:  0,
 		},
 	})
-	_ = b.conn.Flush()
-
 	_ = b.conn.WritePacket(&packet.Animate{ActionType: packet.AnimateActionSwingArm, EntityRuntimeID: b.entityID})
 	_ = b.conn.Flush()
 }
