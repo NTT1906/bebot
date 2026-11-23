@@ -177,6 +177,7 @@ func (b *Bot) bundleTestCmd(p []string) {
 
 			// Bundle found. Inspect its NBT to inspect inner stored items.
 			bundleNBT := bundleItem.Stack.NBTData
+			var innerItems []map[string]any
 			var innerSummary []string
 			if bundleNBT != nil {
 				if rawItems, ok := bundleNBT["Items"]; ok {
@@ -184,6 +185,7 @@ func (b *Bot) bundleTestCmd(p []string) {
 					case []any:
 						for _, it := range items {
 							if m, ok := it.(map[string]any); ok {
+								innerItems = append(innerItems, m)
 								n, _ := m["Name"].(string)
 								cnt, _ := m["Count"].(byte)
 								innerSummary = append(innerSummary, fmt.Sprintf("%dx %s", cnt, strings.TrimPrefix(n, "minecraft:")))
@@ -191,6 +193,7 @@ func (b *Bot) bundleTestCmd(p []string) {
 						}
 					case []map[string]any:
 						for _, m := range items {
+							innerItems = append(innerItems, m)
 							n, _ := m["Name"].(string)
 							cnt, _ := m["Count"].(byte)
 							innerSummary = append(innerSummary, fmt.Sprintf("%dx %s", cnt, strings.TrimPrefix(n, "minecraft:")))
@@ -199,16 +202,33 @@ func (b *Bot) bundleTestCmd(p []string) {
 				}
 			}
 
-			contentsStr := "empty"
-			if len(innerSummary) > 0 {
-				contentsStr = strings.Join(innerSummary, ", ")
+			if len(innerItems) == 0 {
+				b.closeBlockContainer(c, wID)
+				b.invMu.Unlock()
+				log.Printf("bebot: [bundletest] attempt %d: bundle at %v slot=%d is empty (put items inside it first)\n", attempt+1, targetPos, bundleSlot)
+				noBundle++
+				time.Sleep(50 * time.Millisecond)
+				continue
 			}
 
-			log.Printf("bebot: [bundletest] attempt %d: bundle found at %v slot=%d (contents: %s) — firing TakeStackRequest NOW\n",
-				attempt+1, targetPos, bundleSlot, contentsStr)
+			firstItem := innerItems[0]
+			innerName, _ := firstItem["Name"].(string)
+			innerCount := byte(1)
+			if cnt, ok := firstItem["Count"].(byte); ok && cnt > 0 {
+				innerCount = cnt
+			} else if cnt, ok := firstItem["Count"].(int32); ok && cnt > 0 {
+				innerCount = byte(cnt)
+			} else if cnt, ok := firstItem["Count"].(int16); ok && cnt > 0 {
+				innerCount = byte(cnt)
+			}
+			innerNetID := b.itemNetworkIDByName(innerName)
 
-			// RACE: Fire Take from the bundle's container slot to player inventory
-			// at the exact moment the dropper might be firing.
+			contentsStr := strings.Join(innerSummary, ", ")
+			log.Printf("bebot: [bundletest] attempt %d: bundle at %v slot=%d has %s — extracting %dx %s...\n",
+				attempt+1, targetPos, bundleSlot, contentsStr, innerCount, strings.TrimPrefix(innerName, "minecraft:"))
+
+			// RACE: Extract inner item from bundle onto cursor, then place into player inventory.
+			// The bundle stays inside the dropper!
 			dstSlot, hasDst := b.findFreePlayerSlot()
 			var reqOk bool
 			var status uint8
@@ -216,19 +236,69 @@ func (b *Bot) bundleTestCmd(p []string) {
 			if hasDst {
 				dstContainer, dstSlotInContainer, mapOk := playerSlotContainer(dstSlot)
 				if mapOk {
-					count := byte(bundleItem.Stack.Count)
-					if count == 0 {
-						count = 1
+					cursorEmpty := stackReqSlotInfo(protocol.ContainerCursor, 0, 0)
+					cursorFull := stackReqSlotInfo(protocol.ContainerCursor, 0, 0)
+					dstSlotInfo := stackReqSlotInfo(dstContainer, dstSlotInContainer, 0)
+
+					// Format 1: ContainerDynamic (67) with DynamicContainerID
+					sourceDyn := protocol.StackRequestSlotInfo{
+						Container: protocol.FullContainerName{
+							ContainerID:        protocol.ContainerDynamic,
+							DynamicContainerID: protocol.Option(uint32(bundleItem.StackNetworkID)),
+						},
+						Slot:           0,
+						StackNetworkID: 0,
 					}
-					take := &protocol.TakeStackRequestAction{}
-					take.Count = count
-					take.Source = stackReqSlotInfo(containerID, bundleSlot, bundleItem.StackNetworkID)
-					take.Destination = stackReqSlotInfo(protocol.ContainerCursor, 0, 0)
-					place := &protocol.PlaceStackRequestAction{}
-					place.Count = count
-					place.Source = stackReqSlotInfo(protocol.ContainerCursor, 0, bundleItem.StackNetworkID)
-					place.Destination = stackReqSlotInfo(dstContainer, dstSlotInContainer, 0)
-					reqOk, status = b.sendItemStackRequest(c, []protocol.StackRequestAction{take, place})
+					takeDyn := &protocol.TakeStackRequestAction{}
+					takeDyn.Count = innerCount
+					takeDyn.Source = sourceDyn
+					takeDyn.Destination = cursorEmpty
+
+					placeDyn := &protocol.PlaceStackRequestAction{}
+					placeDyn.Count = innerCount
+					placeDyn.Source = cursorFull
+					placeDyn.Destination = dstSlotInfo
+
+					reqOk, status = b.sendItemStackRequest(c, []protocol.StackRequestAction{takeDyn, placeDyn})
+
+					// Format 2 fallback: dropper container with DynamicContainerID
+					if !reqOk {
+						sourceDrop := protocol.StackRequestSlotInfo{
+							Container: protocol.FullContainerName{
+								ContainerID:        containerID,
+								DynamicContainerID: protocol.Option(uint32(bundleItem.StackNetworkID)),
+							},
+							Slot:           0,
+							StackNetworkID: 0,
+						}
+						takeDrop := &protocol.TakeStackRequestAction{}
+						takeDrop.Count = innerCount
+						takeDrop.Source = sourceDrop
+						takeDrop.Destination = cursorEmpty
+
+						placeDrop := &protocol.PlaceStackRequestAction{}
+						placeDrop.Count = innerCount
+						placeDrop.Source = cursorFull
+						placeDrop.Destination = dstSlotInfo
+
+						reqOk, status = b.sendItemStackRequest(c, []protocol.StackRequestAction{takeDrop, placeDrop})
+					}
+
+					if reqOk {
+						b.mu.Lock()
+						if len(b.inventory) <= dstSlot {
+							grown := make([]protocol.ItemInstance, dstSlot+1)
+							copy(grown, b.inventory)
+							b.inventory = grown
+						}
+						b.inventory[dstSlot] = protocol.ItemInstance{
+							Stack: protocol.ItemStack{
+								ItemType: protocol.ItemType{NetworkID: innerNetID},
+								Count:    uint16(innerCount),
+							},
+						}
+						b.mu.Unlock()
+					}
 				}
 			}
 
@@ -264,4 +334,19 @@ func (b *Bot) bundleTestCmd(p []string) {
 			b.reply("No server-accepted races observed. Server may be patched or timing needs adjustment.")
 		}
 	}()
+}
+
+func (b *Bot) itemNetworkIDByName(name string) int32 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	clean := name
+	if !strings.HasPrefix(clean, "minecraft:") {
+		clean = "minecraft:" + clean
+	}
+	for id, n := range b.itemNamesByID {
+		if strings.EqualFold(n, clean) || strings.EqualFold(strings.TrimPrefix(n, "minecraft:"), strings.TrimPrefix(clean, "minecraft:")) {
+			return id
+		}
+	}
+	return 0
 }
