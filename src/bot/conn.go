@@ -808,6 +808,7 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 			b.containerPos = p.ContainerPosition
 			b.containerItems = make(map[byte]protocol.ItemInstance)
 			b.containerContainerID = protocol.ContainerLevelEntity
+			b.containerContentReceived = false
 			b.mu.Unlock()
 			select {
 			case b.containerOpen <- struct{}{}:
@@ -880,6 +881,7 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 					if p.Container.ContainerID != 0 {
 						b.containerContainerID = p.Container.ContainerID
 					}
+					b.containerContentReceived = true
 				}
 				b.mu.Unlock()
 				select {

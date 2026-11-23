@@ -120,6 +120,7 @@ type Bot struct {
 	containerContent             chan struct{}
 	containerActive              bool
 	containerOpening             bool
+	containerContentReceived     bool
 	containerWindowID            byte
 	containerType                byte
 	containerPos                 protocol.BlockPos

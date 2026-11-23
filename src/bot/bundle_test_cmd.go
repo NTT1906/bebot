@@ -142,14 +142,21 @@ func (b *Bot) bundleTestCmd(p []string) {
 			var bundleSlot byte
 			var bundleItem protocol.ItemInstance
 			foundBundle := false
+			var itemsSummary []string
 			for slot, item := range b.containerItems {
 				if item.Stack.Count > 0 {
 					name := b.itemNameLocked(item.Stack.ItemType.NetworkID)
-					if strings.Contains(name, "bundle") {
+					itemsSummary = append(itemsSummary, fmt.Sprintf("slot %d: %s (id=%d count=%d)", slot, name, item.Stack.ItemType.NetworkID, item.Stack.Count))
+					isBundle := strings.Contains(strings.ToLower(name), "bundle")
+					if !isBundle && item.Stack.NBTData != nil {
+						if _, hasItems := item.Stack.NBTData["Items"]; hasItems {
+							isBundle = true
+						}
+					}
+					if isBundle {
 						bundleSlot = slot
 						bundleItem = item
 						foundBundle = true
-						break
 					}
 				}
 			}
@@ -158,49 +165,50 @@ func (b *Bot) bundleTestCmd(p []string) {
 			if !foundBundle {
 				b.closeBlockContainer(c, wID)
 				b.invMu.Unlock()
-				log.Printf("bebot: [bundletest] attempt %d: no bundle in %v\n", attempt+1, targetPos)
+				if len(itemsSummary) == 0 {
+					log.Printf("bebot: [bundletest] attempt %d: container at %v is empty (0 items loaded)\n", attempt+1, targetPos)
+				} else {
+					log.Printf("bebot: [bundletest] attempt %d: no bundle in %v (found: %s)\n", attempt+1, targetPos, strings.Join(itemsSummary, ", "))
+				}
 				noBundle++
 				time.Sleep(50 * time.Millisecond)
 				continue
 			}
 
-			// Bundle found. Inspect its NBT to find the first stored item.
+			// Bundle found. Inspect its NBT to inspect inner stored items.
 			bundleNBT := bundleItem.Stack.NBTData
-			var innerItems []map[string]any
-			if rawItems, ok := bundleNBT["Items"]; ok {
-				if itemSlice, ok := rawItems.([]any); ok {
-					for _, rawItem := range itemSlice {
-						if m, ok := rawItem.(map[string]any); ok {
-							innerItems = append(innerItems, m)
+			var innerSummary []string
+			if bundleNBT != nil {
+				if rawItems, ok := bundleNBT["Items"]; ok {
+					switch items := rawItems.(type) {
+					case []any:
+						for _, it := range items {
+							if m, ok := it.(map[string]any); ok {
+								n, _ := m["Name"].(string)
+								cnt, _ := m["Count"].(byte)
+								innerSummary = append(innerSummary, fmt.Sprintf("%dx %s", cnt, strings.TrimPrefix(n, "minecraft:")))
+							}
+						}
+					case []map[string]any:
+						for _, m := range items {
+							n, _ := m["Name"].(string)
+							cnt, _ := m["Count"].(byte)
+							innerSummary = append(innerSummary, fmt.Sprintf("%dx %s", cnt, strings.TrimPrefix(n, "minecraft:")))
 						}
 					}
 				}
 			}
 
-			if len(innerItems) == 0 {
-				b.closeBlockContainer(c, wID)
-				b.invMu.Unlock()
-				log.Printf("bebot: [bundletest] attempt %d: bundle at %v is empty (no Items NBT)\n", attempt+1, targetPos)
-				noBundle++
-				time.Sleep(50 * time.Millisecond)
-				continue
+			contentsStr := "empty"
+			if len(innerSummary) > 0 {
+				contentsStr = strings.Join(innerSummary, ", ")
 			}
 
-			// Identify the first inner item and what we expect to receive.
-			firstItem := innerItems[0]
-			innerName, _ := firstItem["Name"].(string)
-			innerCount := byte(1)
-			if c, ok := firstItem["Count"].(byte); ok {
-				innerCount = c
-			}
+			log.Printf("bebot: [bundletest] attempt %d: bundle found at %v slot=%d (contents: %s) — firing TakeStackRequest NOW\n",
+				attempt+1, targetPos, bundleSlot, contentsStr)
 
-			log.Printf("bebot: [bundletest] attempt %d: bundle found at %v slot=%d, inner item=%s x%d — firing TakeStackRequest NOW\n",
-				attempt+1, targetPos, bundleSlot, innerName, innerCount)
-
-			// RACE: Fire Take from the bundle's container slot directly (no cursor step).
-			// This targets the bundle's container slot, not the inner bundle contents;
-			// the server must decompose the bundle sub-container on the fly.
-			// We use the bundle item's StackNetworkID as the source.
+			// RACE: Fire Take from the bundle's container slot to player inventory
+			// at the exact moment the dropper might be firing.
 			dstSlot, hasDst := b.findFreePlayerSlot()
 			var reqOk bool
 			var status uint8
@@ -208,12 +216,16 @@ func (b *Bot) bundleTestCmd(p []string) {
 			if hasDst {
 				dstContainer, dstSlotInContainer, mapOk := playerSlotContainer(dstSlot)
 				if mapOk {
+					count := byte(bundleItem.Stack.Count)
+					if count == 0 {
+						count = 1
+					}
 					take := &protocol.TakeStackRequestAction{}
-					take.Count = innerCount
+					take.Count = count
 					take.Source = stackReqSlotInfo(containerID, bundleSlot, bundleItem.StackNetworkID)
 					take.Destination = stackReqSlotInfo(protocol.ContainerCursor, 0, 0)
 					place := &protocol.PlaceStackRequestAction{}
-					place.Count = innerCount
+					place.Count = count
 					place.Source = stackReqSlotInfo(protocol.ContainerCursor, 0, bundleItem.StackNetworkID)
 					place.Destination = stackReqSlotInfo(dstContainer, dstSlotInContainer, 0)
 					reqOk, status = b.sendItemStackRequest(c, []protocol.StackRequestAction{take, place})

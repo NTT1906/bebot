@@ -438,20 +438,24 @@ func (b *Bot) openBlockContainer(c *minecraft.Conn, pos protocol.BlockPos) (byte
 	hotbarSlot := b.hotbarSlot
 	heldItem := b.heldItem
 	entityID := b.entityID
-	select {
-	case <-b.containerOpen:
-	default:
-	}
-	select {
-	case <-b.containerContent:
-	default:
-	}
 	b.containerOpening = true
 	b.containerActive = false
+	b.containerContentReceived = false
 	b.containerItems = make(map[byte]protocol.ItemInstance)
 	b.containerPos = pos
 	b.containerContainerID = protocol.ContainerLevelEntity
 	b.mu.Unlock()
+
+	// Drain any leftover buffered signals from previous container operations
+	for {
+		select {
+		case <-b.containerOpen:
+		case <-b.containerContent:
+		default:
+			goto Drained
+		}
+	}
+Drained:
 
 	defer func() {
 		b.mu.Lock()
@@ -547,19 +551,33 @@ func (b *Bot) openBlockContainer(c *minecraft.Conn, pos protocol.BlockPos) (byte
 
 	for {
 		select {
+		case <-b.containerContent:
+			b.mu.Lock()
+			wID := b.containerWindowID
+			received := b.containerContentReceived
+			b.mu.Unlock()
+			if received {
+				return wID, nil
+			}
+
 		case <-b.containerOpen:
 			b.mu.Lock()
-			itemsCount := len(b.containerItems)
 			wID := b.containerWindowID
+			received := b.containerContentReceived
 			b.mu.Unlock()
-
-			if itemsCount == 0 {
-				select {
-				case <-b.containerContent:
-				case <-time.After(1500 * time.Millisecond):
-				}
+			if received {
+				return wID, nil
 			}
-			return wID, nil
+			// ContainerOpen arrived, wait for InventoryContent to arrive
+			select {
+			case <-b.containerContent:
+				b.mu.Lock()
+				wID = b.containerWindowID
+				b.mu.Unlock()
+				return wID, nil
+			case <-time.After(1500 * time.Millisecond):
+				return wID, nil
+			}
 
 		case rid := <-b.containerRuntimeIDUpdated:
 			b.mu.Lock()
