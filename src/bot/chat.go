@@ -607,6 +607,8 @@ func (b *Bot) command(line string) {
 		b.dropSlots(0, len(b.inventory), 0, false)
 	case "dropall2":
 		b.dropSlots(0, len(b.inventory), 0, true)
+	case "inv", "inventory", "myinv", "items":
+		b.inventoryCmd(p)
 	case "transfer":
 		b.transferCmd(p)
 	case "loot", "steal":

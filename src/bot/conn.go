@@ -824,6 +824,32 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 			}
 			b.mu.Unlock()
 		case *packet.ItemStackResponse:
+			for _, response := range p.Responses {
+				if response.Status == protocol.ItemStackResponseStatusOK {
+					b.mu.Lock()
+					for _, cInfo := range response.ContainerInfo {
+						for _, sInfo := range cInfo.SlotInfo {
+							slotIdx := -1
+							switch cInfo.Container.ContainerID {
+							case protocol.ContainerHotBar:
+								slotIdx = int(sInfo.Slot)
+							case protocol.ContainerInventory:
+								slotIdx = int(sInfo.Slot)
+							}
+							if slotIdx >= 0 && slotIdx < len(b.inventory) {
+								b.inventory[slotIdx].StackNetworkID = sInfo.StackNetworkID
+								if sInfo.Count == 0 {
+									b.inventory[slotIdx] = protocol.ItemInstance{}
+								} else {
+									b.inventory[slotIdx].Stack.Count = uint16(sInfo.Count)
+								}
+								log.Printf("bebot: inventory slot %d updated from ItemStackResponse: count=%d stackNetID=%d\n", slotIdx, sInfo.Count, sInfo.StackNetworkID)
+							}
+						}
+					}
+					b.mu.Unlock()
+				}
+			}
 			var resp chan uint8
 			var status uint8
 			b.mu.Lock()
