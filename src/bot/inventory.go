@@ -274,101 +274,59 @@ func (b *Bot) dropSlots(start, count, requested int, useCursor bool) {
 	}
 
 	if useCursor {
-		// First-person drop transaction (packet.InventoryTransaction):
-		// Emulates a player pressing Q in the world. Fully supported by BDS without any container open.
+		// Cursor drag & drop: Take to cursor (#59), then Drop from cursor (#59).
+		// Executed slot-by-slot without opening dummy containers.
 		var droppedSlots []dropRequest
+		var lastStatus uint8
 		for _, drop := range drops {
-			oldItem := drop.item
-			newItem := oldItem
-			droppedItem := oldItem
-			droppedItem.Stack.Count = drop.count
-			if oldItem.Stack.Count > drop.count {
-				newItem.Stack.Count -= drop.count
-			} else {
-				newItem = protocol.ItemInstance{}
+			container, slotIn, ok := playerSlotContainer(drop.slot)
+			if !ok {
+				continue
+			}
+			cnt := drop.count
+			if cnt > 255 {
+				cnt = 255
+			}
+			fromSlot := stackReqSlotInfo(container, slotIn, drop.item.StackNetworkID)
+			cursorEmpty := stackReqSlotInfo(protocol.ContainerCursor, 0, 0)
+			cursorFull := stackReqSlotInfo(protocol.ContainerCursor, 0, drop.item.StackNetworkID)
+
+			take := &protocol.TakeStackRequestAction{}
+			take.Count = byte(cnt)
+			take.Source = fromSlot
+			take.Destination = cursorEmpty
+			dropAction := &protocol.DropStackRequestAction{
+				Count:    byte(cnt),
+				Source:   cursorFull,
+				Randomly: false,
+			}
+
+			ok, status := b.sendItemStackRequest(c, []protocol.StackRequestAction{take, dropAction})
+			if !ok {
+				log.Printf("bebot: drop2 slot %d failed: status=%d (%s)\n", drop.slot, status, stackStatusName(status))
+				lastStatus = status
+				continue
 			}
 
 			b.mu.Lock()
-			b.itemRequestID -= 2
-			reqID := b.itemRequestID
-			resp := make(chan uint8, 1)
-			if b.stackPending == nil {
-				b.stackPending = make(map[int32]chan uint8)
+			if b.inventory[drop.slot].Stack.Count > cnt {
+				b.inventory[drop.slot].Stack.Count -= cnt
+			} else {
+				b.inventory[drop.slot] = protocol.ItemInstance{}
 			}
-			b.stackPending[reqID] = resp
+			if byte(drop.slot) == b.hotbarSlot {
+				b.heldItem = b.inventory[drop.slot]
+			}
 			b.mu.Unlock()
-
-			container, slotIn, _ := playerSlotContainer(drop.slot)
-			tx := &packet.InventoryTransaction{
-				LegacyRequestID: reqID,
-				LegacySetItemSlots: []protocol.LegacySetItemSlot{
-					{
-						ContainerID: container,
-						Slots:       []byte{slotIn},
-					},
-				},
-				Actions: []protocol.InventoryAction{
-					{
-						SourceType:    protocol.InventoryActionSourceContainer,
-						WindowID:      protocol.Option(int8(protocol.WindowIDInventory)),
-						InventorySlot: uint32(drop.slot),
-						OldItem:       oldItem,
-						NewItem:       newItem,
-					},
-					{
-						SourceType:    protocol.InventoryActionSourceWorld,
-						SourceFlags:   protocol.Option(uint32(1)),
-						InventorySlot: 0,
-						OldItem:       protocol.ItemInstance{},
-						NewItem:       droppedItem,
-					},
-				},
-				TransactionData: &protocol.NormalTransactionData{},
-			}
-
-			if err := c.WritePacket(tx); err != nil {
-				b.clearStackPending(reqID)
-				continue
-			}
-			if err := c.Flush(); err != nil {
-				b.clearStackPending(reqID)
-				continue
-			}
-
-			success := false
-			select {
-			case status := <-resp:
-				success = (status == protocol.ItemStackResponseStatusOK)
-			case <-time.After(1 * time.Second):
-				b.clearStackPending(reqID)
-				// If server didn't send ItemStackResponse for legacy tx, verify connection is alive
-				b.mu.Lock()
-				connAlive := (b.conn != nil)
-				b.mu.Unlock()
-				success = connAlive
-			}
-
-			if success {
-				b.mu.Lock()
-				if b.inventory[drop.slot].Stack.Count > drop.count {
-					b.inventory[drop.slot].Stack.Count -= drop.count
-				} else {
-					b.inventory[drop.slot] = protocol.ItemInstance{}
-				}
-				if byte(drop.slot) == b.hotbarSlot {
-					b.heldItem = b.inventory[drop.slot]
-				}
-				b.mu.Unlock()
-				droppedSlots = append(droppedSlots, drop)
-			}
+			droppedSlots = append(droppedSlots, drop)
 			time.Sleep(30 * time.Millisecond)
 		}
 		b.sendHeldItem(c)
 		if len(droppedSlots) == 0 {
-			b.reply("Drop request failed.")
+			b.reply(fmt.Sprintf("Drop request failed: %s", stackStatusName(lastStatus)))
 			return
 		}
-		b.reply(fmt.Sprintf("Dropped items from %d slot(s) [first-person].", len(droppedSlots)))
+		b.reply(fmt.Sprintf("Dropped items from %d slot(s) [cursor drag & drop].", len(droppedSlots)))
 		return
 	}
 
