@@ -45,7 +45,9 @@ func main() {
 	flag.Parse()
 
 	// Initialize file logger
-	logWriter := io.MultiWriter(os.Stderr, logger.NewDailyLogger("logs"))
+	fileLogger := logger.NewDailyLogger("logs")
+	defer fileLogger.Close()
+	logWriter := io.MultiWriter(os.Stderr, fileLogger)
 	log.SetOutput(logWriter)
 
 	cfg, err := config.LoadConfig(*configPath)
