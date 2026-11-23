@@ -199,11 +199,8 @@ DiscoveryLoop:
 	}
 	log.Println("bebot: stage: world spawn ok")
 
-	renderDist := b.cfg.Behaviour.RenderDistance
-	if renderDist == 0 {
-		renderDist = 16
-	}
-	_ = c.WritePacket(&packet.RequestChunkRadius{ChunkRadius: int32(renderDist), MaxChunkRadius: uint8(renderDist)})
+	renderDist := b.cfg.RenderDistance()
+	_ = c.WritePacket(&packet.RequestChunkRadius{ChunkRadius: renderDist, MaxChunkRadius: uint8(renderDist)})
 
 	b.pos = c.GameData().PlayerPosition
 	b.last = b.pos
@@ -390,11 +387,8 @@ func (b *Bot) connect(ctx context.Context) error {
 	}
 	log.Println("bebot: stage: world spawn ok")
 
-	renderDist := b.cfg.Behaviour.RenderDistance
-	if renderDist == 0 {
-		renderDist = 16
-	}
-	_ = c.WritePacket(&packet.RequestChunkRadius{ChunkRadius: int32(renderDist), MaxChunkRadius: uint8(renderDist)})
+	renderDist := b.cfg.RenderDistance()
+	_ = c.WritePacket(&packet.RequestChunkRadius{ChunkRadius: renderDist, MaxChunkRadius: uint8(renderDist)})
 	log.Printf("bebot: requested updated chunk radius of %d chunks\n", renderDist)
 	if tracePackets {
 		log.Printf("bebot: server UseBlockNetworkIDHashes = %v (ServerBlockStateChecksum = %d)\n", c.GameData().UseBlockNetworkIDHashes, c.GameData().ServerBlockStateChecksum)

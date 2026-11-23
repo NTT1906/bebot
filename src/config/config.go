@@ -31,6 +31,9 @@ type MineConfig struct {
 	TimeoutSec float64 `json:"timeout_sec"`
 }
 
+// DefaultRenderDistance is the fallback chunk radius if unspecified or <= 0.
+const DefaultRenderDistance = 4
+
 // Config represents the top-level configuration loaded from config.json.
 type Config struct {
 	Superuser string `json:"superuser"`
@@ -48,6 +51,14 @@ type Config struct {
 	CommandsViaChat *bool      `json:"commands_via_chat"`
 	Skin            SkinConfig `json:"skin"`
 	Mine            MineConfig `json:"mine"`
+}
+
+// RenderDistance returns the configured chunk radius, falling back to DefaultRenderDistance if <= 0.
+func (cfg Config) RenderDistance() int32 {
+	if cfg.Behaviour.RenderDistance <= 0 {
+		return DefaultRenderDistance
+	}
+	return cfg.Behaviour.RenderDistance
 }
 
 // BaseReconnectDelay returns the configured base reconnect backoff.
@@ -71,6 +82,9 @@ func LoadConfig(path string) (Config, error) {
 	}
 	if cfg.Server.Host == "" {
 		return cfg, fmt.Errorf("server.host is required")
+	}
+	if cfg.Behaviour.RenderDistance <= 0 {
+		cfg.Behaviour.RenderDistance = DefaultRenderDistance
 	}
 	return cfg, nil
 }

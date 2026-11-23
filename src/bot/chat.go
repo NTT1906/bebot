@@ -462,6 +462,7 @@ func (b *Bot) command(line string) {
 			return
 		}
 		b.mu.Lock()
+		b.cfg.Behaviour.RenderDistance = int32(dist)
 		c := b.conn
 		b.mu.Unlock()
 		if c != nil {
