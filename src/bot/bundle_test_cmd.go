@@ -131,6 +131,19 @@ func (b *Bot) bundleTestCmd(p []string) {
 			lockedPos = &posA
 		}
 
+		var curWindowID byte
+		var containerOpen bool
+
+		defer func() {
+			b.mu.Lock()
+			c := b.conn
+			b.mu.Unlock()
+			if containerOpen && curWindowID != 0 && c != nil {
+				b.closeBlockContainer(c, curWindowID)
+				b.invMu.Unlock()
+			}
+		}()
+
 		for attempt := 0; attempt < attempts; attempt++ {
 			select {
 			case <-ctx.Done():
@@ -150,22 +163,34 @@ func (b *Bot) bundleTestCmd(p []string) {
 
 			b.mu.Lock()
 			c = b.conn
+			active := b.containerActive
+			curPos := b.containerPos
 			b.mu.Unlock()
 			if c == nil {
 				b.reply("Bundle test aborted: disconnected.")
 				return
 			}
 
-			// Open the dropper (uses existing openBlockContainer which handles
-			// ContainerOpen + InventoryContent wait).
-			b.invMu.Lock()
-			wID, err := b.openBlockContainer(c, targetPos)
-			if err != nil {
-				b.invMu.Unlock()
-				log.Printf("bebot: [bundletest] attempt %d: open %v failed: %v\n", attempt+1, targetPos, err)
-				noBundle++
-				time.Sleep(50 * time.Millisecond)
-				continue
+			// Keep container open while testing on the same dropper.
+			// A human player keeps the GUI open and clicks repeatedly; opening and closing
+			// every 50ms causes UpdateBlock desynchronization while the redstone clock is ticking.
+			if !containerOpen || !active || curPos != targetPos {
+				if containerOpen {
+					b.closeBlockContainer(c, curWindowID)
+					b.invMu.Unlock()
+					containerOpen = false
+				}
+				b.invMu.Lock()
+				wID, err := b.openBlockContainer(c, targetPos)
+				if err != nil {
+					b.invMu.Unlock()
+					log.Printf("bebot: [bundletest] attempt %d: open %v failed: %v\n", attempt+1, targetPos, err)
+					noBundle++
+					time.Sleep(50 * time.Millisecond)
+					continue
+				}
+				curWindowID = wID
+				containerOpen = true
 			}
 
 			// Scan container items for a bundle.
@@ -181,7 +206,7 @@ func (b *Bot) bundleTestCmd(p []string) {
 			for slot, item := range b.containerItems {
 				if item.Stack.Count > 0 {
 					name := b.itemNameLocked(item.Stack.ItemType.NetworkID)
-					itemsSummary = append(itemsSummary, fmt.Sprintf("slot %d: %s (id=%d count=%d)", slot, name, item.Stack.ItemType.NetworkID, item.Stack.Count))
+					itemsSummary = append(itemsSummary, fmt.Sprintf("slot %d: %s (id=%d count=%d netID=%d)", slot, name, item.Stack.ItemType.NetworkID, item.Stack.Count, item.StackNetworkID))
 					isBundle := strings.Contains(strings.ToLower(name), "bundle")
 					if !isBundle && item.Stack.NBTData != nil {
 						if _, hasItems := item.Stack.NBTData["Items"]; hasItems {
@@ -198,14 +223,17 @@ func (b *Bot) bundleTestCmd(p []string) {
 			b.mu.Unlock()
 
 			if !foundBundle {
-				b.closeBlockContainer(c, wID)
-				b.invMu.Unlock()
 				if len(itemsSummary) == 0 {
 					log.Printf("bebot: [bundletest] attempt %d: container at %v is empty (0 items loaded)\n", attempt+1, targetPos)
 				} else {
 					log.Printf("bebot: [bundletest] attempt %d: no bundle in %v (found: %s)\n", attempt+1, targetPos, strings.Join(itemsSummary, ", "))
 				}
 				noBundle++
+				if lockedPos == nil && containerOpen {
+					b.closeBlockContainer(c, curWindowID)
+					b.invMu.Unlock()
+					containerOpen = false
+				}
 				time.Sleep(50 * time.Millisecond)
 				continue
 			}
@@ -278,8 +306,11 @@ func (b *Bot) bundleTestCmd(p []string) {
 			}
 
 			if isEmpty {
-				b.closeBlockContainer(c, wID)
-				b.invMu.Unlock()
+				if containerOpen {
+					b.closeBlockContainer(c, curWindowID)
+					b.invMu.Unlock()
+					containerOpen = false
+				}
 				log.Printf("bebot: [bundletest] attempt %d: bundle at %v slot=%d has no inner items (NBT=%+v)\n", attempt+1, targetPos, bundleSlot, bundleNBT)
 				noBundle++
 				emptyBundleCount++
@@ -301,8 +332,8 @@ func (b *Bot) bundleTestCmd(p []string) {
 				targetDynID = uint32(bundleItem.StackNetworkID)
 			}
 
-			log.Printf("bebot: [bundletest] attempt %d: bundle at %v slot=%d (bundle_id=%d) has %s — extracting %dx %s...\n",
-				attempt+1, targetPos, bundleSlot, targetDynID, innerName, innerCount, strings.TrimPrefix(innerName, "minecraft:"))
+			log.Printf("bebot: [bundletest] attempt %d: bundle at %v slot=%d (bundle_id=%d, bundleStackNetID=%d) has %s — extracting %dx %s...\n",
+				attempt+1, targetPos, bundleSlot, targetDynID, bundleItem.StackNetworkID, innerName, innerCount, strings.TrimPrefix(innerName, "minecraft:"))
 
 			// RACE: Extract inner item from bundle onto cursor (Right-Click extraction).
 			// As documented in bundle.md & bundle_glitch.md, right-clicking a bundle performs
@@ -313,7 +344,7 @@ func (b *Bot) bundleTestCmd(p []string) {
 			var reqOk bool
 			var status uint8
 
-			// Format 1: Dynamic container (ContainerDynamic = 67) with DynamicContainerID
+			// Format 1: Dynamic container (ContainerDynamic = 67) with DynamicContainerID, Slot 0, StackNetworkID 0
 			sourceDyn := protocol.StackRequestSlotInfo{
 				Container: protocol.FullContainerName{
 					ContainerID:        protocol.ContainerDynamic,
@@ -322,14 +353,16 @@ func (b *Bot) bundleTestCmd(p []string) {
 				Slot:           0,
 				StackNetworkID: 0,
 			}
-			takeDyn := &protocol.TakeStackRequestAction{}
-			takeDyn.Count = innerCount
-			takeDyn.Source = sourceDyn
-			takeDyn.Destination = cursorEmpty
+			take1 := &protocol.TakeStackRequestAction{}
+			take1.Count = innerCount
+			take1.Source = sourceDyn
+			take1.Destination = cursorEmpty
 
-			reqOk, status = b.sendItemStackRequest(c, []protocol.StackRequestAction{takeDyn})
+			reqOk, status = b.sendItemStackRequest(c, []protocol.StackRequestAction{take1})
+			log.Printf("bebot: [bundletest] fmt1 (ContainerDynamic 67, dynID=%d, slot=0, netID=0): reqOk=%v status=%d (%s)\n",
+				targetDynID, reqOk, status, stackStatusName(status))
 
-			// Format 2 fallback: Dropper container with DynamicContainerID & bundle slot info
+			// Format 2: Dropper container with DynamicContainerID & bundle slot + stackNetworkID
 			if !reqOk {
 				sourceSlotDyn := protocol.StackRequestSlotInfo{
 					Container: protocol.FullContainerName{
@@ -339,15 +372,17 @@ func (b *Bot) bundleTestCmd(p []string) {
 					Slot:           bundleSlot,
 					StackNetworkID: bundleItem.StackNetworkID,
 				}
-				takeSlotDyn := &protocol.TakeStackRequestAction{}
-				takeSlotDyn.Count = innerCount
-				takeSlotDyn.Source = sourceSlotDyn
-				takeSlotDyn.Destination = cursorEmpty
+				take2 := &protocol.TakeStackRequestAction{}
+				take2.Count = innerCount
+				take2.Source = sourceSlotDyn
+				take2.Destination = cursorEmpty
 
-				reqOk, status = b.sendItemStackRequest(c, []protocol.StackRequestAction{takeSlotDyn})
+				reqOk, status = b.sendItemStackRequest(c, []protocol.StackRequestAction{take2})
+				log.Printf("bebot: [bundletest] fmt2 (containerID=%d, dynID=%d, slot=%d, netID=%d): reqOk=%v status=%d (%s)\n",
+					containerID, targetDynID, bundleSlot, bundleItem.StackNetworkID, reqOk, status, stackStatusName(status))
 			}
 
-			// Format 3 fallback: Dropper container with DynamicContainerID & Slot 0
+			// Format 3: Dropper container with DynamicContainerID & Slot 0, netID 0
 			if !reqOk {
 				sourceDrop := protocol.StackRequestSlotInfo{
 					Container: protocol.FullContainerName{
@@ -357,15 +392,37 @@ func (b *Bot) bundleTestCmd(p []string) {
 					Slot:           0,
 					StackNetworkID: 0,
 				}
-				takeDrop := &protocol.TakeStackRequestAction{}
-				takeDrop.Count = innerCount
-				takeDrop.Source = sourceDrop
-				takeDrop.Destination = cursorEmpty
+				take3 := &protocol.TakeStackRequestAction{}
+				take3.Count = innerCount
+				take3.Source = sourceDrop
+				take3.Destination = cursorEmpty
 
-				reqOk, status = b.sendItemStackRequest(c, []protocol.StackRequestAction{takeDrop})
+				reqOk, status = b.sendItemStackRequest(c, []protocol.StackRequestAction{take3})
+				log.Printf("bebot: [bundletest] fmt3 (containerID=%d, dynID=%d, slot=0, netID=0): reqOk=%v status=%d (%s)\n",
+					containerID, targetDynID, reqOk, status, stackStatusName(status))
 			}
 
-			// Format 4 fallback: Dropper bundleSlot directly (taking 1 from bundle slot)
+			// Format 4: Dropper container with DynamicContainerID & Slot 0, stackNetworkID
+			if !reqOk {
+				sourceDropNet := protocol.StackRequestSlotInfo{
+					Container: protocol.FullContainerName{
+						ContainerID:        containerID,
+						DynamicContainerID: protocol.Option(targetDynID),
+					},
+					Slot:           0,
+					StackNetworkID: bundleItem.StackNetworkID,
+				}
+				take4 := &protocol.TakeStackRequestAction{}
+				take4.Count = innerCount
+				take4.Source = sourceDropNet
+				take4.Destination = cursorEmpty
+
+				reqOk, status = b.sendItemStackRequest(c, []protocol.StackRequestAction{take4})
+				log.Printf("bebot: [bundletest] fmt4 (containerID=%d, dynID=%d, slot=0, netID=%d): reqOk=%v status=%d (%s)\n",
+					containerID, targetDynID, bundleItem.StackNetworkID, reqOk, status, stackStatusName(status))
+			}
+
+			// Format 5: Dropper container direct bundle slot (count=1)
 			if !reqOk {
 				sourceBundleSlot := protocol.StackRequestSlotInfo{
 					Container: protocol.FullContainerName{
@@ -374,12 +431,14 @@ func (b *Bot) bundleTestCmd(p []string) {
 					Slot:           bundleSlot,
 					StackNetworkID: bundleItem.StackNetworkID,
 				}
-				takeBundle := &protocol.TakeStackRequestAction{}
-				takeBundle.Count = innerCount
-				takeBundle.Source = sourceBundleSlot
-				takeBundle.Destination = cursorEmpty
+				take5 := &protocol.TakeStackRequestAction{}
+				take5.Count = innerCount
+				take5.Source = sourceBundleSlot
+				take5.Destination = cursorEmpty
 
-				reqOk, status = b.sendItemStackRequest(c, []protocol.StackRequestAction{takeBundle})
+				reqOk, status = b.sendItemStackRequest(c, []protocol.StackRequestAction{take5})
+				log.Printf("bebot: [bundletest] fmt5 (containerID=%d, slot=%d, netID=%d): reqOk=%v status=%d (%s)\n",
+					containerID, bundleSlot, bundleItem.StackNetworkID, reqOk, status, stackStatusName(status))
 			}
 
 			if reqOk && hasDst {
@@ -402,9 +461,6 @@ func (b *Bot) bundleTestCmd(p []string) {
 				b.mu.Unlock()
 			}
 
-			b.closeBlockContainer(c, wID)
-			b.invMu.Unlock()
-
 			if reqOk {
 				okCount++
 				log.Printf("bebot: [bundletest] attempt %d: ItemStackResponse=OK — server accepted (possible race window hit!)\n", attempt+1)
@@ -416,6 +472,17 @@ func (b *Bot) bundleTestCmd(p []string) {
 
 			// Small delay between attempts so we don't flood the connection.
 			time.Sleep(40 * time.Millisecond)
+		}
+
+		if containerOpen && curWindowID != 0 {
+			b.mu.Lock()
+			c = b.conn
+			b.mu.Unlock()
+			if c != nil {
+				b.closeBlockContainer(c, curWindowID)
+			}
+			b.invMu.Unlock()
+			containerOpen = false
 		}
 
 		summary := fmt.Sprintf(
