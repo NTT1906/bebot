@@ -615,6 +615,8 @@ func (b *Bot) command(line string) {
 		b.takeCmd(p)
 	case "container", "chest", "viewchest", "viewcontainer":
 		b.viewContainerCmd(p)
+	case "bundletest":
+		b.bundleTestCmd(p)
 	case "drop", "drop2":
 		useCursor := strings.EqualFold(p[0], "drop2")
 		if len(p) < 2 || len(p) > 3 {
@@ -789,6 +791,8 @@ func (b *Bot) help() {
 		"loot [x y z] - loot all items from container (chest, dropper, barrel, etc.)",
 		"take [x y z] <slot> [count] - take item from a container slot",
 		"container [x y z] - view items inside a container",
+		"bundletest <ax ay az> <bx by bz> [attempts] - race-condition test: repeatedly open two droppers to observe bundle transfer timing",
+		"bundletest stop - stop a running bundle test",
 		"sleep [x y z] - set a sleep/spawn checkpoint",
 		"players / list - list online players",
 		"nearby - list nearby players",

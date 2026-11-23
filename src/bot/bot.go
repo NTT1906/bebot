@@ -201,6 +201,8 @@ type Bot struct {
 	mineLearnPos                 protocol.BlockPos
 	lastPacketTime               atomic.Int64
 	stallTicks                   int
+	bundleTestActive             bool
+	bundleTestCancel             context.CancelFunc
 }
 
 // ServerStallThreshold returns the configured duration without server packets before considering the server stalled.
