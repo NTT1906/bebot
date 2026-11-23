@@ -268,61 +268,70 @@ func (b *Bot) bundleTestCmd(p []string) {
 				}
 			}
 
-			innerItems := extractBundleInnerItems(bundleNBT)
 			var innerName string
 			var fullCount byte = 1
 			var innerNetID int32
+			var dynSlot byte
+			var innerStackNetID int32
+			var foundInner bool
 
-			if len(innerItems) > 0 {
-				firstItem := innerItems[0]
-				innerName, _ = firstItem["Name"].(string)
-				if cnt, ok := firstItem["Count"].(byte); ok && cnt > 0 {
-					fullCount = cnt
-				} else if cnt, ok := firstItem["Count"].(int32); ok && cnt > 0 {
-					fullCount = byte(cnt)
-				} else if cnt, ok := firstItem["Count"].(int16); ok && cnt > 0 {
-					fullCount = byte(cnt)
-				} else if cnt, ok := firstItem["Count"].(int); ok && cnt > 0 {
-					fullCount = byte(cnt)
-				}
-				innerNetID = b.itemNetworkIDByName(innerName)
-			} else if bundleID != 0 {
-				b.mu.Lock()
-				dynItems, hasDyn := b.dynamicContainerItems[bundleID]
-				b.mu.Unlock()
-				if hasDyn && len(dynItems) > 0 {
-					first := dynItems[0]
-					innerNetID = first.Stack.ItemType.NetworkID
-					innerName = b.itemName(innerNetID)
-					if first.Stack.Count > 0 {
-						fullCount = byte(first.Stack.Count)
-					}
-				} else {
-					innerName = "bundle item"
-				}
-			}
-
-			isEmpty := false
-			if len(innerItems) == 0 {
-				if bundleID == 0 {
-					isEmpty = true
-				} else {
+			if bundleID != 0 {
+				// Wait up to 150ms for dynamic InventoryContent to arrive if not already present
+				deadline := time.Now().Add(150 * time.Millisecond)
+				for {
 					b.mu.Lock()
 					dynItems, hasDyn := b.dynamicContainerItems[bundleID]
 					b.mu.Unlock()
-					if hasDyn && len(dynItems) == 0 {
-						isEmpty = true
+					if hasDyn && len(dynItems) > 0 {
+						for s, it := range dynItems {
+							if it.Stack.Count > 0 {
+								dynSlot = byte(s)
+								innerNetID = it.Stack.ItemType.NetworkID
+								innerName = b.itemName(innerNetID)
+								fullCount = byte(it.Stack.Count)
+								innerStackNetID = it.StackNetworkID
+								foundInner = true
+								break
+							}
+						}
+						if foundInner {
+							break
+						}
 					}
+					if time.Now().After(deadline) {
+						break
+					}
+					time.Sleep(10 * time.Millisecond)
 				}
 			}
 
-			if isEmpty {
+			if !foundInner {
+				innerItems := extractBundleInnerItems(bundleNBT)
+				if len(innerItems) > 0 {
+					firstItem := innerItems[0]
+					innerName, _ = firstItem["Name"].(string)
+					if cnt, ok := firstItem["Count"].(byte); ok && cnt > 0 {
+						fullCount = cnt
+					} else if cnt, ok := firstItem["Count"].(int32); ok && cnt > 0 {
+						fullCount = byte(cnt)
+					} else if cnt, ok := firstItem["Count"].(int16); ok && cnt > 0 {
+						fullCount = byte(cnt)
+					} else if cnt, ok := firstItem["Count"].(int); ok && cnt > 0 {
+						fullCount = byte(cnt)
+					}
+					innerNetID = b.itemNetworkIDByName(innerName)
+					foundInner = true
+				}
+			}
+
+			if !foundInner {
 				if containerOpen {
 					b.closeBlockContainer(c, curWindowID)
 					b.invMu.Unlock()
 					containerOpen = false
 				}
-				log.Printf("bebot: [bundletest] attempt %d: bundle at %v slot=%d has no inner items (NBT=%+v)\n", attempt+1, targetPos, bundleSlot, bundleNBT)
+				log.Printf("bebot: [bundletest] attempt %d: bundle at %v slot=%d has no inner items (bundleID=%d, NBT=%+v)\n",
+					attempt+1, targetPos, bundleSlot, bundleID, bundleNBT)
 				noBundle++
 				emptyBundleCount++
 				if emptyBundleCount >= 3 {
@@ -343,22 +352,15 @@ func (b *Bot) bundleTestCmd(p []string) {
 				targetDynID = uint32(bundleItem.StackNetworkID)
 			}
 
-			bundleCount := byte(bundleItem.Stack.Count)
-			if bundleCount == 0 {
-				bundleCount = 1
-			}
-
-			log.Printf("bebot: [bundletest] attempt %d: bundle at %v slot=%d (bundle_id=%d, bundleStackNetID=%d) has %s (count=%d) — testing extractions...\n",
-				attempt+1, targetPos, bundleSlot, targetDynID, bundleItem.StackNetworkID, innerName, fullCount)
+			log.Printf("bebot: [bundletest] attempt %d: bundle at %v slot=%d (bundle_id=%d, bundleStackNetID=%d) inner slot=%d has %dx %s (innerNetID=%d, innerStackNetID=%d) — extracting item from bundle...\n",
+				attempt+1, targetPos, bundleSlot, targetDynID, bundleItem.StackNetworkID, dynSlot, fullCount, innerName, innerNetID, innerStackNetID)
 
 			dstSlot, hasDst := b.findPlayerSlotForItem(innerNetID)
 			var reqOk bool
 			var status uint8
 			var extractedCount byte
 
-			// tryTx attempts a transaction for a given candidate source.
-			// It tests balanced take+place (matching Bedrock server-authoritative rules)
-			// with matching StackNetworkID on cursor, and single take.
+			// tryTx attempts a transaction to extract the inner item from the bundle.
 			tryTx := func(name string, src protocol.StackRequestSlotInfo, count byte) bool {
 				if count == 0 {
 					count = 1
@@ -408,65 +410,45 @@ func (b *Bot) bundleTestCmd(p []string) {
 				return false
 			}
 
-			// Candidates to test:
-			// 1. "Take all" inner items from DynamicContainer (ContainerDynamic = 67, slot 0)
+			// Candidates to extract inner item from DynamicContainer (ContainerDynamic = 63):
+			// 1. "Take all" inner items from DynamicContainer with REAL innerStackNetID
 			if !reqOk {
-				tryTx("fmt1-all", protocol.StackRequestSlotInfo{
+				tryTx("fmt1-dyn-all", protocol.StackRequestSlotInfo{
 					Container: protocol.FullContainerName{
 						ContainerID:        protocol.ContainerDynamic,
 						DynamicContainerID: protocol.Option(targetDynID),
 					},
-					Slot:           0,
-					StackNetworkID: 0,
+					Slot:           dynSlot,
+					StackNetworkID: innerStackNetID,
 				}, fullCount)
 			}
 
-			// 2. "Take 1" inner item from DynamicContainer (ContainerDynamic = 67, slot 0)
+			// 2. "Take 1" inner item from DynamicContainer with REAL innerStackNetID
 			if !reqOk && fullCount > 1 {
-				tryTx("fmt1-one", protocol.StackRequestSlotInfo{
+				tryTx("fmt1-dyn-one", protocol.StackRequestSlotInfo{
 					Container: protocol.FullContainerName{
 						ContainerID:        protocol.ContainerDynamic,
 						DynamicContainerID: protocol.Option(targetDynID),
 					},
-					Slot:           0,
-					StackNetworkID: 0,
+					Slot:           dynSlot,
+					StackNetworkID: innerStackNetID,
 				}, 1)
 			}
 
-			// 3. Dropper container with DynamicContainerID & bundleSlot + bundleStackNetworkID
-			if !reqOk {
-				tryTx("fmt2-all", protocol.StackRequestSlotInfo{
+			// 3. Fallback: DynamicContainer with StackNetworkID = 0 (if server ignores inner netID)
+			if !reqOk && innerStackNetID != 0 {
+				tryTx("fmt1-dyn-zero", protocol.StackRequestSlotInfo{
 					Container: protocol.FullContainerName{
-						ContainerID:        containerID,
+						ContainerID:        protocol.ContainerDynamic,
 						DynamicContainerID: protocol.Option(targetDynID),
 					},
-					Slot:           bundleSlot,
-					StackNetworkID: bundleItem.StackNetworkID,
-				}, fullCount)
-			}
-
-			// 4. Dropper container with DynamicContainerID & Slot 0, netID 0
-			if !reqOk {
-				tryTx("fmt3-all", protocol.StackRequestSlotInfo{
-					Container: protocol.FullContainerName{
-						ContainerID:        containerID,
-						DynamicContainerID: protocol.Option(targetDynID),
-					},
-					Slot:           0,
+					Slot:           dynSlot,
 					StackNetworkID: 0,
 				}, fullCount)
 			}
 
-			// 5. Dropper container direct bundleSlot (taking bundle count) - as in commit 5208bb1
-			if !reqOk {
-				tryTx("fmt4-dropper-bundle", protocol.StackRequestSlotInfo{
-					Container: protocol.FullContainerName{
-						ContainerID: containerID,
-					},
-					Slot:           bundleSlot,
-					StackNetworkID: bundleItem.StackNetworkID,
-				}, bundleCount)
-			}
+			// Note: We deliberately DO NOT include fmt4-dropper-bundle here.
+			// The bundle itself MUST remain inside the dropper; only inner items are extracted!
 
 			if reqOk && hasDst {
 				b.mu.Lock()
@@ -477,6 +459,7 @@ func (b *Bot) bundleTestCmd(p []string) {
 				}
 				if b.inventory[dstSlot].Stack.Count == 0 {
 					b.inventory[dstSlot] = protocol.ItemInstance{
+						StackNetworkID: innerStackNetID,
 						Stack: protocol.ItemStack{
 							ItemType: protocol.ItemType{NetworkID: innerNetID},
 							Count:    uint16(extractedCount),
