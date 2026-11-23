@@ -437,8 +437,6 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 		Yaw:                yaw,
 		HeadYaw:            yaw,
 		Pitch:              pitch,
-		InteractYaw:        yaw,
-		InteractPitch:      pitch,
 		MoveVector:         mgl32.Vec2{0, moveZ},
 		AnalogueMoveVector: mgl32.Vec2{0, moveZ},
 		RawMoveVector:      mgl32.Vec2{0, moveZ},
@@ -580,55 +578,6 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 			}
 		}
 	}
-	b.mu.Lock()
-	interactTarget := b.pendingInteraction
-	if interactTarget != nil {
-		b.pendingInteraction = nil
-	}
-	b.mu.Unlock()
-
-	if interactTarget != nil {
-		itFace := interactTarget.face
-		if itFace < 0 {
-			itFace = determineBlockFace(eyePos, interactTarget.pos)
-		}
-		clickPos := faceClickPosition(itFace)
-		runtimeID := uint32(0)
-		b.mu.Lock()
-		if rid, ok := b.blockRuntimeIDs[interactTarget.pos]; ok {
-			runtimeID = rid
-		}
-		b.mu.Unlock()
-
-		useData := protocol.UseItemTransactionData{
-			ActionType:      protocol.UseItemActionClickBlock,
-			BlockPosition:   interactTarget.pos,
-			BlockFace:       itFace,
-			HotBarSlot:      int32(b.hotbarSlot),
-			HeldItem:        b.heldItem,
-			Position:        b.pos,
-			ClickedPosition: clickPos,
-			BlockRuntimeID:  runtimeID,
-		}
-		auth.ItemInteractionData = protocol.Option(useData)
-
-		if !hasDynamicFlags {
-			flags = protocol.NewInputFlags(packet.InputFlagCount)
-			flags.Set(packet.InputFlagBlockBreakingDelayEnabled)
-			flags.Set(packet.InputFlagClientAckServerData)
-			hasDynamicFlags = true
-		}
-		flags.Set(packet.InputFlagPerformItemInteraction)
-		flags.Set(packet.InputFlagStartUsingItem)
-		flags.Set(packet.InputFlagPerformBlockActions)
-		auth.InputData = flags
-
-		actions = append(actions,
-			protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionInteractWithBlock), BlockPos: interactTarget.pos, Face: itFace},
-			protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionStartItemUseOn), BlockPos: interactTarget.pos, Face: itFace},
-		)
-	}
-
 	if len(actions) > 0 {
 		auth.BlockActions = protocol.Option(actions)
 		if hasDynamicFlags {

@@ -63,11 +63,6 @@ type stackRequest struct {
 	resp chan uint8
 }
 
-type blockInteractTarget struct {
-	pos  protocol.BlockPos
-	face int32
-}
-
 type player struct {
 	name                                   string
 	accountUUID                            uuid.UUID
@@ -127,7 +122,6 @@ type Bot struct {
 	containerPos                 protocol.BlockPos
 	containerContainerID         byte
 	containerItems               map[byte]protocol.ItemInstance
-	pendingInteraction           *blockInteractTarget
 	blockRuntimeIDs              map[protocol.BlockPos]uint32
 	invMu                        sync.Mutex
 	facingYaw, facingPitch       float32

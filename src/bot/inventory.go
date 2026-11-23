@@ -456,48 +456,46 @@ func (b *Bot) openBlockContainer(c *minecraft.Conn, pos protocol.BlockPos) (byte
 	if rid, ok := b.blockRuntimeIDs[pos]; ok {
 		runtimeID = rid
 	}
-	b.pendingInteraction = &blockInteractTarget{pos: pos, face: face}
+	b.mu.Unlock()
+
+	// Wait 100ms for moveTick to transmit updated facing yaw and pitch to the server
+	time.Sleep(100 * time.Millisecond)
+
+	b.mu.Lock()
+	botPos = b.pos
+	hotbarSlot = b.hotbarSlot
+	heldItem = b.heldItem
 	b.mu.Unlock()
 
 	log.Printf("bebot: opening container at %v from bot pos (%.2f, %.2f, %.2f) (dist=%.2f, face=%d, runtimeID=%d)\n", pos, botPos.X(), botPos.Y(), botPos.Z(), dist, face, runtimeID)
 
-	_ = c.WritePacket(&packet.InventoryTransaction{
-		TransactionData: &protocol.UseItemTransactionData{
-			ActionType:      protocol.UseItemActionClickBlock,
-			BlockPosition:   pos,
-			BlockFace:       face,
-			HotBarSlot:      int32(hotbarSlot),
-			HeldItem:        heldItem,
-			Position:        botPos,
-			ClickedPosition: clickPos,
-			BlockRuntimeID:  runtimeID,
-		},
-	})
-	_ = c.WritePacket(&packet.PlayerAction{
-		EntityRuntimeID: entityID,
-		ActionType:      protocol.PlayerActionInteractWithBlock,
-		BlockPosition:   pos,
-		ResultPosition:  pos,
-		BlockFace:       face,
-	})
-	_ = c.WritePacket(&packet.PlayerAction{
-		EntityRuntimeID: entityID,
-		ActionType:      protocol.PlayerActionStartItemUseOn,
-		BlockPosition:   pos,
-		ResultPosition:  pos,
-		BlockFace:       face,
-	})
-	_ = c.WritePacket(&packet.Animate{
-		ActionType:      packet.AnimateActionSwingArm,
-		EntityRuntimeID: entityID,
-	})
-	if err := c.Flush(); err != nil {
-		return 0, fmt.Errorf("flush failed: %w", err)
+	sendOpen := func() {
+		_ = c.WritePacket(&packet.InventoryTransaction{
+			TransactionData: &protocol.UseItemTransactionData{
+				ActionType:       protocol.UseItemActionClickBlock,
+				TriggerType:      protocol.TriggerTypePlayerInput,
+				BlockPosition:    pos,
+				BlockFace:        face,
+				HotBarSlot:       int32(hotbarSlot),
+				HeldItem:         heldItem,
+				Position:         botPos,
+				ClickedPosition:  clickPos,
+				BlockRuntimeID:   runtimeID,
+				ClientPrediction: protocol.ClientPredictionSuccess,
+			},
+		})
+		_ = c.WritePacket(&packet.Animate{
+			ActionType:      packet.AnimateActionSwingArm,
+			EntityRuntimeID: entityID,
+		})
+		_ = c.Flush()
 	}
+
+	sendOpen()
 
 	timer := time.NewTimer(3500 * time.Millisecond)
 	defer timer.Stop()
-	retryTimer := time.NewTimer(1200 * time.Millisecond)
+	retryTimer := time.NewTimer(1500 * time.Millisecond)
 	defer retryTimer.Stop()
 
 	for {
@@ -518,10 +516,12 @@ func (b *Bot) openBlockContainer(c *minecraft.Conn, pos protocol.BlockPos) (byte
 
 		case <-retryTimer.C:
 			b.mu.Lock()
-			if !b.containerActive {
-				b.pendingInteraction = &blockInteractTarget{pos: pos, face: face}
-			}
+			active := b.containerActive
 			b.mu.Unlock()
+			if !active {
+				log.Printf("bebot: retrying container open at %v...\n", pos)
+				sendOpen()
+			}
 
 		case <-timer.C:
 			return 0, fmt.Errorf("timeout waiting for container to open at %v (ensure target block has an inventory)", pos)
