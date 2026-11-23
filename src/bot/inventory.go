@@ -267,8 +267,8 @@ func (b *Bot) dropSlots(start, count, requested int, useCursor bool) {
 	b.openInventory(c)
 	defer b.closeInventory(c)
 
-	var droppedSlots []int
-	var failedSlots []string
+	var actions []protocol.StackRequestAction
+	var validDrops []dropRequest
 
 	for _, drop := range drops {
 		container, slotIn, ok := playerSlotContainer(drop.slot)
@@ -281,137 +281,64 @@ func (b *Bot) dropSlots(start, count, requested int, useCursor bool) {
 		}
 
 		itemName := b.itemName(drop.item.Stack.ItemType.NetworkID)
-		isBundle := strings.Contains(strings.ToLower(itemName), "bundle")
+		fromSlot := stackReqSlotInfo(container, slotIn, drop.item.StackNetworkID)
 
-		var bundleID uint32
-		if drop.item.Stack.NBTData != nil {
-			if rawID, ok := drop.item.Stack.NBTData["bundle_id"]; ok {
-				switch id := rawID.(type) {
-				case int64:
-					bundleID = uint32(id)
-				case int32:
-					bundleID = uint32(id)
-				case uint32:
-					bundleID = id
-				case int:
-					bundleID = uint32(id)
-				}
-			}
-		}
+		log.Printf("bebot: drop slot=%d item=%s (netID=%d, stackNetID=%d, count=%d, useCursor=%v)\n",
+			drop.slot, itemName, drop.item.Stack.ItemType.NetworkID, drop.item.StackNetworkID, cnt, useCursor)
 
-		log.Printf("bebot: drop slot=%d item=%s (netID=%d, stackNetID=%d, count=%d, bundleID=%d, isBundle=%v, useCursor=%v)\n",
-			drop.slot, itemName, drop.item.Stack.ItemType.NetworkID, drop.item.StackNetworkID, cnt, bundleID, isBundle, useCursor)
-
-		// Candidate drop attempts to handle bundles and desynced stack network IDs
-		type dropCandidate struct {
-			name    string
-			actions []protocol.StackRequestAction
-		}
-
-		makeDirectActions := func(src protocol.StackRequestSlotInfo) []protocol.StackRequestAction {
-			return []protocol.StackRequestAction{
-				&protocol.DropStackRequestAction{Count: byte(cnt), Source: src, Randomly: false},
-			}
-		}
-
-		makeCursorActions := func(src protocol.StackRequestSlotInfo) []protocol.StackRequestAction {
+		if useCursor {
+			// Cursor drag & drop: Take to cursor (#58), then Drop from cursor (#58)
 			cursorEmpty := stackReqSlotInfo(protocol.ContainerCursor, 0, 0)
-			cursorFull := stackReqSlotInfo(protocol.ContainerCursor, 0, src.StackNetworkID)
+			cursorFull := stackReqSlotInfo(protocol.ContainerCursor, 0, drop.item.StackNetworkID)
 			take := &protocol.TakeStackRequestAction{}
 			take.Count = byte(cnt)
-			take.Source = src
+			take.Source = fromSlot
 			take.Destination = cursorEmpty
 			dropAction := &protocol.DropStackRequestAction{Count: byte(cnt), Source: cursorFull, Randomly: false}
-			return []protocol.StackRequestAction{take, dropAction}
-		}
-
-		stdSrc := stackReqSlotInfo(container, slotIn, drop.item.StackNetworkID)
-
-		var candidates []dropCandidate
-		if useCursor {
-			candidates = append(candidates,
-				dropCandidate{"cursor-std", makeCursorActions(stdSrc)},
-				dropCandidate{"direct-std", makeDirectActions(stdSrc)},
-			)
+			actions = append(actions, take, dropAction)
 		} else {
-			candidates = append(candidates,
-				dropCandidate{"direct-std", makeDirectActions(stdSrc)},
-				dropCandidate{"cursor-std", makeCursorActions(stdSrc)},
-			)
+			// Direct Slot Drop (Q inside GUI): 1 action per slot directly from source slot
+			dropAction := &protocol.DropStackRequestAction{Count: byte(cnt), Source: fromSlot, Randomly: false}
+			actions = append(actions, dropAction)
 		}
-
-		// If it has bundleID or is a bundle, add dynamic container candidates
-		if bundleID != 0 {
-			dynSrc := protocol.StackRequestSlotInfo{
-				Container: protocol.FullContainerName{
-					ContainerID:        container,
-					DynamicContainerID: protocol.Option(bundleID),
-				},
-				Slot:           slotIn,
-				StackNetworkID: drop.item.StackNetworkID,
-			}
-			candidates = append(candidates,
-				dropCandidate{"direct-bundle-dyn", makeDirectActions(dynSrc)},
-				dropCandidate{"cursor-bundle-dyn", makeCursorActions(dynSrc)},
-			)
-		}
-
-		// Fallback candidate with StackNetworkID = 0 (in case client netID was out of sync)
-		if drop.item.StackNetworkID != 0 {
-			zeroSrc := stackReqSlotInfo(container, slotIn, 0)
-			candidates = append(candidates,
-				dropCandidate{"direct-netid-0", makeDirectActions(zeroSrc)},
-				dropCandidate{"cursor-netid-0", makeCursorActions(zeroSrc)},
-			)
-		}
-
-		dropOk := false
-		var lastStatus uint8
-		for _, cand := range candidates {
-			ok, status := b.sendItemStackRequest(c, cand.actions)
-			if ok {
-				dropOk = true
-				log.Printf("bebot: drop slot %d (%s) SUCCEEDED via %s\n", drop.slot, itemName, cand.name)
-				break
-			}
-			lastStatus = status
-			log.Printf("bebot: drop slot %d (%s) via %s failed: status=%d (%s)\n",
-				drop.slot, itemName, cand.name, status, stackStatusName(status))
-		}
-
-		if dropOk {
-			droppedSlots = append(droppedSlots, drop.slot)
-			b.mu.Lock()
-			if b.inventory[drop.slot].Stack.Count > cnt {
-				b.inventory[drop.slot].Stack.Count -= cnt
-			} else {
-				b.inventory[drop.slot] = protocol.ItemInstance{}
-			}
-			if byte(drop.slot) == b.hotbarSlot {
-				b.heldItem = b.inventory[drop.slot]
-			}
-			b.mu.Unlock()
-		} else {
-			failedSlots = append(failedSlots, fmt.Sprintf("slot %d (%s: %s)", drop.slot, itemName, stackStatusName(lastStatus)))
-		}
-
-		if len(drops) > 1 {
-			time.Sleep(30 * time.Millisecond)
-		}
+		validDrops = append(validDrops, drop)
 	}
 
-	b.sendHeldItem(c)
-
-	if len(failedSlots) > 0 && len(droppedSlots) == 0 {
-		b.reply(fmt.Sprintf("Drop request failed: %s", strings.Join(failedSlots, ", ")))
+	if len(actions) == 0 {
+		b.reply("No valid items to drop.")
 		return
 	}
 
-	res := fmt.Sprintf("Dropped items from %d slot(s).", len(droppedSlots))
-	if len(failedSlots) > 0 {
-		res += fmt.Sprintf(" Failed slots: %s", strings.Join(failedSlots, ", "))
+	// Single batch ItemStackRequest packet sent to server
+	ok, status := b.sendItemStackRequest(c, actions)
+	if !ok {
+		b.reply(fmt.Sprintf("Drop request failed: %s", stackStatusName(status)))
+		return
 	}
-	b.reply(res)
+
+	b.mu.Lock()
+	for _, drop := range validDrops {
+		cnt := drop.count
+		if cnt > 255 {
+			cnt = 255
+		}
+		if b.inventory[drop.slot].Stack.Count > cnt {
+			b.inventory[drop.slot].Stack.Count -= cnt
+		} else {
+			b.inventory[drop.slot] = protocol.ItemInstance{}
+		}
+		if byte(drop.slot) == b.hotbarSlot {
+			b.heldItem = b.inventory[drop.slot]
+		}
+	}
+	b.mu.Unlock()
+	b.sendHeldItem(c)
+
+	methodStr := "direct"
+	if useCursor {
+		methodStr = "cursor"
+	}
+	b.reply(fmt.Sprintf("Dropped items from %d slot(s) [%s].", len(validDrops), methodStr))
 }
 
 func (b *Bot) sendHeldItem(c *minecraft.Conn) {
