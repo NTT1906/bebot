@@ -302,6 +302,9 @@ func (b *Bot) markPacketReceivedDesc(desc string) {
 }
 
 func (b *Bot) logDisconnectDiagnostics(err error) {
+	if !tracePackets {
+		return
+	}
 	b.mu.Lock()
 	lastSent := b.lastSentPacketDesc
 	lastSentTime := b.lastSentPacketTime
