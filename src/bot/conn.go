@@ -234,6 +234,7 @@ DiscoveryLoop:
 	b.containerOpen = make(chan struct{}, 1)
 	b.containerContent = make(chan struct{}, 1)
 	b.containerItems = make(map[byte]protocol.ItemInstance)
+	b.containerTileEntities = make(map[protocol.BlockPos]map[string]any)
 	b.blockRuntimeIDs = make(map[protocol.BlockPos]uint32)
 	b.mineActive = false
 	b.mineFaceAccurate = false
@@ -442,6 +443,7 @@ func (b *Bot) connect(ctx context.Context) error {
 	b.containerOpen = make(chan struct{}, 1)
 	b.containerContent = make(chan struct{}, 1)
 	b.containerItems = make(map[byte]protocol.ItemInstance)
+	b.containerTileEntities = make(map[protocol.BlockPos]map[string]any)
 	b.blockRuntimeIDs = make(map[protocol.BlockPos]uint32)
 	b.mineActive = false
 	b.mineFaceAccurate = false
@@ -528,6 +530,20 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 			for _, entry := range p.Extra {
 				pos := b.resolveSubChunkBlockPos(p.Position, entry.BlockPos)
 				b.handleUpdateBlock(pos, entry.BlockRuntimeID)
+			}
+		case *packet.BlockActorData:
+			if tracePackets {
+				log.Printf("bebot: BlockActorData pos=%v id=%v\n", p.Position, p.NBTData["id"])
+			}
+			b.mu.Lock()
+			if b.containerTileEntities == nil {
+				b.containerTileEntities = make(map[protocol.BlockPos]map[string]any)
+			}
+			b.containerTileEntities[p.Position] = p.NBTData
+			b.mu.Unlock()
+		case *packet.BlockEvent:
+			if tracePackets {
+				log.Printf("bebot: BlockEvent pos=%v type=%d data=%d\n", p.Position, p.EventType, p.EventData)
 			}
 		case *packet.CommandOutput:
 			msgs := make([]string, 0, len(p.OutputMessages))
@@ -834,16 +850,20 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 				}
 			}
 		case *packet.InventoryContent:
-			log.Printf("bebot: trace: InventoryContent WindowID=%d", p.WindowID)
+			if tracePackets {
+				log.Printf("bebot: trace: InventoryContent WindowID=%d\n", p.WindowID)
+			}
 			if p.WindowID == 0 {
 				b.inventory = append([]protocol.ItemInstance(nil), p.Content...)
 				if int(b.hotbarSlot) < len(b.inventory) {
 					b.heldItem = b.inventory[b.hotbarSlot]
 				}
 				b.sendHeldItem(c)
-			} else {
+			} else if p.WindowID < 119 {
 				b.mu.Lock()
-				if b.containerActive && byte(p.WindowID) == b.containerWindowID {
+				if b.containerActive || b.containerOpening {
+					b.containerActive = true
+					b.containerWindowID = byte(p.WindowID)
 					if b.containerItems == nil {
 						b.containerItems = make(map[byte]protocol.ItemInstance)
 					}
@@ -856,12 +876,18 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 				}
 				b.mu.Unlock()
 				select {
+				case b.containerOpen <- struct{}{}:
+				default:
+				}
+				select {
 				case b.containerContent <- struct{}{}:
 				default:
 				}
 			}
 		case *packet.InventorySlot:
-			log.Printf("bebot: trace: InventorySlot WindowID=%d Slot=%d Item=%v", p.WindowID, p.Slot, p.NewItem.Stack.ItemType.NetworkID)
+			if tracePackets {
+				log.Printf("bebot: trace: InventorySlot WindowID=%d Slot=%d Item=%v\n", p.WindowID, p.Slot, p.NewItem.Stack.ItemType.NetworkID)
+			}
 			if p.WindowID == 0 {
 				if int(p.Slot) >= len(b.inventory) {
 					grown := make([]protocol.ItemInstance, int(p.Slot)+1)
@@ -873,9 +899,11 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 					b.heldItem = p.NewItem
 					b.sendHeldItem(c)
 				}
-			} else {
+			} else if p.WindowID < 119 {
 				b.mu.Lock()
-				if b.containerActive && byte(p.WindowID) == b.containerWindowID {
+				if (b.containerActive || b.containerOpening) && (byte(p.WindowID) == b.containerWindowID || b.containerWindowID == 0) {
+					b.containerActive = true
+					b.containerWindowID = byte(p.WindowID)
 					if b.containerItems == nil {
 						b.containerItems = make(map[byte]protocol.ItemInstance)
 					}

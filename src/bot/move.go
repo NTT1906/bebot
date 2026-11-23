@@ -412,7 +412,7 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 	b.mu.Unlock()
 
 	if bt != nil && (!b.mineActive || b.mineFaceAccurate) {
-		eyePos := b.pos.Add(mgl32.Vec3{0, 1.62, 0})
+		eyePos := b.playerEyePos()
 		tX := float32(bt.X()) + 0.5
 		tY := float32(bt.Y()) + 0.5
 		tZ := float32(bt.Z()) + 0.5
@@ -449,7 +449,7 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 	mineSwing := false
 
 	var actions []protocol.PlayerBlockAction
-	eyePos := b.pos.Add(mgl32.Vec3{0, 1.62, 0})
+	eyePos := b.playerEyePos()
 	if abortBt != nil {
 		abortFace := int32(1)
 		if !b.mineActive || b.mineFaceAccurate {

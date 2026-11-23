@@ -24,7 +24,7 @@ func (b *Bot) startBreaking(pos protocol.BlockPos, animate bool, repeat bool) {
 			log.Println("bebot: cannot break block: not connected")
 			return
 		}
-		face := determineBlockFace(b.pos.Add(mgl32.Vec3{0, 1.62, 0}), pos)
+		face := determineBlockFace(b.playerEyePos(), pos)
 		if err := c.WritePacket(&packet.PlayerAction{
 			EntityRuntimeID: entityID,
 			ActionType:      protocol.PlayerActionCreativePlayerDestroyBlock,

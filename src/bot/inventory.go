@@ -364,10 +364,10 @@ func (b *Bot) itemName(netID int32) string {
 
 func (b *Bot) getFrontBlockPos() protocol.BlockPos {
 	b.mu.Lock()
-	pos := b.pos
 	yaw := b.facingYaw
 	pitch := b.facingPitch
 	b.mu.Unlock()
+	eyePos := b.playerEyePos()
 
 	yawRad := float64(yaw) * math.Pi / 180.0
 	pitchRad := float64(pitch) * math.Pi / 180.0
@@ -376,10 +376,9 @@ func (b *Bot) getFrontBlockPos() protocol.BlockPos {
 	dy := -math.Sin(pitchRad)
 	dz := math.Cos(yawRad) * math.Cos(pitchRad)
 
-	eyeY := float64(pos.Y()) + 1.62
-	fx := float64(pos.X()) + dx*1.5
-	fy := eyeY + dy*1.5
-	fz := float64(pos.Z()) + dz*1.5
+	fx := float64(eyePos.X()) + dx*1.5
+	fy := float64(eyePos.Y()) + dy*1.5
+	fz := float64(eyePos.Z()) + dz*1.5
 
 	return protocol.BlockPos{
 		int32(math.Floor(fx)),
@@ -417,14 +416,21 @@ func (b *Bot) openBlockContainer(c *minecraft.Conn, pos protocol.BlockPos) (byte
 	case <-b.containerContent:
 	default:
 	}
+	b.containerOpening = true
 	b.containerActive = false
 	b.containerItems = make(map[byte]protocol.ItemInstance)
 	b.containerPos = pos
 	b.containerContainerID = protocol.ContainerLevelEntity
 	b.mu.Unlock()
 
+	defer func() {
+		b.mu.Lock()
+		b.containerOpening = false
+		b.mu.Unlock()
+	}()
+
 	centerPos := mgl32.Vec3{float32(pos.X()) + 0.5, float32(pos.Y()) + 0.5, float32(pos.Z()) + 0.5}
-	eyePos := botPos.Add(mgl32.Vec3{0, 1.62, 0})
+	eyePos := b.playerEyePos()
 	diff := centerPos.Sub(eyePos)
 	dist := diff.Len()
 	if dist > 6.0 {
@@ -434,9 +440,9 @@ func (b *Bot) openBlockContainer(c *minecraft.Conn, pos protocol.BlockPos) (byte
 	face := determineBlockFace(eyePos, pos)
 	clickPos := faceClickPosition(face)
 
-	dx := float64(centerPos.X()) - float64(botPos.X())
+	dx := float64(centerPos.X()) - float64(eyePos.X())
 	dy := float64(centerPos.Y()) - float64(eyePos.Y())
-	dz := float64(centerPos.Z()) - float64(botPos.Z())
+	dz := float64(centerPos.Z()) - float64(eyePos.Z())
 	horizontal := math.Sqrt(dx*dx + dz*dz)
 	yaw := float32(0)
 	if horizontal > 0.001 {
@@ -465,11 +471,37 @@ func (b *Bot) openBlockContainer(c *minecraft.Conn, pos protocol.BlockPos) (byte
 	botPos = b.pos
 	hotbarSlot = b.hotbarSlot
 	heldItem = b.heldItem
+	curTick := b.tick
 	b.mu.Unlock()
 
-	log.Printf("bebot: opening container at %v from bot pos (%.2f, %.2f, %.2f) (dist=%.2f, face=%d, runtimeID=%d)\n", pos, botPos.X(), botPos.Y(), botPos.Z(), dist, face, runtimeID)
+	log.Printf("bebot: opening container at %v from bot pos (%.2f, %.2f, %.2f) (dist=%.2f, face=%d, yaw=%.1f, pitch=%.1f, runtimeID=%d)\n", pos, botPos.X(), botPos.Y(), botPos.Z(), dist, face, yaw, pitch, runtimeID)
 
 	sendOpen := func() {
+		authFlags := baseIdleInputFlags
+		authFlags.Set(packet.InputFlagPerformItemInteraction)
+		authFlags.Set(packet.InputFlagPerformBlockActions)
+
+		auth := packet.PlayerAuthInput{
+			Pitch:            pitch,
+			Yaw:              yaw,
+			HeadYaw:          yaw,
+			Position:         botPos,
+			MoveVector:       mgl32.Vec2{0, 0},
+			InputData:        authFlags,
+			InputMode:        packet.InputModeGamePad,
+			PlayMode:         packet.PlayModeScreen,
+			InteractionModel: packet.InteractionModelTouch,
+			Tick:             curTick,
+			Delta:            mgl32.Vec3{0, 0, 0},
+			BlockActions: protocol.Option([]protocol.PlayerBlockAction{
+				{
+					Action:   int32(protocol.PlayerActionStartItemUseOn),
+					BlockPos: pos,
+					Face:     face,
+				},
+			}),
+		}
+		_ = c.WritePacket(&auth)
 		_ = c.WritePacket(&packet.InventoryTransaction{
 			TransactionData: &protocol.UseItemTransactionData{
 				ActionType:       protocol.UseItemActionClickBlock,
@@ -483,6 +515,13 @@ func (b *Bot) openBlockContainer(c *minecraft.Conn, pos protocol.BlockPos) (byte
 				BlockRuntimeID:   runtimeID,
 				ClientPrediction: protocol.ClientPredictionSuccess,
 			},
+		})
+		_ = c.WritePacket(&packet.PlayerAction{
+			EntityRuntimeID: entityID,
+			ActionType:      protocol.PlayerActionStartItemUseOn,
+			BlockPosition:   pos,
+			ResultPosition:  pos,
+			BlockFace:       face,
 		})
 		_ = c.WritePacket(&packet.Animate{
 			ActionType:      packet.AnimateActionSwingArm,
@@ -533,11 +572,21 @@ func (b *Bot) closeBlockContainer(c *minecraft.Conn, windowID byte) {
 	b.mu.Lock()
 	cType := b.containerType
 	b.containerActive = false
+	entityID := b.entityID
+	pos := b.containerPos
+	face := int32(1)
 	b.mu.Unlock()
 	_ = c.WritePacket(&packet.ContainerClose{
 		WindowID:      windowID,
 		ContainerType: cType,
 		ServerSide:    false,
+	})
+	_ = c.WritePacket(&packet.PlayerAction{
+		EntityRuntimeID: entityID,
+		ActionType:      protocol.PlayerActionStopItemUseOn,
+		BlockPosition:   pos,
+		ResultPosition:  pos,
+		BlockFace:       face,
 	})
 	_ = c.Flush()
 }
@@ -809,6 +858,31 @@ func (b *Bot) viewContainerCmd(p []string) {
 
 	wID, err := b.openBlockContainer(c, pos)
 	if err != nil {
+		b.mu.Lock()
+		te, hasTE := b.containerTileEntities[pos]
+		b.mu.Unlock()
+		if hasTE {
+			if items, ok := te["Items"].([]any); ok && len(items) > 0 {
+				var itemsSummary []string
+				for _, rawItem := range items {
+					if itMap, ok := rawItem.(map[string]any); ok {
+						name, _ := itMap["Name"].(string)
+						count, _ := itMap["Count"].(byte)
+						slot, _ := itMap["Slot"].(byte)
+						itemsSummary = append(itemsSummary, fmt.Sprintf("Slot %d: %dx %s", slot, count, strings.TrimPrefix(name, "minecraft:")))
+						if len(itemsSummary) >= 10 {
+							remaining := len(items) - 10
+							if remaining > 0 {
+								itemsSummary = append(itemsSummary, fmt.Sprintf("...and %d more item(s)", remaining))
+							}
+							break
+						}
+					}
+				}
+				b.reply(fmt.Sprintf("Container at (%d, %d, %d) has %d item(s) (from tile entity cache):\n%s", pos.X(), pos.Y(), pos.Z(), len(items), strings.Join(itemsSummary, "\n")))
+				return
+			}
+		}
 		b.reply("Failed to open container: " + err.Error())
 		return
 	}

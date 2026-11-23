@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"runtime"
 	"runtime/debug"
@@ -117,11 +118,13 @@ type Bot struct {
 	containerOpen                chan struct{}
 	containerContent             chan struct{}
 	containerActive              bool
+	containerOpening             bool
 	containerWindowID            byte
 	containerType                byte
 	containerPos                 protocol.BlockPos
 	containerContainerID         byte
 	containerItems               map[byte]protocol.ItemInstance
+	containerTileEntities        map[protocol.BlockPos]map[string]any
 	blockRuntimeIDs              map[protocol.BlockPos]uint32
 	invMu                        sync.Mutex
 	facingYaw, facingPitch       float32
@@ -268,10 +271,26 @@ func New(opts Options) *Bot {
 		itemNamesByID:     make(map[int32]string),
 		mineAttempts:      make(map[protocol.BlockPos]int),
 		mineAirRuntimeIDs: map[uint32]bool{0: true},
-		knownAirBlocks:    make(map[protocol.BlockPos]bool),
-		mineTimeoutSec:    mineTimeout,
-		blockRuntimeIDs:   make(map[protocol.BlockPos]uint32),
+		knownAirBlocks:        make(map[protocol.BlockPos]bool),
+		mineTimeoutSec:        mineTimeout,
+		blockRuntimeIDs:       make(map[protocol.BlockPos]uint32),
+		containerTileEntities: make(map[protocol.BlockPos]map[string]any),
 	}
+}
+
+// playerEyePos returns the player's eye/camera position.
+// In Minecraft Bedrock edition, player coordinates in MovePlayer, Respawn and PlayerAuthInput
+// are already transmitted at eye height (~1.62 blocks above the block surface).
+// If the position does not already include an eye offset (fraction < 0.2), 1.62 is added.
+func (b *Bot) playerEyePos() mgl32.Vec3 {
+	b.mu.Lock()
+	pos := b.pos
+	b.mu.Unlock()
+	frac := pos.Y() - float32(math.Floor(float64(pos.Y())))
+	if frac < 0.2 {
+		return pos.Add(mgl32.Vec3{0, 1.62, 0})
+	}
+	return pos
 }
 
 // Run starts the main bot connect and reconnect loop.
