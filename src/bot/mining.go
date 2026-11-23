@@ -307,6 +307,10 @@ func (b *Bot) resolveSubChunkBlockPos(subPos protocol.BlockPos, blockPos protoco
 func (b *Bot) handleUpdateBlock(pos protocol.BlockPos, runtimeID uint32) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.blockRuntimeIDs == nil {
+		b.blockRuntimeIDs = make(map[protocol.BlockPos]uint32)
+	}
+	b.blockRuntimeIDs[pos] = runtimeID
 	if tracePackets {
 		log.Printf("bebot: debug UpdateBlock pos=(%d, %d, %d) runtimeID=%d\n", pos.X(), pos.Y(), pos.Z(), runtimeID)
 	}
@@ -428,6 +432,25 @@ func determineBlockFace(eyePos mgl32.Vec3, blockPos protocol.BlockPos) int32 {
 			return 2
 		}
 		return 3
+	}
+}
+
+func faceClickPosition(face int32) mgl32.Vec3 {
+	switch face {
+	case 0: // bottom
+		return mgl32.Vec3{0.5, 0.0, 0.5}
+	case 1: // top
+		return mgl32.Vec3{0.5, 1.0, 0.5}
+	case 2: // north (Z-)
+		return mgl32.Vec3{0.5, 0.5, 0.0}
+	case 3: // south (Z+)
+		return mgl32.Vec3{0.5, 0.5, 1.0}
+	case 4: // west (X-)
+		return mgl32.Vec3{0.0, 0.5, 0.5}
+	case 5: // east (X+)
+		return mgl32.Vec3{1.0, 0.5, 0.5}
+	default:
+		return mgl32.Vec3{0.5, 0.5, 0.5}
 	}
 }
 

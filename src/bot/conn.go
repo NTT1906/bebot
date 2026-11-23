@@ -234,6 +234,7 @@ DiscoveryLoop:
 	b.containerOpen = make(chan struct{}, 1)
 	b.containerContent = make(chan struct{}, 1)
 	b.containerItems = make(map[byte]protocol.ItemInstance)
+	b.blockRuntimeIDs = make(map[protocol.BlockPos]uint32)
 	b.mineActive = false
 	b.mineFaceAccurate = false
 	b.mineQueue = nil
@@ -441,6 +442,7 @@ func (b *Bot) connect(ctx context.Context) error {
 	b.containerOpen = make(chan struct{}, 1)
 	b.containerContent = make(chan struct{}, 1)
 	b.containerItems = make(map[byte]protocol.ItemInstance)
+	b.blockRuntimeIDs = make(map[protocol.BlockPos]uint32)
 	b.mineActive = false
 	b.mineFaceAccurate = false
 	b.mineQueue = nil
@@ -775,6 +777,7 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 				b.heldItem = p.NewItem
 			}
 		case *packet.ContainerOpen:
+			log.Printf("bebot: ContainerOpen WindowID=%d ContainerType=%d Pos=%v\n", p.WindowID, p.ContainerType, p.ContainerPosition)
 			b.mu.Lock()
 			b.containerActive = true
 			b.containerWindowID = p.WindowID
@@ -788,6 +791,7 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 			default:
 			}
 		case *packet.ContainerClose:
+			log.Printf("bebot: ContainerClose WindowID=%d ServerSide=%v\n", p.WindowID, p.ServerSide)
 			b.mu.Lock()
 			if b.containerActive && (p.WindowID == b.containerWindowID || p.WindowID == 0) {
 				b.containerActive = false

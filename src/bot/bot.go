@@ -63,6 +63,11 @@ type stackRequest struct {
 	resp chan uint8
 }
 
+type blockInteractTarget struct {
+	pos  protocol.BlockPos
+	face int32
+}
+
 type player struct {
 	name                                   string
 	accountUUID                            uuid.UUID
@@ -122,6 +127,8 @@ type Bot struct {
 	containerPos                 protocol.BlockPos
 	containerContainerID         byte
 	containerItems               map[byte]protocol.ItemInstance
+	pendingInteraction           *blockInteractTarget
+	blockRuntimeIDs              map[protocol.BlockPos]uint32
 	invMu                        sync.Mutex
 	facingYaw, facingPitch       float32
 	idleYaw, idlePitch           float32
@@ -269,6 +276,7 @@ func New(opts Options) *Bot {
 		mineAirRuntimeIDs: map[uint32]bool{0: true},
 		knownAirBlocks:    make(map[protocol.BlockPos]bool),
 		mineTimeoutSec:    mineTimeout,
+		blockRuntimeIDs:   make(map[protocol.BlockPos]uint32),
 	}
 }
 

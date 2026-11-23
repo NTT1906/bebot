@@ -431,6 +431,9 @@ func (b *Bot) openBlockContainer(c *minecraft.Conn, pos protocol.BlockPos) (byte
 		return 0, fmt.Errorf("container at %v is too far (%.1f blocks, max 6.0)", pos, dist)
 	}
 
+	face := determineBlockFace(eyePos, pos)
+	clickPos := faceClickPosition(face)
+
 	dx := float64(centerPos.X()) - float64(botPos.X())
 	dy := float64(centerPos.Y()) - float64(eyePos.Y())
 	dz := float64(centerPos.Z()) - float64(botPos.Z())
@@ -443,14 +446,20 @@ func (b *Bot) openBlockContainer(c *minecraft.Conn, pos protocol.BlockPos) (byte
 		}
 	}
 	pitch := float32(-math.Atan2(dy, horizontal) * 180 / math.Pi)
+
 	b.mu.Lock()
 	b.facingYaw = yaw
 	b.facingPitch = pitch
 	b.idleYaw = yaw
 	b.idlePitch = pitch
+	runtimeID := uint32(0)
+	if rid, ok := b.blockRuntimeIDs[pos]; ok {
+		runtimeID = rid
+	}
+	b.pendingInteraction = &blockInteractTarget{pos: pos, face: face}
 	b.mu.Unlock()
 
-	face := determineBlockFace(eyePos, pos)
+	log.Printf("bebot: opening container at %v from bot pos (%.2f, %.2f, %.2f) (dist=%.2f, face=%d, runtimeID=%d)\n", pos, botPos.X(), botPos.Y(), botPos.Z(), dist, face, runtimeID)
 
 	_ = c.WritePacket(&packet.InventoryTransaction{
 		TransactionData: &protocol.UseItemTransactionData{
@@ -460,9 +469,16 @@ func (b *Bot) openBlockContainer(c *minecraft.Conn, pos protocol.BlockPos) (byte
 			HotBarSlot:      int32(hotbarSlot),
 			HeldItem:        heldItem,
 			Position:        botPos,
-			ClickedPosition: mgl32.Vec3{0.5, 0.5, 0.5},
-			BlockRuntimeID:  0,
+			ClickedPosition: clickPos,
+			BlockRuntimeID:  runtimeID,
 		},
+	})
+	_ = c.WritePacket(&packet.PlayerAction{
+		EntityRuntimeID: entityID,
+		ActionType:      protocol.PlayerActionInteractWithBlock,
+		BlockPosition:   pos,
+		ResultPosition:  pos,
+		BlockFace:       face,
 	})
 	_ = c.WritePacket(&packet.PlayerAction{
 		EntityRuntimeID: entityID,
@@ -479,25 +495,38 @@ func (b *Bot) openBlockContainer(c *minecraft.Conn, pos protocol.BlockPos) (byte
 		return 0, fmt.Errorf("flush failed: %w", err)
 	}
 
-	select {
-	case <-b.containerOpen:
-	case <-time.After(2500 * time.Millisecond):
-		return 0, fmt.Errorf("timeout waiting for container to open at %v (ensure target block has an inventory)", pos)
-	}
+	timer := time.NewTimer(3500 * time.Millisecond)
+	defer timer.Stop()
+	retryTimer := time.NewTimer(1200 * time.Millisecond)
+	defer retryTimer.Stop()
 
-	b.mu.Lock()
-	itemsCount := len(b.containerItems)
-	wID := b.containerWindowID
-	b.mu.Unlock()
-
-	if itemsCount == 0 {
+	for {
 		select {
-		case <-b.containerContent:
-		case <-time.After(1500 * time.Millisecond):
+		case <-b.containerOpen:
+			b.mu.Lock()
+			itemsCount := len(b.containerItems)
+			wID := b.containerWindowID
+			b.mu.Unlock()
+
+			if itemsCount == 0 {
+				select {
+				case <-b.containerContent:
+				case <-time.After(1500 * time.Millisecond):
+				}
+			}
+			return wID, nil
+
+		case <-retryTimer.C:
+			b.mu.Lock()
+			if !b.containerActive {
+				b.pendingInteraction = &blockInteractTarget{pos: pos, face: face}
+			}
+			b.mu.Unlock()
+
+		case <-timer.C:
+			return 0, fmt.Errorf("timeout waiting for container to open at %v (ensure target block has an inventory)", pos)
 		}
 	}
-
-	return wID, nil
 }
 
 func (b *Bot) closeBlockContainer(c *minecraft.Conn, windowID byte) {
