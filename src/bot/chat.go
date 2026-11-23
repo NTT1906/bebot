@@ -604,7 +604,9 @@ func (b *Bot) command(line string) {
 		b.stopMiningArea()
 		b.stopBreaking()
 	case "dropall":
-		b.dropSlots(0, len(b.inventory), 0)
+		b.dropSlots(0, len(b.inventory), 0, false)
+	case "dropall2":
+		b.dropSlots(0, len(b.inventory), 0, true)
 	case "transfer":
 		b.transferCmd(p)
 	case "loot", "steal":
@@ -613,9 +615,10 @@ func (b *Bot) command(line string) {
 		b.takeCmd(p)
 	case "container", "chest", "viewchest", "viewcontainer":
 		b.viewContainerCmd(p)
-	case "drop":
+	case "drop", "drop2":
+		useCursor := strings.EqualFold(p[0], "drop2")
 		if len(p) < 2 || len(p) > 3 {
-			b.reply("Usage: drop <slot> [amount]")
+			b.reply("Usage: drop <slot> [amount] (or drop2 for cursor method)")
 			return
 		}
 		slot, err := strconv.Atoi(p[1])
@@ -631,7 +634,7 @@ func (b *Bot) command(line string) {
 				return
 			}
 		}
-		b.dropSlots(slot, 1, amount)
+		b.dropSlots(slot, 1, amount, useCursor)
 	case "help", "commands", "commandlist":
 		b.help()
 	case "hotbar", "slot":
@@ -779,8 +782,9 @@ func (b *Bot) help() {
 		"mine air - display currently known air runtime IDs",
 		"stopmine / stopbreak - stop mining",
 		"hotbar <0-9> - select a hotbar slot",
-		"dropall - drop all inventory items",
-		"drop <slot> [amount] - drop items from a slot",
+		"dropall - drop all items (fast direct slot drop, 1 action/slot)",
+		"dropall2 - drop all items (cursor drag & drop, 2 actions/slot)",
+		"drop <slot> [amount] - drop items from a slot (or drop2 for cursor)",
 		"transfer <slot a> <slot b> - move items between inventory slots",
 		"loot [x y z] - loot all items from container (chest, dropper, barrel, etc.)",
 		"take [x y z] <slot> [count] - take item from a container slot",

@@ -230,7 +230,7 @@ func (b *Bot) transferCmd(p []string) {
 	b.reply(fmt.Sprintf("%s %d item(s) from slot %d to slot %d.", verb, srcItem.Stack.Count, slotA, slotB))
 }
 
-func (b *Bot) dropSlots(start, count, requested int) {
+func (b *Bot) dropSlots(start, count, requested int, useCursor bool) {
 	b.invMu.Lock()
 	defer b.invMu.Unlock()
 	b.mu.Lock()
@@ -278,14 +278,21 @@ func (b *Bot) dropSlots(start, count, requested int) {
 			count = 255
 		}
 		fromSlot := stackReqSlotInfo(container, slotIn, drop.item.StackNetworkID)
-		cursorEmpty := stackReqSlotInfo(protocol.ContainerCursor, 0, 0)
-		cursorFull := stackReqSlotInfo(protocol.ContainerCursor, 0, drop.item.StackNetworkID)
-		take := &protocol.TakeStackRequestAction{}
-		take.Count = byte(count)
-		take.Source = fromSlot
-		take.Destination = cursorEmpty
-		dropAction := &protocol.DropStackRequestAction{Count: byte(count), Source: cursorFull}
-		actions = append(actions, take, dropAction)
+
+		if useCursor {
+			cursorEmpty := stackReqSlotInfo(protocol.ContainerCursor, 0, 0)
+			cursorFull := stackReqSlotInfo(protocol.ContainerCursor, 0, drop.item.StackNetworkID)
+			take := &protocol.TakeStackRequestAction{}
+			take.Count = byte(count)
+			take.Source = fromSlot
+			take.Destination = cursorEmpty
+			dropAction := &protocol.DropStackRequestAction{Count: byte(count), Source: cursorFull, Randomly: false}
+			actions = append(actions, take, dropAction)
+		} else {
+			// Direct Slot Drop (Q inside GUI): 1 action per slot, no cursor modification
+			dropAction := &protocol.DropStackRequestAction{Count: byte(count), Source: fromSlot, Randomly: false}
+			actions = append(actions, dropAction)
+		}
 		validDrops = append(validDrops, drop)
 	}
 
@@ -318,7 +325,11 @@ func (b *Bot) dropSlots(start, count, requested int) {
 	b.mu.Unlock()
 	b.sendHeldItem(c)
 
-	b.reply(fmt.Sprintf("Dropped items from %d slot(s).", len(validDrops)))
+	methodStr := "direct"
+	if useCursor {
+		methodStr = "cursor"
+	}
+	b.reply(fmt.Sprintf("Dropped items from %d slot(s) [%s].", len(validDrops), methodStr))
 }
 
 func (b *Bot) sendHeldItem(c *minecraft.Conn) {
