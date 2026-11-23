@@ -304,106 +304,102 @@ func (b *Bot) bundleTestCmd(p []string) {
 			log.Printf("bebot: [bundletest] attempt %d: bundle at %v slot=%d (bundle_id=%d) has %s — extracting %dx %s...\n",
 				attempt+1, targetPos, bundleSlot, targetDynID, innerName, innerCount, strings.TrimPrefix(innerName, "minecraft:"))
 
-			// RACE: Extract inner item from bundle onto cursor, then place into player inventory.
-			// The bundle stays inside the dropper!
+			// RACE: Extract inner item from bundle onto cursor (Right-Click extraction).
+			// As documented in bundle.md & bundle_glitch.md, right-clicking a bundle performs
+			// a single TakeStackRequestAction popping the inner item directly onto the virtual
+			// cursor (ContainerCursor #58). The bundle stays inside the dropper!
 			dstSlot, hasDst := b.findPlayerSlotForItem(innerNetID)
+			cursorEmpty := stackReqSlotInfo(protocol.ContainerCursor, 0, 0)
 			var reqOk bool
 			var status uint8
 
-			if hasDst {
-				dstContainer, dstSlotInContainer, mapOk := playerSlotContainer(dstSlot)
-				if mapOk {
-					cursorEmpty := stackReqSlotInfo(protocol.ContainerCursor, 0, 0)
-					cursorFull := stackReqSlotInfo(protocol.ContainerCursor, 0, 0)
-					dstSlotInfo := stackReqSlotInfo(dstContainer, dstSlotInContainer, 0)
+			// Format 1: Dynamic container (ContainerDynamic = 67) with DynamicContainerID
+			sourceDyn := protocol.StackRequestSlotInfo{
+				Container: protocol.FullContainerName{
+					ContainerID:        protocol.ContainerDynamic,
+					DynamicContainerID: protocol.Option(targetDynID),
+				},
+				Slot:           0,
+				StackNetworkID: 0,
+			}
+			takeDyn := &protocol.TakeStackRequestAction{}
+			takeDyn.Count = innerCount
+			takeDyn.Source = sourceDyn
+			takeDyn.Destination = cursorEmpty
 
-					// Format 1: ContainerDynamic (67) with DynamicContainerID
-					sourceDyn := protocol.StackRequestSlotInfo{
-						Container: protocol.FullContainerName{
-							ContainerID:        protocol.ContainerDynamic,
-							DynamicContainerID: protocol.Option(targetDynID),
-						},
-						Slot:           0,
-						StackNetworkID: 0,
-					}
-					takeDyn := &protocol.TakeStackRequestAction{}
-					takeDyn.Count = innerCount
-					takeDyn.Source = sourceDyn
-					takeDyn.Destination = cursorEmpty
+			reqOk, status = b.sendItemStackRequest(c, []protocol.StackRequestAction{takeDyn})
 
-					placeDyn := &protocol.PlaceStackRequestAction{}
-					placeDyn.Count = innerCount
-					placeDyn.Source = cursorFull
-					placeDyn.Destination = dstSlotInfo
-
-					reqOk, status = b.sendItemStackRequest(c, []protocol.StackRequestAction{takeDyn, placeDyn})
-
-					// Format 2 fallback: dropper container with DynamicContainerID
-					if !reqOk {
-						sourceDrop := protocol.StackRequestSlotInfo{
-							Container: protocol.FullContainerName{
-								ContainerID:        containerID,
-								DynamicContainerID: protocol.Option(targetDynID),
-							},
-							Slot:           0,
-							StackNetworkID: 0,
-						}
-						takeDrop := &protocol.TakeStackRequestAction{}
-						takeDrop.Count = innerCount
-						takeDrop.Source = sourceDrop
-						takeDrop.Destination = cursorEmpty
-
-						placeDrop := &protocol.PlaceStackRequestAction{}
-						placeDrop.Count = innerCount
-						placeDrop.Source = cursorFull
-						placeDrop.Destination = dstSlotInfo
-
-						reqOk, status = b.sendItemStackRequest(c, []protocol.StackRequestAction{takeDrop, placeDrop})
-					}
-
-					// Format 3 fallback: bundleSlot with DynamicContainerID
-					if !reqOk {
-						sourceSlotDyn := protocol.StackRequestSlotInfo{
-							Container: protocol.FullContainerName{
-								ContainerID:        containerID,
-								DynamicContainerID: protocol.Option(targetDynID),
-							},
-							Slot:           bundleSlot,
-							StackNetworkID: bundleItem.StackNetworkID,
-						}
-						takeSlotDyn := &protocol.TakeStackRequestAction{}
-						takeSlotDyn.Count = innerCount
-						takeSlotDyn.Source = sourceSlotDyn
-						takeSlotDyn.Destination = cursorEmpty
-
-						placeSlotDyn := &protocol.PlaceStackRequestAction{}
-						placeSlotDyn.Count = innerCount
-						placeSlotDyn.Source = cursorFull
-						placeSlotDyn.Destination = dstSlotInfo
-
-						reqOk, status = b.sendItemStackRequest(c, []protocol.StackRequestAction{takeSlotDyn, placeSlotDyn})
-					}
-
-					if reqOk {
-						b.mu.Lock()
-						if len(b.inventory) <= dstSlot {
-							grown := make([]protocol.ItemInstance, dstSlot+1)
-							copy(grown, b.inventory)
-							b.inventory = grown
-						}
-						if b.inventory[dstSlot].Stack.Count == 0 {
-							b.inventory[dstSlot] = protocol.ItemInstance{
-								Stack: protocol.ItemStack{
-									ItemType: protocol.ItemType{NetworkID: innerNetID},
-									Count:    uint16(innerCount),
-								},
-							}
-						} else {
-							b.inventory[dstSlot].Stack.Count += uint16(innerCount)
-						}
-						b.mu.Unlock()
-					}
+			// Format 2 fallback: Dropper container with DynamicContainerID & bundle slot info
+			if !reqOk {
+				sourceSlotDyn := protocol.StackRequestSlotInfo{
+					Container: protocol.FullContainerName{
+						ContainerID:        containerID,
+						DynamicContainerID: protocol.Option(targetDynID),
+					},
+					Slot:           bundleSlot,
+					StackNetworkID: bundleItem.StackNetworkID,
 				}
+				takeSlotDyn := &protocol.TakeStackRequestAction{}
+				takeSlotDyn.Count = innerCount
+				takeSlotDyn.Source = sourceSlotDyn
+				takeSlotDyn.Destination = cursorEmpty
+
+				reqOk, status = b.sendItemStackRequest(c, []protocol.StackRequestAction{takeSlotDyn})
+			}
+
+			// Format 3 fallback: Dropper container with DynamicContainerID & Slot 0
+			if !reqOk {
+				sourceDrop := protocol.StackRequestSlotInfo{
+					Container: protocol.FullContainerName{
+						ContainerID:        containerID,
+						DynamicContainerID: protocol.Option(targetDynID),
+					},
+					Slot:           0,
+					StackNetworkID: 0,
+				}
+				takeDrop := &protocol.TakeStackRequestAction{}
+				takeDrop.Count = innerCount
+				takeDrop.Source = sourceDrop
+				takeDrop.Destination = cursorEmpty
+
+				reqOk, status = b.sendItemStackRequest(c, []protocol.StackRequestAction{takeDrop})
+			}
+
+			// Format 4 fallback: Dropper bundleSlot directly (taking 1 from bundle slot)
+			if !reqOk {
+				sourceBundleSlot := protocol.StackRequestSlotInfo{
+					Container: protocol.FullContainerName{
+						ContainerID: containerID,
+					},
+					Slot:           bundleSlot,
+					StackNetworkID: bundleItem.StackNetworkID,
+				}
+				takeBundle := &protocol.TakeStackRequestAction{}
+				takeBundle.Count = innerCount
+				takeBundle.Source = sourceBundleSlot
+				takeBundle.Destination = cursorEmpty
+
+				reqOk, status = b.sendItemStackRequest(c, []protocol.StackRequestAction{takeBundle})
+			}
+
+			if reqOk && hasDst {
+				b.mu.Lock()
+				if len(b.inventory) <= dstSlot {
+					grown := make([]protocol.ItemInstance, dstSlot+1)
+					copy(grown, b.inventory)
+					b.inventory = grown
+				}
+				if b.inventory[dstSlot].Stack.Count == 0 {
+					b.inventory[dstSlot] = protocol.ItemInstance{
+						Stack: protocol.ItemStack{
+							ItemType: protocol.ItemType{NetworkID: innerNetID},
+							Count:    uint16(innerCount),
+						},
+					}
+				} else {
+					b.inventory[dstSlot].Stack.Count += uint16(innerCount)
+				}
+				b.mu.Unlock()
 			}
 
 			b.closeBlockContainer(c, wID)
