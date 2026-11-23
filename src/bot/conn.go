@@ -230,7 +230,7 @@ DiscoveryLoop:
 	b.mimicSwimming = false
 	b.sentSneaking = false
 	b.itemRequestID = -859
-	b.stackPending = nil
+	b.stackPending = make(map[int32]chan uint8)
 	b.containerOpen = make(chan struct{}, 1)
 	b.containerContent = make(chan struct{}, 1)
 	b.containerItems = make(map[byte]protocol.ItemInstance)
@@ -442,7 +442,7 @@ func (b *Bot) connect(ctx context.Context) error {
 	b.mimicSwimming = false
 	b.sentSneaking = false
 	b.itemRequestID = -859
-	b.stackPending = nil
+	b.stackPending = make(map[int32]chan uint8)
 	b.containerOpen = make(chan struct{}, 1)
 	b.containerContent = make(chan struct{}, 1)
 	b.containerItems = make(map[byte]protocol.ItemInstance)
@@ -835,6 +835,8 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 								slotIdx = int(sInfo.Slot)
 							case protocol.ContainerInventory:
 								slotIdx = int(sInfo.Slot)
+							case protocol.ContainerCombinedHotBarAndInventory:
+								slotIdx = int(sInfo.Slot)
 							}
 							if slotIdx >= 0 && slotIdx < len(b.inventory) {
 								b.inventory[slotIdx].StackNetworkID = sInfo.StackNetworkID
@@ -850,38 +852,20 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 					b.mu.Unlock()
 				}
 			}
-			var resp chan uint8
-			var status uint8
-			b.mu.Lock()
-			pending := b.stackPending
-			b.mu.Unlock()
-			if pending != nil {
-				for _, response := range p.Responses {
-					if response.RequestID != pending.id {
-						continue
-					}
-					status = response.Status
-					resp = pending.resp
-					b.mu.Lock()
-					if b.stackPending == pending {
-						b.stackPending = nil
-					}
-					b.mu.Unlock()
-					if status != protocol.ItemStackResponseStatusOK {
-						log.Printf("bebot: inventory request=%d rejected status=%d\n", response.RequestID, status)
-					}
-					break
+			for _, response := range p.Responses {
+				b.mu.Lock()
+				ch, ok := b.stackPending[response.RequestID]
+				if ok {
+					delete(b.stackPending, response.RequestID)
 				}
-				if resp != nil {
+				b.mu.Unlock()
+				if response.Status != protocol.ItemStackResponseStatusOK {
+					log.Printf("bebot: inventory request=%d rejected status=%d\n", response.RequestID, response.Status)
+				}
+				if ok && ch != nil {
 					select {
-					case resp <- status:
+					case ch <- response.Status:
 					default:
-					}
-				}
-			} else {
-				for _, response := range p.Responses {
-					if response.Status != protocol.ItemStackResponseStatusOK {
-						log.Printf("bebot: inventory request=%d rejected status=%d\n", response.RequestID, response.Status)
 					}
 				}
 			}

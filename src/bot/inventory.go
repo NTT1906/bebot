@@ -100,7 +100,7 @@ func stackStatusName(status uint8) string {
 	return fmt.Sprintf("unknown status %d", status)
 }
 
-func (b *Bot) openInventory(c *minecraft.Conn) {
+func (b *Bot) openInventory(c *minecraft.Conn) byte {
 	select {
 	case <-b.containerOpen:
 	default:
@@ -114,18 +114,25 @@ func (b *Bot) openInventory(c *minecraft.Conn) {
 	case <-b.containerOpen:
 	case <-time.After(2 * time.Second):
 	}
+	b.mu.Lock()
+	wID := b.containerWindowID
+	b.mu.Unlock()
+	return wID
 }
 
-func (b *Bot) closeInventory(c *minecraft.Conn) {
-	_ = c.WritePacket(&packet.ContainerClose{WindowID: 0, ContainerType: 247, ServerSide: false})
+func (b *Bot) closeInventory(c *minecraft.Conn, wID byte) {
+	b.mu.Lock()
+	if b.containerActive && (wID == b.containerWindowID || wID == 0) {
+		b.containerActive = false
+	}
+	b.mu.Unlock()
+	_ = c.WritePacket(&packet.ContainerClose{WindowID: wID, ContainerType: 247, ServerSide: false})
 	_ = c.Flush()
 }
 
 func (b *Bot) clearStackPending(id int32) {
 	b.mu.Lock()
-	if b.stackPending != nil && b.stackPending.id == id {
-		b.stackPending = nil
-	}
+	delete(b.stackPending, id)
 	b.mu.Unlock()
 }
 
@@ -134,7 +141,10 @@ func (b *Bot) sendItemStackRequest(c *minecraft.Conn, actions []protocol.StackRe
 	b.itemRequestID -= 2
 	id := b.itemRequestID
 	resp := make(chan uint8, 1)
-	b.stackPending = &stackRequest{id: id, resp: resp}
+	if b.stackPending == nil {
+		b.stackPending = make(map[int32]chan uint8)
+	}
+	b.stackPending[id] = resp
 	b.mu.Unlock()
 	if err := c.WritePacket(&packet.ItemStackRequest{Requests: []protocol.ItemStackRequest{{RequestID: id, Actions: actions, FilterCause: -1}}}); err != nil {
 		b.clearStackPending(id)
@@ -220,8 +230,8 @@ func (b *Bot) transferCmd(p []string) {
 		actions = []protocol.StackRequestAction{swap}
 		verb = "Swapped"
 	}
-	b.openInventory(c)
-	defer b.closeInventory(c)
+	wID := b.openInventory(c)
+	defer b.closeInventory(c, wID)
 	ok, status := b.sendItemStackRequest(c, actions)
 	if !ok {
 		b.reply(fmt.Sprintf("Transfer failed (slot %d <-> %d): %s.", slotA, slotB, stackStatusName(status)))
@@ -264,9 +274,68 @@ func (b *Bot) dropSlots(start, count, requested int, useCursor bool) {
 		b.reply("No items found to drop.")
 		return
 	}
-	b.openInventory(c)
-	defer b.closeInventory(c)
+	wID := b.openInventory(c)
+	defer b.closeInventory(c, wID)
 
+	if useCursor {
+		// Cursor drag & drop: Take to cursor (#58), then Drop from cursor (#58).
+		// Must be executed slot-by-slot because ContainerCursor only has 1 slot (slot 0).
+		var droppedSlots []dropRequest
+		var lastStatus uint8
+		for _, drop := range drops {
+			container, slotIn, ok := playerSlotContainer(drop.slot)
+			if !ok {
+				continue
+			}
+			cnt := drop.count
+			if cnt > 255 {
+				cnt = 255
+			}
+			fromSlot := stackReqSlotInfo(container, slotIn, drop.item.StackNetworkID)
+			cursorEmpty := stackReqSlotInfo(protocol.ContainerCursor, 0, 0)
+			cursorFull := stackReqSlotInfo(protocol.ContainerCursor, 0, drop.item.StackNetworkID)
+
+			take := &protocol.TakeStackRequestAction{}
+			take.Count = byte(cnt)
+			take.Source = fromSlot
+			take.Destination = cursorEmpty
+			dropAction := &protocol.DropStackRequestAction{
+				Count:    byte(cnt),
+				Source:   cursorFull,
+				Randomly: false,
+			}
+
+			ok, status := b.sendItemStackRequest(c, []protocol.StackRequestAction{take, dropAction})
+			if !ok {
+				log.Printf("bebot: drop2 slot %d failed: status=%d (%s)\n", drop.slot, status, stackStatusName(status))
+				lastStatus = status
+				continue
+			}
+
+			b.mu.Lock()
+			if b.inventory[drop.slot].Stack.Count > cnt {
+				b.inventory[drop.slot].Stack.Count -= cnt
+			} else {
+				b.inventory[drop.slot] = protocol.ItemInstance{}
+			}
+			if byte(drop.slot) == b.hotbarSlot {
+				b.heldItem = b.inventory[drop.slot]
+			}
+			b.mu.Unlock()
+			droppedSlots = append(droppedSlots, drop)
+			time.Sleep(30 * time.Millisecond)
+		}
+		b.sendHeldItem(c)
+		if len(droppedSlots) == 0 {
+			b.reply(fmt.Sprintf("Drop request failed: %s", stackStatusName(lastStatus)))
+			return
+		}
+		b.reply(fmt.Sprintf("Dropped items from %d slot(s) [cursor].", len(droppedSlots)))
+		return
+	}
+
+	// Direct Slot Drop: 1 action per slot directly from source slot.
+	// Sent as a single batch ItemStackRequest containing all drops.
 	var actions []protocol.StackRequestAction
 	var validDrops []dropRequest
 
@@ -280,27 +349,13 @@ func (b *Bot) dropSlots(start, count, requested int, useCursor bool) {
 			cnt = 255
 		}
 
-		itemName := b.itemName(drop.item.Stack.ItemType.NetworkID)
 		fromSlot := stackReqSlotInfo(container, slotIn, drop.item.StackNetworkID)
-
-		log.Printf("bebot: drop slot=%d item=%s (netID=%d, stackNetID=%d, count=%d, useCursor=%v)\n",
-			drop.slot, itemName, drop.item.Stack.ItemType.NetworkID, drop.item.StackNetworkID, cnt, useCursor)
-
-		if useCursor {
-			// Cursor drag & drop: Take to cursor (#58), then Drop from cursor (#58)
-			cursorEmpty := stackReqSlotInfo(protocol.ContainerCursor, 0, 0)
-			cursorFull := stackReqSlotInfo(protocol.ContainerCursor, 0, drop.item.StackNetworkID)
-			take := &protocol.TakeStackRequestAction{}
-			take.Count = byte(cnt)
-			take.Source = fromSlot
-			take.Destination = cursorEmpty
-			dropAction := &protocol.DropStackRequestAction{Count: byte(cnt), Source: cursorFull, Randomly: false}
-			actions = append(actions, take, dropAction)
-		} else {
-			// Direct Slot Drop (Q inside GUI): 1 action per slot directly from source slot
-			dropAction := &protocol.DropStackRequestAction{Count: byte(cnt), Source: fromSlot, Randomly: false}
-			actions = append(actions, dropAction)
+		dropAction := &protocol.DropStackRequestAction{
+			Count:    byte(cnt),
+			Source:   fromSlot,
+			Randomly: false,
 		}
+		actions = append(actions, dropAction)
 		validDrops = append(validDrops, drop)
 	}
 
@@ -312,6 +367,7 @@ func (b *Bot) dropSlots(start, count, requested int, useCursor bool) {
 	// Single batch ItemStackRequest packet sent to server
 	ok, status := b.sendItemStackRequest(c, actions)
 	if !ok {
+		log.Printf("bebot: batch drop request failed: status=%d (%s)\n", status, stackStatusName(status))
 		b.reply(fmt.Sprintf("Drop request failed: %s", stackStatusName(status)))
 		return
 	}
@@ -334,11 +390,7 @@ func (b *Bot) dropSlots(start, count, requested int, useCursor bool) {
 	b.mu.Unlock()
 	b.sendHeldItem(c)
 
-	methodStr := "direct"
-	if useCursor {
-		methodStr = "cursor"
-	}
-	b.reply(fmt.Sprintf("Dropped items from %d slot(s) [%s].", len(validDrops), methodStr))
+	b.reply(fmt.Sprintf("Dropped items from %d slot(s) [direct batch].", len(validDrops)))
 }
 
 func (b *Bot) sendHeldItem(c *minecraft.Conn) {
