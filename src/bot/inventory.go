@@ -633,6 +633,32 @@ func (b *Bot) findFreePlayerSlot() (int, bool) {
 	return -1, false
 }
 
+func (b *Bot) findPlayerSlotForItem(netID int32) (int, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.inventory) < 36 {
+		grown := make([]protocol.ItemInstance, 36)
+		copy(grown, b.inventory)
+		b.inventory = grown
+	}
+	// First preference: existing stack of the same item with room (< 64).
+	if netID != 0 {
+		for i := 0; i < 36; i++ {
+			item := b.inventory[i]
+			if item.Stack.ItemType.NetworkID == netID && item.Stack.Count > 0 && item.Stack.Count < 64 {
+				return i, true
+			}
+		}
+	}
+	// Second preference: first empty slot.
+	for i := 0; i < 36; i++ {
+		if b.inventory[i].Stack.Count == 0 {
+			return i, true
+		}
+	}
+	return -1, false
+}
+
 func (b *Bot) lootCmd(p []string) {
 	b.mu.Lock()
 	c := b.conn

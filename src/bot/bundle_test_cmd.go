@@ -36,28 +36,48 @@ func (b *Bot) bundleTestCmd(p []string) {
 		return
 	}
 
-	if len(p) < 7 {
-		b.reply("Usage: bundletest <ax> <ay> <az> <bx> <by> <bz> [attempts]  |  bundletest stop")
-		return
-	}
-
-	coords := make([]int32, 6)
-	for i := 0; i < 6; i++ {
-		v, err := strconv.Atoi(p[i+1])
-		if err != nil {
-			b.reply(fmt.Sprintf("Invalid coordinate %q: %v", p[i+1], err))
-			return
-		}
-		coords[i] = int32(v)
-	}
-	posA := protocol.BlockPos{coords[0], coords[1], coords[2]}
-	posB := protocol.BlockPos{coords[3], coords[4], coords[5]}
-
+	var posA, posB protocol.BlockPos
 	attempts := 50
-	if len(p) >= 8 {
-		if v, err := strconv.Atoi(p[7]); err == nil && v > 0 {
-			attempts = v
+
+	if len(p) == 4 || len(p) == 5 {
+		// Single dropper mode: bundletest <x> <y> <z> [attempts]
+		coords := make([]int32, 3)
+		for i := 0; i < 3; i++ {
+			v, err := strconv.Atoi(p[i+1])
+			if err != nil {
+				b.reply(fmt.Sprintf("Invalid coordinate %q: %v", p[i+1], err))
+				return
+			}
+			coords[i] = int32(v)
 		}
+		posA = protocol.BlockPos{coords[0], coords[1], coords[2]}
+		posB = posA
+		if len(p) == 5 {
+			if v, err := strconv.Atoi(p[4]); err == nil && v > 0 {
+				attempts = v
+			}
+		}
+	} else if len(p) >= 7 {
+		// Two dropper mode: bundletest <ax> <ay> <az> <bx> <by> <bz> [attempts]
+		coords := make([]int32, 6)
+		for i := 0; i < 6; i++ {
+			v, err := strconv.Atoi(p[i+1])
+			if err != nil {
+				b.reply(fmt.Sprintf("Invalid coordinate %q: %v", p[i+1], err))
+				return
+			}
+			coords[i] = int32(v)
+		}
+		posA = protocol.BlockPos{coords[0], coords[1], coords[2]}
+		posB = protocol.BlockPos{coords[3], coords[4], coords[5]}
+		if len(p) >= 8 {
+			if v, err := strconv.Atoi(p[7]); err == nil && v > 0 {
+				attempts = v
+			}
+		}
+	} else {
+		b.reply("Usage: bundletest <x> <y> <z> [attempts]  or  bundletest <ax> <ay> <az> <bx> <by> <bz> [attempts]  |  bundletest stop")
+		return
 	}
 
 	b.mu.Lock()
@@ -88,15 +108,28 @@ func (b *Bot) bundleTestCmd(p []string) {
 			b.mu.Unlock()
 		}()
 
-		b.reply(fmt.Sprintf(
-			"Bundle test started: dropper A=(%d,%d,%d) B=(%d,%d,%d) attempts=%d",
-			posA.X(), posA.Y(), posA.Z(),
-			posB.X(), posB.Y(), posB.Z(),
-			attempts,
-		))
-		log.Printf("bebot: [bundletest] starting %d attempts on droppers A=%v B=%v\n", attempts, posA, posB)
+		if posA == posB {
+			b.reply(fmt.Sprintf(
+				"Bundle test started: dropper at (%d,%d,%d) attempts=%d",
+				posA.X(), posA.Y(), posA.Z(),
+				attempts,
+			))
+			log.Printf("bebot: [bundletest] starting %d attempts on single dropper %v\n", attempts, posA)
+		} else {
+			b.reply(fmt.Sprintf(
+				"Bundle test started: droppers A=(%d,%d,%d) B=(%d,%d,%d) attempts=%d",
+				posA.X(), posA.Y(), posA.Z(),
+				posB.X(), posB.Y(), posB.Z(),
+				attempts,
+			))
+			log.Printf("bebot: [bundletest] starting %d attempts on droppers A=%v B=%v\n", attempts, posA, posB)
+		}
 
 		var okCount, rejectCount, noBundle, emptyBundleCount int
+		var lockedPos *protocol.BlockPos
+		if posA == posB {
+			lockedPos = &posA
+		}
 
 		for attempt := 0; attempt < attempts; attempt++ {
 			select {
@@ -106,10 +139,12 @@ func (b *Bot) bundleTestCmd(p []string) {
 			default:
 			}
 
-			// Alternate between A and B each attempt so we're opening whichever
-			// currently holds the bundle while the dropper clock may be firing.
+			// If we've discovered which dropper holds the bundle, stay locked into it!
+			// The bundle won't move away, so we avoid wasting attempts on empty droppers.
 			targetPos := posA
-			if attempt%2 == 1 {
+			if lockedPos != nil {
+				targetPos = *lockedPos
+			} else if attempt%2 == 1 {
 				targetPos = posB
 			}
 
@@ -175,6 +210,13 @@ func (b *Bot) bundleTestCmd(p []string) {
 				continue
 			}
 
+			// Bundle found! Lock into this dropper since the bundle won't move away.
+			if lockedPos == nil {
+				lockedPos = &targetPos
+				log.Printf("bebot: [bundletest] bundle found at %v — locked onto this dropper for all remaining attempts\n", targetPos)
+				b.reply(fmt.Sprintf("Bundle found at (%d, %d, %d)! Locked onto this dropper.", targetPos.X(), targetPos.Y(), targetPos.Z()))
+			}
+
 			// Bundle found. Inspect its NBT to inspect inner stored items or dynamic bundle_id.
 			bundleNBT := bundleItem.Stack.NBTData
 			var bundleID uint32
@@ -205,13 +247,7 @@ func (b *Bot) bundleTestCmd(p []string) {
 			if len(innerItems) > 0 {
 				firstItem := innerItems[0]
 				innerName, _ = firstItem["Name"].(string)
-				if cnt, ok := firstItem["Count"].(byte); ok && cnt > 0 {
-					innerCount = cnt
-				} else if cnt, ok := firstItem["Count"].(int32); ok && cnt > 0 {
-					innerCount = byte(cnt)
-				} else if cnt, ok := firstItem["Count"].(int16); ok && cnt > 0 {
-					innerCount = byte(cnt)
-				}
+				innerCount = 1 // Right-click extracts 1 item from bundle
 				innerNetID = b.itemNetworkIDByName(innerName)
 			} else if bundleID != 0 {
 				b.mu.Lock()
@@ -221,26 +257,41 @@ func (b *Bot) bundleTestCmd(p []string) {
 					first := dynItems[0]
 					innerNetID = first.Stack.ItemType.NetworkID
 					innerName = b.itemName(innerNetID)
-					if first.Stack.Count > 0 {
-						innerCount = byte(first.Stack.Count)
-					}
 				} else {
 					innerName = "bundle item"
 				}
+				innerCount = 1 // Right-click extracts 1 item from bundle
 			}
 
-			// If neither NBT inner items nor a bundle_id is present, the bundle is truly empty.
-			if len(innerItems) == 0 && bundleID == 0 {
+			isEmpty := false
+			if len(innerItems) == 0 {
+				if bundleID == 0 {
+					isEmpty = true
+				} else {
+					b.mu.Lock()
+					dynItems, hasDyn := b.dynamicContainerItems[bundleID]
+					b.mu.Unlock()
+					if hasDyn && len(dynItems) == 0 {
+						isEmpty = true
+					}
+				}
+			}
+
+			if isEmpty {
 				b.closeBlockContainer(c, wID)
 				b.invMu.Unlock()
 				log.Printf("bebot: [bundletest] attempt %d: bundle at %v slot=%d has no inner items (NBT=%+v)\n", attempt+1, targetPos, bundleSlot, bundleNBT)
 				noBundle++
 				emptyBundleCount++
 				if emptyBundleCount >= 3 {
-					b.reply(fmt.Sprintf("Bundle found at (%d, %d, %d) slot %d, but it has no items inside it! Please put items into the bundle first.", targetPos.X(), targetPos.Y(), targetPos.Z(), bundleSlot))
+					if okCount > 0 {
+						b.reply(fmt.Sprintf("Bundle at (%d, %d, %d) slot %d ran out of items after %d extractions. Please refill items.", targetPos.X(), targetPos.Y(), targetPos.Z(), bundleSlot, okCount))
+					} else {
+						b.reply(fmt.Sprintf("Bundle found at (%d, %d, %d) slot %d, but it has no items inside it! Please put items into the bundle first.", targetPos.X(), targetPos.Y(), targetPos.Z(), bundleSlot))
+					}
 					return
 				}
-				time.Sleep(50 * time.Millisecond)
+				time.Sleep(40 * time.Millisecond)
 				continue
 			}
 			emptyBundleCount = 0
@@ -255,7 +306,7 @@ func (b *Bot) bundleTestCmd(p []string) {
 
 			// RACE: Extract inner item from bundle onto cursor, then place into player inventory.
 			// The bundle stays inside the dropper!
-			dstSlot, hasDst := b.findFreePlayerSlot()
+			dstSlot, hasDst := b.findPlayerSlotForItem(innerNetID)
 			var reqOk bool
 			var status uint8
 
@@ -340,11 +391,15 @@ func (b *Bot) bundleTestCmd(p []string) {
 							copy(grown, b.inventory)
 							b.inventory = grown
 						}
-						b.inventory[dstSlot] = protocol.ItemInstance{
-							Stack: protocol.ItemStack{
-								ItemType: protocol.ItemType{NetworkID: innerNetID},
-								Count:    uint16(innerCount),
-							},
+						if b.inventory[dstSlot].Stack.Count == 0 {
+							b.inventory[dstSlot] = protocol.ItemInstance{
+								Stack: protocol.ItemStack{
+									ItemType: protocol.ItemType{NetworkID: innerNetID},
+									Count:    uint16(innerCount),
+								},
+							}
+						} else {
+							b.inventory[dstSlot].Stack.Count += uint16(innerCount)
 						}
 						b.mu.Unlock()
 					}
@@ -364,7 +419,7 @@ func (b *Bot) bundleTestCmd(p []string) {
 			}
 
 			// Small delay between attempts so we don't flood the connection.
-			time.Sleep(60 * time.Millisecond)
+			time.Sleep(40 * time.Millisecond)
 		}
 
 		summary := fmt.Sprintf(
