@@ -20,6 +20,7 @@ func (b *Bot) say(s string) {
 	defer b.mu.Unlock()
 	if b.conn != nil {
 		_ = b.conn.WritePacket(&packet.Text{TextType: packet.TextTypeChat, Message: s, NeedsTranslation: false})
+		_ = b.conn.Flush()
 	}
 }
 
@@ -31,7 +32,13 @@ func (b *Bot) commandFromChat(sender, text string) {
 	if !b.isSuperuser(sender) && !isPublicCommand(text) {
 		return
 	}
-	go b.command(text)
+	go func() {
+		b.mu.Lock()
+		b.fromConsole = false
+		b.whisperTarget = ""
+		b.mu.Unlock()
+		b.command(text)
+	}()
 }
 
 func isPublicCommand(line string) bool {
@@ -201,19 +208,29 @@ func cleanChatName(name string) string {
 }
 
 func (b *Bot) reply(message string) {
-	log.Println("bebot:", message)
-	b.mu.Lock()
-	target := b.whisperTarget
-	fromConsole := b.fromConsole
-	b.mu.Unlock()
-	if target != "" {
-		b.whisper(target, message)
-		return
+	lines := strings.Split(message, "\n")
+	for i, rawLine := range lines {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
+		}
+		log.Println("bebot:", line)
+
+		b.mu.Lock()
+		target := b.whisperTarget
+		fromConsole := b.fromConsole
+		b.mu.Unlock()
+
+		if target != "" {
+			b.whisper(target, line)
+		} else if !fromConsole {
+			b.say(line)
+		}
+
+		if len(lines) > 1 && i < len(lines)-1 {
+			time.Sleep(60 * time.Millisecond)
+		}
 	}
-	if fromConsole {
-		return
-	}
-	b.say(message)
 }
 
 func (b *Bot) command(line string) {
