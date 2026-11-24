@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -507,9 +508,9 @@ func (b *Bot) command(line string) {
 		if len(p) >= 2 && strings.EqualFold(p[1], "air") {
 			if len(p) >= 3 && (strings.EqualFold(p[2], "clear") || strings.EqualFold(p[2], "reset")) {
 				b.mu.Lock()
-				b.mineAirRuntimeIDs = make(map[uint32]bool)
+				b.mineAirRuntimeIDs = defaultAirRuntimeIDs()
 				b.mu.Unlock()
-				b.reply("Cleared all known air block runtime IDs.")
+				b.reply("Reset air block runtime IDs to defaults (including minecraft:air = 3690217760).")
 				return
 			}
 			if len(p) >= 3 && (strings.EqualFold(p[2], "remove") || strings.EqualFold(p[2], "rm") || strings.EqualFold(p[2], "del") || strings.EqualFold(p[2], "delete")) {
@@ -571,6 +572,7 @@ func (b *Bot) command(line string) {
 				ids = append(ids, id)
 			}
 			b.mu.Unlock()
+			sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 			b.reply(fmt.Sprintf("Known air runtime IDs: %v (Use 'mine learn <x y z>' to break a block & calibrate air)", ids))
 			return
 		}

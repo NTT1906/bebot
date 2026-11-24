@@ -133,6 +133,15 @@ func (b *Bot) isInMineBox(pos protocol.BlockPos) bool {
 		pos.Z() >= b.mineBoxMin.Z() && pos.Z() <= b.mineBoxMax.Z()
 }
 
+func defaultAirRuntimeIDs() map[uint32]bool {
+	return map[uint32]bool{
+		0:          true,
+		3690217760: true, // minecraft:air (Bedrock FNV-1a block hash)
+		3959618627: true, // minecraft:cave_air
+		848705078:  true, // minecraft:void_air
+	}
+}
+
 func (b *Bot) startMiningArea(ax, ay, az, bx, by, bz int32, ticksReq int, repeat bool, faceAccurate bool) {
 	minX, maxX := ax, bx
 	if minX > maxX {
@@ -187,7 +196,7 @@ func (b *Bot) startMiningArea(ax, ay, az, bx, by, bz int32, ticksReq int, repeat
 	b.mineAttempts = make(map[protocol.BlockPos]int)
 	b.knownAirBlocks = make(map[protocol.BlockPos]bool)
 	if b.mineAirRuntimeIDs == nil {
-		b.mineAirRuntimeIDs = map[uint32]bool{0: true}
+		b.mineAirRuntimeIDs = defaultAirRuntimeIDs()
 	}
 	b.mineFastBreak = false
 	b.mineWaitingForBlocks = false
@@ -564,10 +573,13 @@ func (b *Bot) startLearningAir(pos *protocol.BlockPos) {
 	}
 	initialRuntimeID := uint32(0)
 	if rid, ok := b.blockRuntimeIDs[target]; ok {
-		initialRuntimeID = rid
-		if b.mineAirRuntimeIDs != nil {
-			delete(b.mineAirRuntimeIDs, rid)
+		if b.mineAirRuntimeIDs != nil && b.mineAirRuntimeIDs[rid] {
+			b.mu.Unlock()
+			b.reply(fmt.Sprintf("Block at (%d, %d, %d) is already air (runtime ID %d). Please target a solid block.",
+				target.X(), target.Y(), target.Z(), rid))
+			return
 		}
+		initialRuntimeID = rid
 	}
 	b.mineLearnActive = true
 	b.mineLearnPos = target

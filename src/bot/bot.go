@@ -287,7 +287,12 @@ func New(opts Options) *Bot {
 		xblCache:          opts.XBLCache,
 		itemNamesByID:     make(map[int32]string),
 		mineAttempts:      make(map[protocol.BlockPos]int),
-		mineAirRuntimeIDs: map[uint32]bool{0: true},
+		mineAirRuntimeIDs: map[uint32]bool{
+			0:          true,
+			3690217760: true, // minecraft:air (Bedrock FNV-1a block hash)
+			3959618627: true, // minecraft:cave_air
+			848705078:  true, // minecraft:void_air
+		},
 		knownAirBlocks:            make(map[protocol.BlockPos]bool),
 		mineTimeoutSec:            mineTimeout,
 		blockRuntimeIDs:           make(map[protocol.BlockPos]uint32),
