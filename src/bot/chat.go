@@ -603,10 +603,17 @@ func (b *Bot) command(line string) {
 	case "stopbreak", "cancelbreak", "abortbreak", "stopmine", "cancelmine":
 		b.stopMiningArea()
 		b.stopBreaking()
-	case "dropall":
-		b.dropSlots(0, len(b.inventory), 0, false)
-	case "dropall2":
-		b.dropSlots(0, len(b.inventory), 0, true)
+	case "dropall", "dropall2":
+		useCursor := strings.EqualFold(p[0], "dropall2")
+		random := false
+		for _, arg := range p[1:] {
+			if bVal, err := strconv.ParseBool(arg); err == nil {
+				random = bVal
+			} else if strings.EqualFold(arg, "random") {
+				random = true
+			}
+		}
+		b.dropSlots(0, len(b.inventory), 0, useCursor, random)
 	case "inv", "inventory", "myinv", "items":
 		b.inventoryCmd(p)
 	case "transfer":
@@ -621,24 +628,27 @@ func (b *Bot) command(line string) {
 		b.bundleTestCmd(p)
 	case "drop", "drop2":
 		useCursor := strings.EqualFold(p[0], "drop2")
-		if len(p) < 2 || len(p) > 3 {
-			b.reply("Usage: drop <slot> [amount] (or drop2 for cursor method)")
+		if len(p) < 2 || len(p) > 4 {
+			b.reply("Usage: drop <slot> [amount] [random: true|false] (or drop2 for cursor method)")
 			return
 		}
 		slot, err := strconv.Atoi(p[1])
 		if err != nil || slot < 0 || slot >= len(b.inventory) {
-			b.reply("Usage: drop <slot> [amount]")
+			b.reply("Usage: drop <slot> [amount] [random: true|false]")
 			return
 		}
 		amount := 0
-		if len(p) == 3 {
-			amount, err = strconv.Atoi(p[2])
-			if err != nil || amount <= 0 {
-				b.reply("Usage: drop <slot> [amount]")
-				return
+		random := false
+		for _, arg := range p[2:] {
+			if a, err := strconv.Atoi(arg); err == nil && a > 0 {
+				amount = a
+			} else if bVal, err := strconv.ParseBool(arg); err == nil {
+				random = bVal
+			} else if strings.EqualFold(arg, "random") {
+				random = true
 			}
 		}
-		b.dropSlots(slot, 1, amount, useCursor)
+		b.dropSlots(slot, 1, amount, useCursor, random)
 	case "help", "commands", "commandlist":
 		b.help()
 	case "hotbar", "slot":
@@ -786,9 +796,9 @@ func (b *Bot) help() {
 		"mine air - display currently known air runtime IDs",
 		"stopmine / stopbreak - stop mining",
 		"hotbar <0-9> - select a hotbar slot",
-		"dropall - drop all items (fast direct slot drop, 1 action/slot)",
-		"dropall2 - drop all items (cursor drag & drop, 2 actions/slot)",
-		"drop <slot> [amount] - drop items from a slot (or drop2 for cursor)",
+		"dropall [random:true|false] - drop all items in eye direction (or random scatter)",
+		"dropall2 [random:true|false] - drop all items via cursor (requires open container)",
+		"drop <slot> [amount] [random:true|false] - drop items from a slot in eye direction (or drop2 for cursor)",
 		"transfer <slot a> <slot b> - move items between inventory slots",
 		"loot [x y z] - loot all items from container (chest, dropper, barrel, etc.)",
 		"take [x y z] <slot> [count] - take item from a container slot",

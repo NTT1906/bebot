@@ -189,13 +189,34 @@ In Bedrock's C++ binary packet deserializer (`ItemStackRequestPacket::read` / `r
 
 ---
 
+### Pitfall 6: Drop Velocity & Eye Direction vs. Random Scattering (`SourceFlags`)
+* **What Happened:**
+  Previously, dropped items flew in random directions instead of straight forward in the bot's look/eye direction.
+* **The BDS Protocol Cause:**
+  In Bedrock Dedicated Server (`InventorySource.h` / `Player.h`):
+  ```cpp
+  enum class InventorySourceFlags : uint {
+      NoFlag                 = 0,
+      WorldInteractionRandom = 1,
+  };
+  virtual bool drop(::ItemStack const& item, bool const randomly);
+  ```
+  * When `SourceFlags` in `InventoryActionSourceWorld` is set to `1` (`WorldInteractionRandom`), BDS calculates a random spherical scatter vector.
+  * When `SourceFlags` is set to `0` (`NoFlag`), BDS projects the item velocity vector along the player's exact `yaw` and `pitch` (eye look vector from `PlayerAuthInput`).
+* **The Solution:**
+  Made `random` an optional parameter with default `false`:
+  * Default (`random: false`): Sets `SourceFlags = 0`, throwing items directly in the direction the bot is looking (eye vector).
+  * Random (`random: true`): Sets `SourceFlags = 1` (or `DropStackRequestAction.Randomly = true`), scattering items randomly.
+
+---
+
 ## 4. Bebot Implementation & Command Reference
 
 Implemented in [src/bot/inventory.go](file:///d:/code/goland/bebot/src/bot/inventory.go):
 
 | In-Game Chat Command | Method Used | Execution Characteristics |
 | :--- | :--- | :--- |
-| **`bebot dropall [all]`** | **First-Person World Drop** | Iterates all non-empty inventory slots, constructs balanced `InventoryTransaction` pairs, and flushes in a single network burst. Drops any item (including bundles intact). |
-| **`bebot drop <slot> [count]`** | **First-Person World Drop** | Drops `count` items (or all) from inventory slot `slot` directly into the world via native `InventoryTransaction`. |
-| **`bebot dropall2 [all]`** | **Cursor Drag & Drop** | Drops each inventory slot sequentially via virtual cursor (`[Take to cursor, Drop from cursor]`). Requires an active container window. |
-| **`bebot drop2 <slot> [count]`** | **Cursor Drag & Drop** | Takes `count` items from `slot` to virtual cursor, then drops them from cursor to the world. Requires an active container window. |
+| **`bebot dropall [random: true\|false]`** | **First-Person World Drop** | Iterates all non-empty inventory slots, constructs balanced `InventoryTransaction` pairs, and flushes in a single network burst. Drops forward in eye direction (default) or random scatter. Drops bundles intact. |
+| **`bebot drop <slot> [count] [random]`** | **First-Person World Drop** | Drops `count` items (or all) from inventory slot `slot` directly in eye direction (default `random=false`). |
+| **`bebot dropall2 [random: true\|false]`** | **Cursor Drag & Drop** | Drops each inventory slot sequentially via virtual cursor (`[Take to cursor, Drop from cursor]`). Requires an active container window. |
+| **`bebot drop2 <slot> [count] [random]`** | **Cursor Drag & Drop** | Takes `count` items from `slot` to virtual cursor, then drops them to the world in eye direction (default `random=false`). Requires an active container window. |

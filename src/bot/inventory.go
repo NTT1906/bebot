@@ -238,7 +238,7 @@ func (b *Bot) transferCmd(p []string) {
 	b.reply(fmt.Sprintf("%s %d item(s) from slot %d to slot %d.", verb, srcItem.Stack.Count, slotA, slotB))
 }
 
-func (b *Bot) dropSlots(start, count, requested int, useCursor bool) {
+func (b *Bot) dropSlots(start, count, requested int, useCursor, random bool) {
 	b.invMu.Lock()
 	defer b.invMu.Unlock()
 	b.mu.Lock()
@@ -312,7 +312,7 @@ func (b *Bot) dropSlots(start, count, requested int, useCursor bool) {
 				dropAction := &protocol.DropStackRequestAction{
 					Count:    byte(cnt),
 					Source:   cursorFull,
-					Randomly: false,
+					Randomly: random,
 				}
 
 				ok, status := b.sendItemStackRequest(c, []protocol.StackRequestAction{take, dropAction})
@@ -345,13 +345,23 @@ func (b *Bot) dropSlots(start, count, requested int, useCursor bool) {
 			b.reply(fmt.Sprintf("Drop request failed: %s", stackStatusName(lastStatus)))
 			return
 		}
-		b.reply(fmt.Sprintf("Dropped items from %d slot(s) [cursor drag & drop].", len(droppedSlots)))
+		modeStr := "eye direction"
+		if random {
+			modeStr = "random scatter"
+		}
+		b.reply(fmt.Sprintf("Dropped items from %d slot(s) [cursor drag & drop, %s].", len(droppedSlots), modeStr))
 		return
 	}
 
 	// Direct First-Person World Drop (packet.InventoryTransaction):
 	// Natively drops any inventory slot (including bundles) into the world.
 	// Coalesced into a single network flush without needing open container screens.
+	// SourceFlags: 0 = NoFlag (drops forward in eye/look direction), 1 = WorldInteractionRandom (scatters randomly).
+	sourceFlags := uint32(0)
+	if random {
+		sourceFlags = 1
+	}
+
 	var droppedSlots []dropRequest
 	for _, drop := range drops {
 		oldItem := drop.item
@@ -375,7 +385,7 @@ func (b *Bot) dropSlots(start, count, requested int, useCursor bool) {
 				},
 				{
 					SourceType:    protocol.InventoryActionSourceWorld,
-					SourceFlags:   protocol.Option(uint32(1)),
+					SourceFlags:   protocol.Option(sourceFlags),
 					InventorySlot: 0,
 					OldItem:       protocol.ItemInstance{},
 					NewItem:       droppedItem,
@@ -410,7 +420,11 @@ func (b *Bot) dropSlots(start, count, requested int, useCursor bool) {
 	b.mu.Unlock()
 	b.sendHeldItem(c)
 
-	b.reply(fmt.Sprintf("Dropped items from %d slot(s) [direct].", len(droppedSlots)))
+	modeStr := "eye direction"
+	if random {
+		modeStr = "random scatter"
+	}
+	b.reply(fmt.Sprintf("Dropped items from %d slot(s) [direct, %s].", len(droppedSlots), modeStr))
 }
 
 func (b *Bot) sendHeldItem(c *minecraft.Conn) {
