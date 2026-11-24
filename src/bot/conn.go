@@ -924,14 +924,19 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 				log.Printf("bebot: trace: InventorySlot WindowID=%d Slot=%d Item=%v\n", p.WindowID, p.Slot, p.NewItem.Stack.ItemType.NetworkID)
 			}
 			if p.WindowID == 0 {
+				b.mu.Lock()
 				if int(p.Slot) >= len(b.inventory) {
 					grown := make([]protocol.ItemInstance, int(p.Slot)+1)
 					copy(grown, b.inventory)
 					b.inventory = grown
 				}
 				b.inventory[p.Slot] = p.NewItem
-				if byte(p.Slot) == b.hotbarSlot {
+				isHotbar := byte(p.Slot) == b.hotbarSlot
+				if isHotbar {
 					b.heldItem = p.NewItem
+				}
+				b.mu.Unlock()
+				if isHotbar {
 					b.sendHeldItem(c)
 				}
 			} else if p.WindowID < 119 {

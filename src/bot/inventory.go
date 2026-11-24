@@ -256,10 +256,11 @@ func (b *Bot) dropSlots(start, count, requested int, useCursor bool) {
 		}
 		dropCount := int(item.Stack.Count)
 		if requested > 0 {
-			if requested > dropCount {
-				requested = dropCount
+			cnt := requested
+			if cnt > dropCount {
+				cnt = dropCount
 			}
-			dropCount = requested
+			dropCount = cnt
 		}
 		drops = append(drops, dropRequest{slot: slot, item: item, count: uint16(dropCount)})
 	}
@@ -275,8 +276,15 @@ func (b *Bot) dropSlots(start, count, requested int, useCursor bool) {
 
 	if useCursor {
 		// Cursor drag & drop: Take to cursor (#59), then Drop from cursor (#59).
-		// Executed slot-by-slot without opening dummy containers.
-		// Note: Every action count is strictly capped to [1, 64] per Bedrock packet specification.
+		// Requires an open container window so ContainerCursor is active on server.
+		b.mu.Lock()
+		containerActive := b.containerActive
+		b.mu.Unlock()
+		if !containerActive {
+			b.reply("Cursor drag & drop (drop2/dropall2) requires an open container. Use 'dropall' for direct inventory drop.")
+			return
+		}
+
 		var droppedSlots []dropRequest
 		var lastStatus uint8
 		for _, drop := range drops {
@@ -341,51 +349,55 @@ func (b *Bot) dropSlots(start, count, requested int, useCursor bool) {
 		return
 	}
 
-	// Direct Slot Drop (Q in GUI): 1 action per slot directly from source slot.
-	// Sent as a single batch ItemStackRequest containing all drops.
-	// Every action count is strictly chunked to [1, 64] per BDS packet range assertion.
-	var actions []protocol.StackRequestAction
-	var validDrops []dropRequest
-
+	// Direct First-Person World Drop (packet.InventoryTransaction):
+	// Natively drops any inventory slot (including bundles) into the world.
+	// Coalesced into a single network flush without needing open container screens.
+	var droppedSlots []dropRequest
 	for _, drop := range drops {
-		container, slotIn, ok := playerSlotContainer(drop.slot)
-		if !ok {
+		oldItem := drop.item
+		newItem := oldItem
+		droppedItem := oldItem
+		droppedItem.Stack.Count = drop.count
+		if oldItem.Stack.Count > drop.count {
+			newItem.Stack.Count -= drop.count
+		} else {
+			newItem = protocol.ItemInstance{}
+		}
+
+		tx := &packet.InventoryTransaction{
+			Actions: []protocol.InventoryAction{
+				{
+					SourceType:    protocol.InventoryActionSourceContainer,
+					WindowID:      protocol.Option(int8(protocol.WindowIDInventory)),
+					InventorySlot: uint32(drop.slot),
+					OldItem:       oldItem,
+					NewItem:       newItem,
+				},
+				{
+					SourceType:    protocol.InventoryActionSourceWorld,
+					SourceFlags:   protocol.Option(uint32(1)),
+					InventorySlot: 0,
+					OldItem:       protocol.ItemInstance{},
+					NewItem:       droppedItem,
+				},
+			},
+			TransactionData: &protocol.NormalTransactionData{},
+		}
+		if err := c.WritePacket(tx); err != nil {
+			log.Printf("bebot: drop slot %d write failed: %v\n", drop.slot, err)
 			continue
 		}
-		rem := drop.count
-		for rem > 0 {
-			cnt := rem
-			if cnt > 64 {
-				cnt = 64
-			}
-			rem -= cnt
-
-			fromSlot := stackReqSlotInfo(container, slotIn, drop.item.StackNetworkID)
-			dropAction := &protocol.DropStackRequestAction{
-				Count:    byte(cnt),
-				Source:   fromSlot,
-				Randomly: false,
-			}
-			actions = append(actions, dropAction)
-		}
-		validDrops = append(validDrops, drop)
+		droppedSlots = append(droppedSlots, drop)
 	}
 
-	if len(actions) == 0 {
+	if len(droppedSlots) == 0 {
 		b.reply("No valid items to drop.")
 		return
 	}
-
-	// Single batch ItemStackRequest packet sent to server
-	ok, status := b.sendItemStackRequest(c, actions)
-	if !ok {
-		log.Printf("bebot: batch drop request failed: status=%d (%s)\n", status, stackStatusName(status))
-		b.reply(fmt.Sprintf("Drop request failed: %s", stackStatusName(status)))
-		return
-	}
+	_ = c.Flush()
 
 	b.mu.Lock()
-	for _, drop := range validDrops {
+	for _, drop := range droppedSlots {
 		if b.inventory[drop.slot].Stack.Count > drop.count {
 			b.inventory[drop.slot].Stack.Count -= drop.count
 		} else {
@@ -398,7 +410,7 @@ func (b *Bot) dropSlots(start, count, requested int, useCursor bool) {
 	b.mu.Unlock()
 	b.sendHeldItem(c)
 
-	b.reply(fmt.Sprintf("Dropped items from %d slot(s) in single batch [direct].", len(validDrops)))
+	b.reply(fmt.Sprintf("Dropped items from %d slot(s) [direct].", len(droppedSlots)))
 }
 
 func (b *Bot) sendHeldItem(c *minecraft.Conn) {
@@ -1050,8 +1062,6 @@ func (b *Bot) viewContainerCmd(p []string) {
 
 func (b *Bot) inventoryCmd(p []string) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-
 	var lines []string
 	itemCount := 0
 	for i, item := range b.inventory {
@@ -1068,6 +1078,8 @@ func (b *Bot) inventoryCmd(p []string) {
 				i, item.Stack.Count, name, item.Stack.ItemType.NetworkID, item.StackNetworkID, nbtSummary))
 		}
 	}
+	b.mu.Unlock()
+
 	if len(lines) == 0 {
 		b.reply("Bot inventory is empty.")
 		return
