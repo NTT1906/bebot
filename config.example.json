@@ -1,6 +1,7 @@
 {
   "version": 1,
   "superuser": "YourUsername",
+  "free_mem_after_join": true,
   "server": {
     "host": "127.0.0.1",
     "port": 19132,

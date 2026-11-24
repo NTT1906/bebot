@@ -5,18 +5,21 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
+
+	"github.com/pelletier/go-toml"
 )
 
-// CurrentConfigVersion defines the latest schema version of config.json.
+// CurrentConfigVersion defines the latest schema version of config.json / config.toml.
 const CurrentConfigVersion = 1
 
 // SkinConfig holds the bot's skin in a dedicated skin.json file.
 type SkinConfig struct {
-	Type               string `json:"type"`               // "slim", "normal"/"wide", "pack"/"custom"
-	Path               string `json:"path"`               // PNG file (slim/normal) or skin pack folder (pack/custom)
-	Skin               string `json:"skin"`               // skin id/index in the pack (pack/custom)
-	OverrideAppearance *bool  `json:"overrideAppearance"` // nil defaults to true
+	Type               string `json:"type" toml:"type"`                                             // "slim", "normal"/"wide", "pack"/"custom"
+	Path               string `json:"path" toml:"path"`                                             // PNG file (slim/normal) or skin pack folder (pack/custom)
+	Skin               string `json:"skin" toml:"skin"`                                             // skin id/index in the pack (pack/custom)
+	OverrideAppearance *bool  `json:"overrideAppearance,omitempty" toml:"override-appearance,omitempty"` // nil defaults to true
 }
 
 // DefaultSkinConfig is what "skin default" restores: the standard slim skin.
@@ -32,7 +35,7 @@ func OverrideAppearanceOn(sc SkinConfig) bool {
 
 // MineConfig holds parameters for the mining controller.
 type MineConfig struct {
-	TimeoutSec float64 `json:"timeout_sec"`
+	TimeoutSec float64 `json:"timeout_sec" toml:"timeout_sec"`
 }
 
 // DefaultRenderDistance is the fallback chunk radius if unspecified or <= 0.
@@ -41,26 +44,35 @@ const DefaultRenderDistance = 4
 // DefaultServerStallThresholdMs is the fallback duration without server packets before considering the server stalled.
 const DefaultServerStallThresholdMs = 250
 
-// Config represents the top-level configuration loaded from config.json.
+// Config represents the top-level configuration loaded from config.json or config.toml.
 type Config struct {
-	Version   int    `json:"version"`
-	Superuser string `json:"superuser"`
-	Server    struct {
-		Host    string `json:"host"`
-		Port    int    `json:"port"`
-		Version string `json:"version,omitempty"`
-	} `json:"server"`
-	Target    struct{ X, Y, Z float32 } `json:"target"`
+	Version          int        `json:"version" toml:"version"`
+	Superuser        string     `json:"superuser" toml:"superuser"`
+	FreeMemAfterJoin *bool      `json:"free_mem_after_join,omitempty" toml:"free-mem-after-join,omitempty"`
+	Server           struct {
+		Host    string `json:"host" toml:"host"`
+		Port    int    `json:"port" toml:"port"`
+		Version string `json:"version,omitempty" toml:"version,omitempty"`
+	} `json:"server" toml:"server"`
+	Target    struct{ X, Y, Z float32 } `json:"target" toml:"target"`
 	Behaviour struct {
-		ReconnectBaseDelayMs int     `json:"reconnectBaseDelayMs"`
-		AfkJumpIntervalMs    int     `json:"afkJumpIntervalMs,omitempty"` // deprecated
-		WalkSpeed            float32 `json:"walkSpeed"`
-		RenderDistance       int32   `json:"renderDistance"`
-		ServerStallThresholdMs int   `json:"serverStallThresholdMs"`
-	} `json:"behaviour"`
-	CommandsViaChat *bool      `json:"commands_via_chat"`
-	Skin            SkinConfig `json:"skin"`
-	Mine            MineConfig `json:"mine"`
+		ReconnectBaseDelayMs int     `json:"reconnectBaseDelayMs" toml:"reconnect-base-delay-ms"`
+		AfkJumpIntervalMs    int     `json:"afkJumpIntervalMs,omitempty" toml:"afk-jump-interval-ms,omitempty"` // deprecated
+		WalkSpeed            float32 `json:"walkSpeed" toml:"walk-speed"`
+		RenderDistance       int32   `json:"renderDistance" toml:"render-distance"`
+		ServerStallThresholdMs int   `json:"serverStallThresholdMs" toml:"server-stall-threshold-ms"`
+	} `json:"behaviour" toml:"behaviour"`
+	CommandsViaChat *bool      `json:"commands_via_chat,omitempty" toml:"commands-via-chat,omitempty"`
+	Skin            SkinConfig `json:"skin" toml:"skin"`
+	Mine            MineConfig `json:"mine" toml:"mine"`
+}
+
+// FreeMemAfterJoinOn returns true unless explicitly set to false (defaults to true).
+func FreeMemAfterJoinOn(cfg Config) bool {
+	if cfg.FreeMemAfterJoin == nil {
+		return true
+	}
+	return *cfg.FreeMemAfterJoin
 }
 
 // ServerStallThreshold returns the configured duration without server packets before considering the server stalled.
@@ -117,15 +129,21 @@ func migrateConfig(cfg Config, fromVer, toVer int) Config {
 	return cfg
 }
 
-// LoadConfig reads config from a JSON file, validating schema and performing version migrations if needed.
+// LoadConfig reads config from a JSON or TOML file, validating schema and performing version migrations if needed.
 func LoadConfig(path string) (Config, error) {
 	var cfg Config
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return cfg, err
 	}
-	if err := json.Unmarshal(b, &cfg); err != nil {
-		return cfg, err
+	if strings.HasSuffix(strings.ToLower(path), ".toml") {
+		if err := toml.Unmarshal(b, &cfg); err != nil {
+			return cfg, err
+		}
+	} else {
+		if err := json.Unmarshal(b, &cfg); err != nil {
+			return cfg, err
+		}
 	}
 
 	migrated := false
@@ -164,10 +182,17 @@ func LoadConfig(path string) (Config, error) {
 	return cfg, nil
 }
 
-// SaveConfig writes config to a JSON file.
+// SaveConfig writes config to a JSON or TOML file depending on the file extension.
 func SaveConfig(path string, cfg Config) error {
 	if cfg.Version <= 0 {
 		cfg.Version = CurrentConfigVersion
+	}
+	if strings.HasSuffix(strings.ToLower(path), ".toml") {
+		data, err := toml.Marshal(cfg)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(path, data, 0644)
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {

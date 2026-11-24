@@ -63,7 +63,13 @@ func main() {
 	logWriter := io.MultiWriter(os.Stderr, fileLogger)
 	log.SetOutput(logWriter)
 
-	cfg, err := config.LoadConfig(*configPath)
+	resolvedConfig := *configPath
+	if !isFlagPassed("config") {
+		if _, err := os.Stat("config.toml"); err == nil {
+			resolvedConfig = "config.toml"
+		}
+	}
+	cfg, err := config.LoadConfig(resolvedConfig)
 	if err != nil {
 		log.Println("bebot:", err)
 		return

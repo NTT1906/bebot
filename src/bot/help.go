@@ -375,6 +375,13 @@ Examples:
   bebot count villagers
   bebot count golems`,
 
+	"mem": `§6=== Help: mem ===§r
+Description: Displays real-time Go runtime heap and OS memory metrics.
+Aliases: memory
+Syntax: mem
+Example:
+  !b mem`,
+
 	"bundletest": `§6=== Help: bundletest ===§r
 Description: Runs race-condition tests between two droppers/containers to analyze transfer timing.
 Syntax: bundletest <posA> <posB> [attempts] or bundletest stop
@@ -448,6 +455,7 @@ var aliasMapping = map[string]string{
 	"near":            "nearby",
 	"shake":           "headshake",
 	"stopjump":        "stopjump",
+	"memory":          "mem",
 	"reconnect":       "rejoin",
 	"exit":            "quit",
 }
@@ -521,6 +529,7 @@ func (b *Bot) helpCmd(p []string) {
 			"emote <name|uuid> [repeat] [length] / emote clear",
 			"emote add <name> <uuid> / remove <name> / list",
 			"headshake yes|no [repeat] / headshake clear",
+			"mem / memory - show memory & heap stats",
 			"quit / exit - disconnect bot",
 		},
 	}

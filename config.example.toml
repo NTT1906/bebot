@@ -1,0 +1,27 @@
+version = 1
+superuser = "YourUsername"
+free-mem-after-join = true
+commands-via-chat = false
+
+[server]
+host = "127.0.0.1"
+port = 19132
+version = "1.20.0"
+
+[target]
+x = 0.0
+y = 64.0
+z = 0.0
+
+[behaviour]
+reconnect-base-delay-ms = 5000
+walk-speed = 0.15
+render-distance = 4
+server-stall-threshold-ms = 250
+
+[skin]
+type = "slim"
+path = "skin/skin.png"
+
+[mine]
+timeout_sec = 3.0

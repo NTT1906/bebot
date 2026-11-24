@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -880,6 +881,23 @@ func (b *Bot) command(line string) {
 		b.nearby()
 	case "coords", "coord", "coordinates", "playercoords", "playerpos", "pos", "positions", "where":
 		b.coords()
+	case "mem", "memory":
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+
+		allocMB := float64(m.Alloc) / (1024 * 1024)
+		sysMB := float64(m.Sys) / (1024 * 1024)
+		inUseMB := float64(m.HeapInuse) / (1024 * 1024)
+		idleMB := float64(m.HeapIdle) / (1024 * 1024)
+		releasedMB := float64(m.HeapReleased) / (1024 * 1024)
+
+		lines := []string{
+			"§6--- Bebot Memory Stats ---§r",
+			fmt.Sprintf("Heap Alloc: %.2f MB | Sys: %.2f MB", allocMB, sysMB),
+			fmt.Sprintf("Heap InUse: %.2f MB | Idle: %.2f MB (Released: %.2f MB)", inUseMB, idleMB, releasedMB),
+			fmt.Sprintf("Goroutines: %d | GC Cycles: %d", runtime.NumGoroutine(), m.NumGC),
+		}
+		b.reply(strings.Join(lines, "\n"))
 	case "idle", "stop":
 		b.stopMiningArea()
 		b.stopBreaking()

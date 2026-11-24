@@ -8,6 +8,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -255,6 +256,7 @@ DiscoveryLoop:
 
 	log.Printf("bebot: joined local world %q at %.1f %.1f %.1f entity=%d gamemode=%d\n",
 		game.WorldName, b.pos.X(), b.pos.Y(), b.pos.Z(), b.entityID, game.PlayerGameMode)
+	b.schedulePostJoinMemoryFree()
 
 	done := make(chan error, 1)
 	go func() { done <- b.readPackets(c) }()
@@ -466,6 +468,7 @@ func (b *Bot) connect(ctx context.Context) error {
 	}
 	log.Printf("bebot: world time: startGameTime=%d dayCycleLockTime=%d doDaylightCycle=%v\n", game.Time, game.DayCycleLockTime, daylightCycle)
 	log.Printf("bebot: joined %s at %.1f %.1f %.1f entity=%d gamemode=%d dimension=%d seed=%d\n", address, b.pos.X(), b.pos.Y(), b.pos.Z(), b.entityID, game.PlayerGameMode, game.Dimension, game.WorldSeed)
+	b.schedulePostJoinMemoryFree()
 	log.Printf("bebot: movement settings rewind=%d server-authoritative-block-breaking=%v server-authoritative-inventory=%v interactions-disabled=%v chunk-radius=%d\n", game.PlayerMovementSettings.RewindHistorySize, game.PlayerMovementSettings.ServerAuthoritativeBlockBreaking, game.ServerAuthoritativeInventory, game.DisablePlayerInteractions, game.ChunkRadius)
 	done := make(chan error, 1)
 	go func() { done <- b.readPackets(c) }()
@@ -481,6 +484,29 @@ func (b *Bot) connect(ctx context.Context) error {
 		case <-t.C:
 			b.moveTick(c, false)
 		}
+	}
+}
+
+// schedulePostJoinMemoryFree waits for initial chunk/spawn allocations to settle, then trims OS memory.
+func (b *Bot) schedulePostJoinMemoryFree() {
+	if config.FreeMemAfterJoinOn(b.cfg) {
+		go func() {
+			time.Sleep(4 * time.Second)
+			b.mu.Lock()
+			conn := b.conn
+			b.mu.Unlock()
+			if conn == nil {
+				return
+			}
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			debug.FreeOSMemory()
+			runtime.ReadMemStats(&after)
+			log.Printf("bebot: post-join memory trim completed (Alloc: %.2f MB -> %.2f MB, Sys: %.2f MB -> %.2f MB)\n",
+				float64(before.Alloc)/(1024*1024), float64(after.Alloc)/(1024*1024),
+				float64(before.Sys)/(1024*1024), float64(after.Sys)/(1024*1024),
+			)
+		}()
 	}
 }
 

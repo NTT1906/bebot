@@ -101,3 +101,57 @@ func TestSaveConfig_SetsVersion(t *testing.T) {
 		t.Errorf("expected saved version %d, got %d", CurrentConfigVersion, reloaded.Version)
 	}
 }
+
+func TestLoadConfig_TOML(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	rawTOML := `version = 1
+superuser = "Arie1906"
+free-mem-after-join = true
+
+[server]
+host = "127.0.0.1"
+port = 19132
+
+[behaviour]
+walk-speed = 0.18
+render-distance = 2
+`
+	if err := os.WriteFile(configPath, []byte(rawTOML), 0644); err != nil {
+		t.Fatalf("failed to write TOML test file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig for TOML failed: %v", err)
+	}
+
+	if cfg.Version != 1 {
+		t.Errorf("expected version 1, got %d", cfg.Version)
+	}
+	if cfg.Superuser != "Arie1906" {
+		t.Errorf("expected superuser Arie1906, got %s", cfg.Superuser)
+	}
+	if !FreeMemAfterJoinOn(cfg) {
+		t.Error("expected FreeMemAfterJoinOn to be true")
+	}
+	if cfg.Behaviour.WalkSpeed != 0.18 {
+		t.Errorf("expected walkSpeed 0.18, got %f", cfg.Behaviour.WalkSpeed)
+	}
+	if cfg.Behaviour.RenderDistance != 2 {
+		t.Errorf("expected renderDistance 2, got %d", cfg.Behaviour.RenderDistance)
+	}
+
+	// Verify saving back to TOML
+	if err := SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig to TOML failed: %v", err)
+	}
+	reloaded, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("reloading saved TOML failed: %v", err)
+	}
+	if reloaded.Superuser != "Arie1906" {
+		t.Errorf("expected reloaded superuser Arie1906, got %s", reloaded.Superuser)
+	}
+}
