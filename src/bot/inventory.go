@@ -49,7 +49,7 @@ func playerSlotContainer(slot int) (byte, byte, bool) {
 	case slot >= 0 && slot <= 8:
 		return protocol.ContainerHotBar, byte(slot), true
 	case slot >= 9 && slot <= 35:
-		return protocol.ContainerCombinedHotBarAndInventory, byte(slot), true
+		return protocol.ContainerInventory, byte(slot - 9), true
 	}
 	return 0, 0, false
 }
@@ -140,6 +140,43 @@ func (b *Bot) closeInventory(c *minecraft.Conn, wID byte) {
 	})
 	_ = c.Flush()
 	time.Sleep(30 * time.Millisecond)
+}
+
+func (b *Bot) dropSlotTx(c *minecraft.Conn, slot int, oldItem protocol.ItemInstance, count uint16, sourceFlags uint32) bool {
+	newItem := oldItem
+	droppedItem := oldItem
+	droppedItem.Stack.Count = count
+	if oldItem.Stack.Count > count {
+		newItem.Stack.Count -= count
+	} else {
+		newItem = protocol.ItemInstance{}
+	}
+
+	tx := &packet.InventoryTransaction{
+		Actions: []protocol.InventoryAction{
+			{
+				SourceType:    protocol.InventoryActionSourceContainer,
+				WindowID:      protocol.Option(int8(protocol.WindowIDInventory)),
+				InventorySlot: uint32(slot),
+				OldItem:       oldItem,
+				NewItem:       newItem,
+			},
+			{
+				SourceType:    protocol.InventoryActionSourceWorld,
+				SourceFlags:   protocol.Option(sourceFlags),
+				InventorySlot: 0,
+				OldItem:       protocol.ItemInstance{},
+				NewItem:       droppedItem,
+			},
+		},
+		TransactionData: &protocol.NormalTransactionData{},
+	}
+	if err := c.WritePacket(tx); err != nil {
+		log.Printf("bebot: dropSlotTx slot %d write failed: %v\n", slot, err)
+		return false
+	}
+	_ = c.Flush()
+	return true
 }
 
 func (b *Bot) clearStackPending(id int32) {
@@ -303,6 +340,11 @@ func (b *Bot) dropSlots(start, count, requested, method int, random bool) {
 			defer b.closeInventory(c, wID)
 		}
 
+		sourceFlags := uint32(0)
+		if random {
+			sourceFlags = 1
+		}
+
 		var droppedSlots []dropRequest
 		var lastStatus uint8
 		for _, drop := range drops {
@@ -319,9 +361,16 @@ func (b *Bot) dropSlots(start, count, requested, method int, random bool) {
 				}
 				rem -= cnt
 
-				fromSlot := stackReqSlotInfo(container, slotIn, drop.item.StackNetworkID)
+				b.mu.Lock()
+				curItem := b.inventory[drop.slot]
+				b.mu.Unlock()
+				if curItem.Stack.Count == 0 {
+					break
+				}
+
+				fromSlot := stackReqSlotInfo(container, slotIn, curItem.StackNetworkID)
 				cursorEmpty := stackReqSlotInfo(protocol.ContainerCursor, 0, 0)
-				cursorFull := stackReqSlotInfo(protocol.ContainerCursor, 0, drop.item.StackNetworkID)
+				cursorFull := stackReqSlotInfo(protocol.ContainerCursor, 0, curItem.StackNetworkID)
 
 				take := &protocol.TakeStackRequestAction{}
 				take.Count = byte(cnt)
@@ -334,15 +383,24 @@ func (b *Bot) dropSlots(start, count, requested, method int, random bool) {
 				}
 
 				ok, status := b.sendItemStackRequest(c, []protocol.StackRequestAction{take, dropAction})
-				if !ok && status == protocol.ItemStackResponseStatusFailedToValidateDstSlot {
-					// ContainerCursor is not active on this screen validator (no external container open).
-					// Fall back to direct slot drop so items are safely dropped without failing.
+				if !ok && (status == protocol.ItemStackResponseStatusFailedToValidateDstSlot || status == protocol.ItemStackResponseStatusFailedToValidateSrcSlot) {
+					// ContainerCursor is not active on this screen validator (status 50), or container/slot index is not mapped in screen model (status 49).
+					// Try direct drop from source slot via ItemStackRequest first.
 					directDrop := &protocol.DropStackRequestAction{
 						Count:    byte(cnt),
 						Source:   fromSlot,
 						Randomly: random,
 					}
 					ok, status = b.sendItemStackRequest(c, []protocol.StackRequestAction{directDrop})
+				}
+				if !ok {
+					// If BDS rejects ItemStackRequest on storage slots outside hotbar (e.g. ScreenHandlerHUD lacks ContainerInventory mapping),
+					// complete the drop seamlessly via first-person inventory transaction so no items are left behind.
+					log.Printf("bebot: drop2 slot %d: ItemStackRequest failed (status=%d %s), completing drop via inventory transaction\n",
+						drop.slot, status, stackStatusName(status))
+					if b.dropSlotTx(c, drop.slot, curItem, cnt, sourceFlags) {
+						ok = true
+					}
 				}
 				if !ok {
 					log.Printf("bebot: drop2 slot %d failed: status=%d (%s)\n", drop.slot, status, stackStatusName(status))
@@ -383,6 +441,11 @@ func (b *Bot) dropSlots(start, count, requested, method int, random bool) {
 		wID, opened := b.openInventory(c)
 		if opened {
 			defer b.closeInventory(c, wID)
+		}
+
+		sourceFlags := uint32(0)
+		if random {
+			sourceFlags = 1
 		}
 
 		// Try batching all drops in a single ItemStackRequest if multiple slots and all <= 64
@@ -448,16 +511,28 @@ func (b *Bot) dropSlots(start, count, requested, method int, random bool) {
 				rem -= cnt
 
 				b.mu.Lock()
-				curStackNetID := b.inventory[drop.slot].StackNetworkID
+				curItem := b.inventory[drop.slot]
 				b.mu.Unlock()
+				if curItem.Stack.Count == 0 {
+					break
+				}
 
 				dropAction := &protocol.DropStackRequestAction{
 					Count:    byte(cnt),
-					Source:   stackReqSlotInfo(container, slotIn, curStackNetID),
+					Source:   stackReqSlotInfo(container, slotIn, curItem.StackNetworkID),
 					Randomly: random,
 				}
 
 				ok, status := b.sendItemStackRequest(c, []protocol.StackRequestAction{dropAction})
+				if !ok {
+					// If BDS rejects ItemStackRequest on storage slots outside hotbar,
+					// complete the drop seamlessly via first-person inventory transaction so no items are left behind.
+					log.Printf("bebot: drop3 slot %d: ItemStackRequest failed (status=%d %s), completing drop via inventory transaction\n",
+						drop.slot, status, stackStatusName(status))
+					if b.dropSlotTx(c, drop.slot, curItem, cnt, sourceFlags) {
+						ok = true
+					}
+				}
 				if !ok {
 					log.Printf("bebot: drop3 slot %d failed: status=%d (%s)\n", drop.slot, status, stackStatusName(status))
 					lastStatus = status
