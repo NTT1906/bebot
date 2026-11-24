@@ -931,11 +931,6 @@ func (b *Bot) handleSleepCmd(p []string) {
 			return
 		}
 	}
-	// Try finding a nearby bed in loaded blocks
-	if bedPos, found := b.findNearbyBed(); found {
-		go b.interactBed(bedPos)
-		return
-	}
 	// Fallback to the block directly in front of the bot
 	b.mu.Lock()
 	yaw := b.facingYaw
