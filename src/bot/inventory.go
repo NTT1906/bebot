@@ -795,16 +795,190 @@ func (b *Bot) sendHeldItem(c *minecraft.Conn) {
 	}
 }
 
-func (b *Bot) interactBlock(pos protocol.BlockPos) {
+var bedRuntimeIDs = map[uint32]bool{
+	3410626621: true,
+	718041354:  true,
+	719534736:  true,
+	1960963872: true,
+	3285865971: true,
+	1774841307: true,
+	434679272:  true,
+	3462326488: true,
+	133499295:  true,
+	860680903:  true,
+	2902676369: true,
+	2230559400: true,
+	2355320050: true,
+	295709842:  true,
+	2937564980: true,
+	3234261058: true,
+	3739980241: true,
+	3744311979: true,
+	3450205046: true,
+	2494858773: true,
+	2573455936: true,
+	4160501005: true,
+	1773347925: true,
+	2944348693: true,
+	3165813567: true,
+	2108673487: true,
+	2903006083: true,
+	468715448:  true,
+	2689005408: true,
+	3492496094: true,
+	4078278255: true,
+	1847699512: true,
+}
+
+func (b *Bot) findNearbyBed() (protocol.BlockPos, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.conn == nil {
+	botPos := b.pos
+	bestDist := float32(math.MaxFloat32)
+	var bestPos protocol.BlockPos
+	found := false
+
+	bx, by, bz := int32(math.Floor(float64(botPos.X()))), int32(math.Floor(float64(botPos.Y()))), int32(math.Floor(float64(botPos.Z())))
+	for dx := int32(-4); dx <= 4; dx++ {
+		for dy := int32(-2); dy <= 2; dy++ {
+			for dz := int32(-4); dz <= 4; dz++ {
+				pos := protocol.BlockPos{bx + dx, by + dy, bz + dz}
+				rid, ok := b.blockRuntimeIDs[pos]
+				if ok && bedRuntimeIDs[rid] {
+					diff := mgl32.Vec3{float32(pos.X()) + 0.5 - botPos.X(), float32(pos.Y()) + 0.5 - (botPos.Y() + 1.62), float32(pos.Z()) + 0.5 - botPos.Z()}
+					dist := float32(math.Sqrt(float64(diff.Dot(diff))))
+					if dist < bestDist {
+						bestDist = dist
+						bestPos = pos
+						found = true
+					}
+				}
+			}
+		}
+	}
+	return bestPos, found
+}
+
+func (b *Bot) interactBed(pos protocol.BlockPos) {
+	b.mu.Lock()
+	c := b.conn
+	entityID := b.entityID
+	if c == nil {
+		b.mu.Unlock()
+		b.reply("Cannot sleep: not connected.")
 		return
 	}
-	_ = b.conn.WritePacket(&packet.Interact{ActionType: packet.InteractActionMouseOverEntity, TargetEntityRuntimeID: 0})
-	_ = b.conn.WritePacket(&packet.PlayerAction{EntityRuntimeID: b.entityID, ActionType: protocol.PlayerActionStartSleeping, BlockPosition: pos, ResultPosition: pos, BlockFace: 1})
-	_ = b.conn.WritePacket(&packet.PlayerAction{EntityRuntimeID: b.entityID, ActionType: protocol.PlayerActionStartItemUseOn, BlockPosition: pos, ResultPosition: pos, BlockFace: 1})
-	_ = b.conn.Flush()
+	botPos := b.pos
+	hotbarSlot := b.hotbarSlot
+	heldItem := b.heldItem
+	curRuntimeID := b.blockRuntimeIDs[pos]
+	b.mu.Unlock()
+
+	centerPos := mgl32.Vec3{float32(pos.X()) + 0.5, float32(pos.Y()) + 0.5, float32(pos.Z()) + 0.5}
+	eyePos := b.playerEyePos()
+	diff := centerPos.Sub(eyePos)
+	dist := diff.Len()
+	if dist > 5.5 {
+		b.reply(fmt.Sprintf("Bed at %v is too far away (%.1f blocks, max 5.5).", pos, dist))
+		return
+	}
+
+	face := int32(1) // Top face (UP) is standard for beds
+	clickPos := faceClickPosition(face)
+	targetPos := mgl32.Vec3{
+		float32(pos.X()) + clickPos.X(),
+		float32(pos.Y()) + clickPos.Y(),
+		float32(pos.Z()) + clickPos.Z(),
+	}
+
+	dx := float64(targetPos.X()) - float64(eyePos.X())
+	dy := float64(targetPos.Y()) - float64(eyePos.Y())
+	dz := float64(targetPos.Z()) - float64(eyePos.Z())
+	horizontal := math.Sqrt(dx*dx + dz*dz)
+	yaw := float32(0)
+	if horizontal > 0.001 {
+		yaw = float32(math.Atan2(-dx, dz) * 180 / math.Pi)
+		if yaw < 0 {
+			yaw += 360
+		}
+	}
+	pitch := float32(-math.Atan2(dy, horizontal) * 180 / math.Pi)
+
+	b.mu.Lock()
+	b.facingYaw = yaw
+	b.facingPitch = pitch
+	b.idleYaw = yaw
+	b.idlePitch = pitch
+	b.spawnPos = pos
+	b.isSleeping = true
+	b.mu.Unlock()
+
+	// Wait 100ms for moveTick to transmit updated facing yaw and pitch to the server
+	time.Sleep(100 * time.Millisecond)
+
+	b.mu.Lock()
+	botPos = b.pos
+	hotbarSlot = b.hotbarSlot
+	heldItem = b.heldItem
+	if rid, ok := b.blockRuntimeIDs[pos]; ok {
+		curRuntimeID = rid
+	}
+	b.mu.Unlock()
+
+	b.markPacketSent(fmt.Sprintf("InventoryTransaction (UseItemActionClickBlock bed pos=%v face=%d runtimeID=%d)", pos, face, curRuntimeID))
+	_ = c.WritePacket(&packet.InventoryTransaction{
+		TransactionData: &protocol.UseItemTransactionData{
+			ActionType:       protocol.UseItemActionClickBlock,
+			TriggerType:      protocol.TriggerTypePlayerInput,
+			BlockPosition:    pos,
+			BlockFace:        face,
+			HotBarSlot:       int32(hotbarSlot),
+			HeldItem:         heldItem,
+			Position:         botPos,
+			ClickedPosition:  clickPos,
+			BlockRuntimeID:   curRuntimeID,
+			ClientPrediction: protocol.ClientPredictionSuccess,
+		},
+	})
+	_ = c.WritePacket(&packet.Animate{
+		ActionType:      packet.AnimateActionSwingArm,
+		EntityRuntimeID: entityID,
+	})
+	_ = c.WritePacket(&packet.PlayerAction{
+		EntityRuntimeID: entityID,
+		ActionType:      protocol.PlayerActionStartSleeping,
+		BlockPosition:   pos,
+		ResultPosition:  pos,
+		BlockFace:       face,
+	})
+	_ = c.Flush()
+
+	log.Printf("bebot: interacted with bed at %v (dist=%.2f, runtimeID=%d)\n", pos, dist, curRuntimeID)
+	b.reply(fmt.Sprintf("Interacted with bed at (%d, %d, %d). Send 'wakeup' to leave bed.", pos.X(), pos.Y(), pos.Z()))
+}
+
+func (b *Bot) wakeUp() {
+	b.mu.Lock()
+	c := b.conn
+	entityID := b.entityID
+	pos := b.spawnPos
+	b.isSleeping = false
+	b.mu.Unlock()
+
+	if c == nil {
+		b.reply("Cannot wake up: not connected.")
+		return
+	}
+	_ = c.WritePacket(&packet.PlayerAction{
+		EntityRuntimeID: entityID,
+		ActionType:      protocol.PlayerActionStopSleeping,
+		BlockPosition:   pos,
+		ResultPosition:  pos,
+		BlockFace:       -1,
+	})
+	_ = c.Flush()
+	log.Printf("bebot: woke up from bed at %v\n", pos)
+	b.reply("Woke up from bed.")
 }
 
 func (b *Bot) itemNameLocked(netID int32) string {

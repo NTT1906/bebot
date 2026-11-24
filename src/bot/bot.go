@@ -111,6 +111,7 @@ type Bot struct {
 	lookAtTarget                 string
 	lookAtPos                    *mgl32.Vec3
 	spawnPos                     protocol.BlockPos
+	isSleeping                   bool
 	entityID                     uint64
 	gameMode                     int32
 	serverAuthoritativeInventory bool

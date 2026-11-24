@@ -474,15 +474,9 @@ func (b *Bot) command(line string) {
 			b.reply(fmt.Sprintf("Requested chunk radius update to %d", dist))
 		}
 	case "sleep":
-		var x, y, z int32
-		if len(p) >= 4 {
-			fmt.Sscanf(strings.Join(p[1:4], " "), "%d %d %d", &x, &y, &z)
-		} else {
-			x, y, z = int32(math.Floor(float64(b.pos.X()))), int32(math.Floor(float64(b.pos.Y()))), int32(math.Floor(float64(b.pos.Z())))
-		}
-		b.spawnPos = protocol.BlockPos{x, y, z}
-		b.interactBlock(b.spawnPos)
-		log.Printf("bebot: sleep/spawn checkpoint requested at %d %d %d\n", x, y, z)
+		b.handleSleepCmd(p)
+	case "wake", "wakeup", "unsleep":
+		b.wakeUp()
 	case "break", "breakat", "breakcoord", "mine", "mineat", "minearea", "minespace", "breakarea", "breakspace", "mineloop", "minefarm", "minetimeout", "learn", "learnair", "calibrate", "minelearn", "minecalibrate":
 		if strings.EqualFold(p[0], "learn") || strings.EqualFold(p[0], "learnair") || strings.EqualFold(p[0], "calibrate") ||
 			strings.EqualFold(p[0], "minelearn") || strings.EqualFold(p[0], "minecalibrate") ||
@@ -907,7 +901,8 @@ func (b *Bot) help() {
 		"close - close currently open container",
 		"bundletest <ax ay az> <bx by bz> [attempts] - race-condition test: repeatedly open two droppers to observe bundle transfer timing",
 		"bundletest stop - stop a running bundle test",
-		"sleep [x y z] - set a sleep/spawn checkpoint",
+		"sleep [x y z] - interact with a bed to sleep and set spawn (or 'sleep wake' to wake up)",
+		"wakeup - wake up from bed",
 		"players / list - list online players",
 		"nearby - list nearby players",
 		"coords - show coordinates",
@@ -922,4 +917,33 @@ func (b *Bot) help() {
 	for _, line := range lines {
 		b.reply(line)
 	}
+}
+
+func (b *Bot) handleSleepCmd(p []string) {
+	if len(p) >= 2 && (strings.EqualFold(p[1], "wake") || strings.EqualFold(p[1], "stop") || strings.EqualFold(p[1], "up") || strings.EqualFold(p[1], "leave")) {
+		b.wakeUp()
+		return
+	}
+	if len(p) >= 4 {
+		var x, y, z int32
+		if _, err := fmt.Sscanf(strings.Join(p[1:4], " "), "%d %d %d", &x, &y, &z); err == nil {
+			go b.interactBed(protocol.BlockPos{x, y, z})
+			return
+		}
+	}
+	// Try finding a nearby bed in loaded blocks
+	if bedPos, found := b.findNearbyBed(); found {
+		go b.interactBed(bedPos)
+		return
+	}
+	// Fallback to the block directly in front of the bot
+	b.mu.Lock()
+	yaw := b.facingYaw
+	botPos := b.pos
+	b.mu.Unlock()
+	rad := float64(yaw) * math.Pi / 180
+	frontX := int32(math.Floor(float64(botPos.X() - float32(math.Sin(rad))*1.2)))
+	frontY := int32(math.Floor(float64(botPos.Y())))
+	frontZ := int32(math.Floor(float64(botPos.Z() + float32(math.Cos(rad))*1.2)))
+	go b.interactBed(protocol.BlockPos{frontX, frontY, frontZ})
 }

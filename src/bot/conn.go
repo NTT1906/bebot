@@ -521,6 +521,13 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 				b.commandFromChat(p.SourceName, p.Message)
 			case packet.TextTypeWhisper:
 				b.handleWhisper(p.SourceName, p.Message)
+			case packet.TextTypeTranslation, packet.TextTypeTip, packet.TextTypeSystem, packet.TextTypePopup:
+				if strings.Contains(p.Message, "tile.bed") {
+					log.Printf("bebot: bed message: %s params=%v\n", p.Message, p.Parameters)
+					if bedMsg := formatBedTranslation(p.Message); bedMsg != "" {
+						b.reply(bedMsg)
+					}
+				}
 			}
 		case *packet.Transfer:
 			return fmt.Errorf("server requested transfer to %s:%d; reconnecting to configured target", p.Address, p.Port)
@@ -1050,4 +1057,25 @@ func (b *Bot) scheduleReconnect() {
 			_ = c.Close()
 		}
 	}()
+}
+
+func formatBedTranslation(msg string) string {
+	switch {
+	case strings.Contains(msg, "notSafe"):
+		return "You may not rest now; there are monsters nearby."
+	case strings.Contains(msg, "notValid"):
+		return "Your home bed was missing or obstructed."
+	case strings.Contains(msg, "occupied"):
+		return "This bed is occupied."
+	case strings.Contains(msg, "noSleep"):
+		return "You can sleep only at night and during thunderstorms."
+	case strings.Contains(msg, "tooFar"):
+		return "The bed is too far away."
+	case strings.Contains(msg, "respawnSet"):
+		return "Respawn point set."
+	case strings.Contains(msg, "obstructed"):
+		return "This bed is obstructed."
+	default:
+		return ""
+	}
 }
