@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "superuser": "YourUsername",
+  "server": {
+    "host": "127.0.0.1",
+    "port": 19132,
+    "version": "1.20.0"
+  },
+  "target": {
+    "x": 0,
+    "y": 64,
+    "z": 0
+  },
+  "behaviour": {
+    "reconnectBaseDelayMs": 5000,
+    "walkSpeed": 0.15,
+    "renderDistance": 4,
+    "serverStallThresholdMs": 250
+  },
+  "commands_via_chat": false,
+  "skin": {
+    "type": "slim",
+    "path": "skin/skin.png"
+  },
+  "mine": {
+    "timeout_sec": 3.0
+  }
+}

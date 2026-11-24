@@ -3,9 +3,13 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"time"
 )
+
+// CurrentConfigVersion defines the latest schema version of config.json.
+const CurrentConfigVersion = 1
 
 // SkinConfig holds the bot's skin in a dedicated skin.json file.
 type SkinConfig struct {
@@ -39,18 +43,20 @@ const DefaultServerStallThresholdMs = 250
 
 // Config represents the top-level configuration loaded from config.json.
 type Config struct {
+	Version   int    `json:"version"`
 	Superuser string `json:"superuser"`
 	Server    struct {
 		Host    string `json:"host"`
 		Port    int    `json:"port"`
-		Version string `json:"version"`
+		Version string `json:"version,omitempty"`
 	} `json:"server"`
 	Target    struct{ X, Y, Z float32 } `json:"target"`
 	Behaviour struct {
-		ReconnectBaseDelayMs, AfkJumpIntervalMs int
-		WalkSpeed                               float32
-		RenderDistance                          int32 `json:"renderDistance"`
-		ServerStallThresholdMs                  int   `json:"serverStallThresholdMs"`
+		ReconnectBaseDelayMs int     `json:"reconnectBaseDelayMs"`
+		AfkJumpIntervalMs    int     `json:"afkJumpIntervalMs,omitempty"` // deprecated
+		WalkSpeed            float32 `json:"walkSpeed"`
+		RenderDistance       int32   `json:"renderDistance"`
+		ServerStallThresholdMs int   `json:"serverStallThresholdMs"`
 	} `json:"behaviour"`
 	CommandsViaChat *bool      `json:"commands_via_chat"`
 	Skin            SkinConfig `json:"skin"`
@@ -83,7 +89,35 @@ func BaseReconnectDelay(cfg Config) time.Duration {
 	return d
 }
 
-// LoadConfig reads config from a JSON file.
+// migrateConfig migrates a config from an older schema version to the target version.
+func migrateConfig(cfg Config, fromVer, toVer int) Config {
+	for v := fromVer; v < toVer; v++ {
+		switch v {
+		case 0:
+			// Migration from v0 (unversioned legacy) to v1
+			cfg.Version = 1
+			if cfg.Behaviour.RenderDistance <= 0 {
+				cfg.Behaviour.RenderDistance = DefaultRenderDistance
+			}
+			if cfg.Behaviour.ServerStallThresholdMs <= 0 {
+				cfg.Behaviour.ServerStallThresholdMs = DefaultServerStallThresholdMs
+			}
+			if cfg.Behaviour.WalkSpeed <= 0 {
+				cfg.Behaviour.WalkSpeed = 0.15
+			}
+			if cfg.Behaviour.ReconnectBaseDelayMs <= 0 {
+				cfg.Behaviour.ReconnectBaseDelayMs = 5000
+			}
+			if cfg.Mine.TimeoutSec <= 0 {
+				cfg.Mine.TimeoutSec = 3.0
+			}
+			cfg.Behaviour.AfkJumpIntervalMs = 0
+		}
+	}
+	return cfg
+}
+
+// LoadConfig reads config from a JSON file, validating schema and performing version migrations if needed.
 func LoadConfig(path string) (Config, error) {
 	var cfg Config
 	b, err := os.ReadFile(path)
@@ -93,6 +127,15 @@ func LoadConfig(path string) (Config, error) {
 	if err := json.Unmarshal(b, &cfg); err != nil {
 		return cfg, err
 	}
+
+	migrated := false
+	if cfg.Version < CurrentConfigVersion {
+		migrated = true
+		cfg = migrateConfig(cfg, cfg.Version, CurrentConfigVersion)
+	} else if cfg.Version > CurrentConfigVersion {
+		log.Printf("bebot: warning: config version %d is newer than supported version %d\n", cfg.Version, CurrentConfigVersion)
+	}
+
 	if cfg.Server.Host == "" {
 		return cfg, fmt.Errorf("server.host is required")
 	}
@@ -102,11 +145,30 @@ func LoadConfig(path string) (Config, error) {
 	if cfg.Behaviour.ServerStallThresholdMs <= 0 {
 		cfg.Behaviour.ServerStallThresholdMs = DefaultServerStallThresholdMs
 	}
+	if cfg.Behaviour.WalkSpeed <= 0 {
+		cfg.Behaviour.WalkSpeed = 0.15
+	}
+	if cfg.Behaviour.ReconnectBaseDelayMs <= 0 {
+		cfg.Behaviour.ReconnectBaseDelayMs = 5000
+	}
+	if cfg.Mine.TimeoutSec <= 0 {
+		cfg.Mine.TimeoutSec = 3.0
+	}
+
+	if migrated {
+		if err := SaveConfig(path, cfg); err == nil {
+			log.Printf("bebot: upgraded %s to config version %d\n", path, cfg.Version)
+		}
+	}
+
 	return cfg, nil
 }
 
 // SaveConfig writes config to a JSON file.
 func SaveConfig(path string, cfg Config) error {
+	if cfg.Version <= 0 {
+		cfg.Version = CurrentConfigVersion
+	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err

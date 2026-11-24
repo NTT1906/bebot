@@ -13,6 +13,7 @@ Before running the bot, configure the `config.json` file in the project root. If
 ```json
 {
   "_comment": "Edit this file to configure the bot.",
+  "version": 1,
   "superuser": "YourUsername",
   "_comment_superuser": "Only this player can control the bot via chat commands.",
   "server": {
