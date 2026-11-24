@@ -49,7 +49,7 @@ func playerSlotContainer(slot int) (byte, byte, bool) {
 	case slot >= 0 && slot <= 8:
 		return protocol.ContainerHotBar, byte(slot), true
 	case slot >= 9 && slot <= 35:
-		return protocol.ContainerInventory, byte(slot), true
+		return protocol.ContainerInventory, byte(slot - 9), true
 	}
 	return 0, 0, false
 }
@@ -128,9 +128,10 @@ func (b *Bot) openInventory(c *minecraft.Conn) (byte, bool) {
 
 func (b *Bot) closeInventory(c *minecraft.Conn, wID byte) {
 	b.mu.Lock()
-	if b.containerActive && (wID == b.containerWindowID || wID == 0) {
-		b.containerActive = false
+	if b.containerActive && b.containerWindowID != 0 {
+		wID = b.containerWindowID
 	}
+	b.containerActive = false
 	b.mu.Unlock()
 	_ = c.WritePacket(&packet.ContainerClose{
 		WindowID:      wID,
@@ -333,6 +334,16 @@ func (b *Bot) dropSlots(start, count, requested, method int, random bool) {
 				}
 
 				ok, status := b.sendItemStackRequest(c, []protocol.StackRequestAction{take, dropAction})
+				if !ok && status == protocol.ItemStackResponseStatusFailedToValidateDstSlot {
+					// ContainerCursor is not active on this screen validator (no external container open).
+					// Fall back to direct slot drop so items are safely dropped without failing.
+					directDrop := &protocol.DropStackRequestAction{
+						Count:    byte(cnt),
+						Source:   fromSlot,
+						Randomly: random,
+					}
+					ok, status = b.sendItemStackRequest(c, []protocol.StackRequestAction{directDrop})
+				}
 				if !ok {
 					log.Printf("bebot: drop2 slot %d failed: status=%d (%s)\n", drop.slot, status, stackStatusName(status))
 					lastStatus = status

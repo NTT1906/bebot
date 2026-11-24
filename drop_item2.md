@@ -176,6 +176,35 @@ In Minecraft Bedrock, bundles inside personal inventory slots are single items (
 
 ---
 
+### Pitfall 6: `ContainerInventory` Zero-Indexed Slot Offset (`slot - 9`)
+* **The BDS Protocol Architecture:**
+  * `ContainerHotBar` (ID 32 / `hotbar_items`): 9 slots, indexed `0` through `8`. Maps directly to player inventory slots `0` through `8`.
+  * `ContainerInventory` (ID 33 / `inventory_items`): 27 slots, strictly indexed `0` through `26`. Maps to player inventory slots `9` through `35`.
+* **The Bug:**
+  Previously, `playerSlotContainer` returned `protocol.ContainerInventory, byte(slot)` without subtracting 9.
+  * When attempting to drop slot 9, it sent `slot: 9` in `ContainerInventory`.
+  * BDS interpreted `slot: 9` in `ContainerInventory` as the 10th slot of the backpack ($9 + 9 = \text{player slot } 18$). Because player slot 18 was empty, BDS rejected the transaction with `status=49 (failed to validate source slot)`.
+  * This also caused batch requests in `dropall3` to fail atomically whenever items were present in slots 9–35, forcing fallback to slot-by-slot mode where slots 0–8 succeeded but 9+ failed.
+* **The Fix:**
+  * `playerSlotContainer` maps slots $9 \le \text{slot} \le 35$ to `protocol.ContainerInventory, byte(slot - 9)`.
+  * `conn.go` translates incoming `ItemStackResponse` for `ContainerInventory` with `slotIdx = int(sInfo.Slot) + 9`.
+  * With all slots valid, `dropall3` executes in a **single atomic batch packet**, dropping all items in one tick.
+
+---
+
+### Pitfall 7: `ContainerCursor` Destination Slot Validation (`status=50`)
+* **What Happened:**
+  In `drop2` / `dropall2`, `TakeStackRequestAction` to `protocol.ContainerCursor` (ID 63 / 59) returned:
+  ```
+  inventory request=-861 rejected status=50 (failed to validate destination slot)
+  ```
+* **The Protocol Cause:**
+  BDS only instantiates `PlayerCursorContainer` when an external container (chest, dropper, barrel, etc.) is open via a server-authoritative `ContainerManagerModel`. When only the player's personal inventory screen is open, BDS does not register a virtual cursor container.
+* **The Fix:**
+  If `take` to `ContainerCursor` is rejected with `status=50`, Bebot automatically falls back to executing `DropStackRequestAction` directly from the source slot. This ensures `drop2` / `dropall2` seamlessly drops items regardless of whether an external container or only the player inventory is active.
+
+---
+
 ## 4. Bebot Implementation & Command Reference
 
 Implemented in [src/bot/inventory.go](file:///d:/code/goland/bebot/src/bot/inventory.go) and [src/bot/chat.go](file:///d:/code/goland/bebot/src/bot/chat.go):

@@ -837,7 +837,7 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 							case protocol.ContainerHotBar:
 								slotIdx = int(sInfo.Slot)
 							case protocol.ContainerInventory:
-								slotIdx = int(sInfo.Slot)
+								slotIdx = int(sInfo.Slot) + 9
 							case protocol.ContainerCombinedHotBarAndInventory:
 								slotIdx = int(sInfo.Slot)
 							}
