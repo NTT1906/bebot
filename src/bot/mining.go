@@ -79,6 +79,10 @@ func (b *Bot) stopBreaking() {
 func (b *Bot) getBreakDuration() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	return b.getBreakDurationLocked()
+}
+
+func (b *Bot) getBreakDurationLocked() int {
 	if b.hasteLevel >= 2 {
 		return 1
 	}
@@ -328,7 +332,7 @@ func (b *Bot) handleUpdateBlock(pos protocol.BlockPos, runtimeID uint32) {
 	b.mu.Lock()
 	if b.mineLearnActive && pos == b.mineLearnPos {
 		isCreative := b.gameMode == 1 || b.gameMode == 4
-		hasBroken := b.mineLearnWasBroken || isCreative || b.breakTicks >= b.getBreakDuration()
+		hasBroken := b.mineLearnWasBroken || isCreative || b.breakTicks >= b.getBreakDurationLocked()
 		isDifferent := b.mineLearnInitialRuntimeID != 0 && runtimeID != b.mineLearnInitialRuntimeID
 
 		if !hasBroken && !isDifferent {
