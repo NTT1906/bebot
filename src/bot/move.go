@@ -250,20 +250,37 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 		}
 		b.pos = b.pos.Add(mgl32.Vec3{dx / hDist * step, 0, dz / hDist * step})
 	}
-	if dy > .4 && b.velocityY == 0 {
+	b.mu.Lock()
+	if b.jumpIntervalTicks > 0 {
+		b.jumpTicks++
+		if b.jumpTicks >= b.jumpIntervalTicks {
+			jump = true
+			b.jumpTicks = 0
+		}
+	}
+	b.mu.Unlock()
+
+	if b.moving && dy > .4 && b.velocityY == 0 {
 		jump = true
 	}
 	if (b.mode == modeMimic || b.mode == modeFollowing) && targetPlayer.id != 0 && targetPlayer.jumping {
 		jump = true
 	}
+	if b.velocityY == 0 {
+		b.jumpBaseY = b.pos.Y()
+	}
 	if jump && b.velocityY == 0 {
 		b.velocityY = .42
 	}
-	if b.velocityY != 0 || b.pos.Y() > target.Y()+.6 {
+	baseY := target.Y()
+	if b.mode == modeIdle || b.mode == modeCamic || b.mode == modeLookAt || !b.moving {
+		baseY = b.jumpBaseY
+	}
+	if b.velocityY != 0 || b.pos.Y() > baseY+.6 {
 		b.velocityY -= .08
 		b.pos[1] += b.velocityY
-		if b.pos.Y() <= target.Y() {
-			b.pos[1] = target.Y()
+		if b.pos.Y() <= baseY {
+			b.pos[1] = baseY
 			b.velocityY = 0
 		}
 	}
@@ -275,7 +292,7 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 	} else {
 		b.stuckTicks = 0
 	}
-	if b.stuckTicks > 2 {
+	if b.moving && b.stuckTicks > 2 {
 		jump = true
 	}
 

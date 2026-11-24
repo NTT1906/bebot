@@ -393,6 +393,40 @@ func (b *Bot) command(line string) {
 	case "unsneak":
 		b.sneaking = false
 		b.reply("Sneaking disabled.")
+	case "jump":
+		if len(p) > 1 && (strings.EqualFold(p[1], "off") || strings.EqualFold(p[1], "stop") || strings.EqualFold(p[1], "0") || strings.EqualFold(p[1], "false") || strings.EqualFold(p[1], "clear")) {
+			b.mu.Lock()
+			b.jumpIntervalTicks = 0
+			b.jumpTicks = 0
+			b.mu.Unlock()
+			b.reply("Periodic jumping disabled.")
+			return
+		}
+		freqSec := 10.0
+		if len(p) > 1 {
+			val, err := strconv.ParseFloat(p[1], 64)
+			if err != nil || val <= 0 {
+				b.reply("Usage: jump [freq_seconds, default: 10] | jump stop")
+				return
+			}
+			freqSec = val
+		}
+		ticks := int(freqSec * 20)
+		if ticks < 10 {
+			ticks = 10
+			freqSec = 0.5
+		}
+		b.mu.Lock()
+		b.jumpIntervalTicks = ticks
+		b.jumpTicks = ticks
+		b.mu.Unlock()
+		b.reply(fmt.Sprintf("Periodic jumping enabled (jumping every %.1fs).", freqSec))
+	case "stopjump":
+		b.mu.Lock()
+		b.jumpIntervalTicks = 0
+		b.jumpTicks = 0
+		b.mu.Unlock()
+		b.reply("Periodic jumping disabled.")
 	case "headshake", "shake":
 		if len(p) >= 2 && strings.EqualFold(p[1], "clear") {
 			b.headshake = headshakeNone
@@ -816,6 +850,10 @@ func (b *Bot) command(line string) {
 		b.lookAtTarget = ""
 		b.lookAtPos = nil
 		b.velocityY = 0
+		b.mu.Lock()
+		b.jumpIntervalTicks = 0
+		b.jumpTicks = 0
+		b.mu.Unlock()
 		if len(p) > 1 && strings.EqualFold(p[1], "reset") {
 			b.idleYaw = 0
 			b.idlePitch = 0

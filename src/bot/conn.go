@@ -260,13 +260,6 @@ DiscoveryLoop:
 	go func() { done <- b.readPackets(c) }()
 	t := time.NewTicker(50 * time.Millisecond)
 	defer t.Stop()
-	var afk *time.Ticker
-	var afkChannel <-chan time.Time
-	if b.cfg.Behaviour.AfkJumpIntervalMs > 0 {
-		afk = time.NewTicker(time.Duration(b.cfg.Behaviour.AfkJumpIntervalMs) * time.Millisecond)
-		defer afk.Stop()
-		afkChannel = afk.C
-	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -276,8 +269,6 @@ DiscoveryLoop:
 			return fmt.Errorf("connection reader: %s", ExplainError(err))
 		case <-t.C:
 			b.moveTick(c, false)
-		case <-afkChannel:
-			b.moveTick(c, true)
 		}
 	}
 }
@@ -480,13 +471,6 @@ func (b *Bot) connect(ctx context.Context) error {
 	go func() { done <- b.readPackets(c) }()
 	t := time.NewTicker(50 * time.Millisecond)
 	defer t.Stop()
-	var afk *time.Ticker
-	var afkChannel <-chan time.Time
-	if b.cfg.Behaviour.AfkJumpIntervalMs > 0 {
-		afk = time.NewTicker(time.Duration(b.cfg.Behaviour.AfkJumpIntervalMs) * time.Millisecond)
-		defer afk.Stop()
-		afkChannel = afk.C
-	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -496,8 +480,6 @@ func (b *Bot) connect(ctx context.Context) error {
 			return fmt.Errorf("connection reader: %s", ExplainError(err))
 		case <-t.C:
 			b.moveTick(c, false)
-		case <-afkChannel:
-			b.moveTick(c, true)
 		}
 	}
 }

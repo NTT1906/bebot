@@ -140,6 +140,9 @@ type Bot struct {
 	facingYaw, facingPitch       float32
 	idleYaw, idlePitch           float32
 	velocityY                    float32
+	jumpBaseY                    float32
+	jumpIntervalTicks            int
+	jumpTicks                    int
 	stuckTicks                   int
 	lastJump, lastSwing, lastUse bool
 	breakTarget                  *protocol.BlockPos

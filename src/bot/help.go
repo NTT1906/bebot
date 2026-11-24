@@ -64,6 +64,21 @@ Syntax: unsneak
 Example:
   bebot unsneak`,
 
+	"jump": `§6=== Help: jump ===§r
+Description: Makes the bot jump periodically every N seconds (default: 10s).
+Syntax: jump [freq_seconds, default: 10] or jump stop
+Examples:
+  bebot jump (jumps every 10s)
+  bebot jump 5 (jumps every 5s)
+  bebot jump stop (or bebot stopjump)`,
+
+	"stopjump": `§6=== Help: stopjump ===§r
+Description: Stops periodic jumping.
+Aliases: jump stop, jump off
+Syntax: stopjump
+Example:
+  bebot stopjump`,
+
 	"idle": `§6=== Help: idle / stop ===§r
 Description: Stops active movement, following, mimicking, and mining.
 Aliases: stop
@@ -423,6 +438,7 @@ var aliasMapping = map[string]string{
 	"online":          "players",
 	"near":            "nearby",
 	"shake":           "headshake",
+	"stopjump":        "stopjump",
 	"reconnect":       "rejoin",
 	"exit":            "quit",
 }
@@ -448,7 +464,9 @@ func (b *Bot) helpCmd(p []string) {
 			"stoplookat - stop looking at a player",
 			"sneak [on|off|toggle] - toggle or set sneaking",
 			"unsneak - stop sneaking",
-			"idle / stop - stop movement",
+			"jump [freq] - jump periodically (default: 10s)",
+			"stopjump / jump stop - stop periodic jumping",
+			"idle / stop - stop movement & jumping",
 			"coords - show bot coordinates",
 			"waypoint help - waypoint add/remove/list",
 			"§7(Type 'help 2' for Mining & Beds, or 'help <cmd>')§r",
