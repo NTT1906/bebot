@@ -512,13 +512,51 @@ func (b *Bot) command(line string) {
 				b.reply("Cleared all known air block runtime IDs.")
 				return
 			}
+			if len(p) >= 3 && (strings.EqualFold(p[2], "add") || strings.EqualFold(p[2], "set")) {
+				if len(p) >= 4 {
+					if id, err := strconv.ParseUint(p[3], 10, 32); err == nil {
+						b.mu.Lock()
+						if b.mineAirRuntimeIDs == nil {
+							b.mineAirRuntimeIDs = make(map[uint32]bool)
+						}
+						b.mineAirRuntimeIDs[uint32(id)] = true
+						b.mu.Unlock()
+						b.reply(fmt.Sprintf("Added %d to known air runtime IDs.", id))
+						return
+					}
+				}
+				b.reply("Usage: mine air add <runtimeID>")
+				return
+			}
+			if len(p) >= 5 {
+				var x, y, z int32
+				if _, err := fmt.Sscanf(strings.Join(p[2:5], " "), "%d %d %d", &x, &y, &z); err == nil {
+					target := protocol.BlockPos{x, y, z}
+					b.mu.Lock()
+					rid, known := b.blockRuntimeIDs[target]
+					isAir := b.mineAirRuntimeIDs != nil && b.mineAirRuntimeIDs[rid]
+					b.mu.Unlock()
+					if known {
+						statusStr := "solid"
+						if isAir || rid == 0 {
+							statusStr = "air"
+						}
+						b.reply(fmt.Sprintf("Block at (%d, %d, %d) has cached runtime ID %d (%s). To break & calibrate air, use: mine learn %d %d %d",
+							x, y, z, rid, statusStr, x, y, z))
+					} else {
+						b.reply(fmt.Sprintf("Block at (%d, %d, %d) has no cached runtime ID. To break & calibrate air, use: mine learn %d %d %d",
+							x, y, z, x, y, z))
+					}
+					return
+				}
+			}
 			b.mu.Lock()
 			var ids []uint32
 			for id := range b.mineAirRuntimeIDs {
 				ids = append(ids, id)
 			}
 			b.mu.Unlock()
-			b.reply(fmt.Sprintf("Known air runtime IDs: %v", ids))
+			b.reply(fmt.Sprintf("Known air runtime IDs: %v (Use 'mine learn <x y z>' to break a block & calibrate air)", ids))
 			return
 		}
 		if strings.EqualFold(p[0], "minetimeout") || (len(p) >= 2 && strings.EqualFold(p[1], "timeout")) {
