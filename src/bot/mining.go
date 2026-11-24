@@ -59,6 +59,7 @@ func (b *Bot) stopBreaking() {
 	if b.breakTarget == nil {
 		b.mineLearnActive = false
 		b.mineLearnWasBroken = false
+		b.mineLearnStartedBreak = false
 		b.mineLearnInitialRuntimeID = 0
 		b.mu.Unlock()
 		log.Println("bebot: no block breaking operation is active")
@@ -68,8 +69,10 @@ func (b *Bot) stopBreaking() {
 	b.abortBreakTarget = &pos
 	b.breakTarget = nil
 	b.breakTicks = 0
+	b.breakRepeat = false
 	b.mineLearnActive = false
 	b.mineLearnWasBroken = false
+	b.mineLearnStartedBreak = false
 	b.mineLearnInitialRuntimeID = 0
 	b.mu.Unlock()
 
@@ -340,23 +343,18 @@ func (b *Bot) handleUpdateBlock(pos protocol.BlockPos, runtimeID uint32) {
 
 	b.mu.Lock()
 	if b.mineLearnActive && pos == b.mineLearnPos {
-		// A block update arrived for the calibration block.
-		// If the block has NOT been broken yet, this update is the solid block being targeted.
-		if !b.mineLearnWasBroken {
-			if b.mineLearnInitialRuntimeID == 0 {
-				b.mineLearnInitialRuntimeID = runtimeID
-				log.Printf("bebot: mine learn target (%d, %d, %d) initial solid block runtimeID: %d\n",
-					pos.X(), pos.Y(), pos.Z(), runtimeID)
-			}
+		// If breaking hasn't started yet, record the solid block ID.
+		if !b.mineLearnStartedBreak {
+			b.mineLearnInitialRuntimeID = runtimeID
+			log.Printf("bebot: mine learn target (%d, %d, %d) initial solid block runtimeID: %d\n",
+				pos.X(), pos.Y(), pos.Z(), runtimeID)
 			b.mu.Unlock()
 			return
 		}
 
-		// The block has completed breaking (b.mineLearnWasBroken == true).
-		// We require that an initial solid block runtimeID was captured AND that the new ID is different.
+		// Breaking has started!
 		if b.mineLearnInitialRuntimeID == 0 {
-			// We didn't have an initial solid block ID recorded yet.
-			// This first UpdateBlock is the solid block itself, not air!
+			// First update received after break started is the solid block syncing.
 			b.mineLearnInitialRuntimeID = runtimeID
 			log.Printf("bebot: mine learn target (%d, %d, %d) captured initial solid block runtimeID: %d (waiting for break result)\n",
 				pos.X(), pos.Y(), pos.Z(), runtimeID)
@@ -364,16 +362,17 @@ func (b *Bot) handleUpdateBlock(pos protocol.BlockPos, runtimeID uint32) {
 			return
 		}
 
-		// Verify that the new runtimeID is different from the solid block.
+		// The server sent an update for the calibration target.
+		// If it's the exact same solid block, it hasn't broken yet.
 		if runtimeID == b.mineLearnInitialRuntimeID {
-			// The server re-sent the solid block (break not processed yet or denied)
 			b.mu.Unlock()
 			return
 		}
 
-		// Genuine air block confirmed!
+		// The block runtime ID changed!
+		// This handles BOTH normal blocks (after maxTicks) AND instant-break blocks (short grass, flowers, torches, slime)!
 		if b.mineAirRuntimeIDs == nil {
-			b.mineAirRuntimeIDs = make(map[uint32]bool)
+			b.mineAirRuntimeIDs = defaultAirRuntimeIDs()
 		}
 		delete(b.mineAirRuntimeIDs, b.mineLearnInitialRuntimeID)
 		b.mineAirRuntimeIDs[runtimeID] = true
@@ -381,12 +380,22 @@ func (b *Bot) handleUpdateBlock(pos protocol.BlockPos, runtimeID uint32) {
 			b.knownAirBlocks = make(map[protocol.BlockPos]bool)
 		}
 		b.knownAirBlocks[pos] = true
+
 		solidID := b.mineLearnInitialRuntimeID
 		b.mineLearnActive = false
 		b.mineLearnWasBroken = false
+		b.mineLearnStartedBreak = false
 		b.mineLearnInitialRuntimeID = 0
+
+		// Completely stop breaking and notify the server to abort/finish break interaction
+		abortPos := pos
+		b.abortBreakTarget = &abortPos
 		b.breakTarget = nil
 		b.breakTicks = 0
+		b.breakRepeat = false
+		b.mineCurrent = nil
+		b.mineActive = false
+		b.mineQueue = nil
 		b.mu.Unlock()
 
 		log.Printf("bebot: calibration complete! Solid block (%d) broke -> Confirmed air runtime ID: %d\n", solidID, runtimeID)
@@ -555,6 +564,13 @@ func (b *Bot) startBreakingFront(animate bool, repeat bool) {
 
 func (b *Bot) startLearningAir(pos *protocol.BlockPos) {
 	b.mu.Lock()
+	if b.mineActive {
+		b.mineActive = false
+		b.mineRepeat = false
+		b.mineContinuous = false
+		b.mineQueue = nil
+		b.mineCurrent = nil
+	}
 	var target protocol.BlockPos
 	if pos != nil {
 		target = *pos
@@ -585,6 +601,7 @@ func (b *Bot) startLearningAir(pos *protocol.BlockPos) {
 	b.mineLearnPos = target
 	b.mineLearnInitialRuntimeID = initialRuntimeID
 	b.mineLearnWasBroken = false
+	b.mineLearnStartedBreak = false
 	b.breakTarget = &target
 	b.breakTicks = 0
 	b.breakAnimation = true
