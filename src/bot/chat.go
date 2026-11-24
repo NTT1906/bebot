@@ -512,6 +512,21 @@ func (b *Bot) command(line string) {
 				b.reply("Cleared all known air block runtime IDs.")
 				return
 			}
+			if len(p) >= 3 && (strings.EqualFold(p[2], "remove") || strings.EqualFold(p[2], "rm") || strings.EqualFold(p[2], "del") || strings.EqualFold(p[2], "delete")) {
+				if len(p) >= 4 {
+					if id, err := strconv.ParseUint(p[3], 10, 32); err == nil {
+						b.mu.Lock()
+						if b.mineAirRuntimeIDs != nil {
+							delete(b.mineAirRuntimeIDs, uint32(id))
+						}
+						b.mu.Unlock()
+						b.reply(fmt.Sprintf("Removed %d from known air runtime IDs.", id))
+						return
+					}
+				}
+				b.reply("Usage: mine air remove <runtimeID>")
+				return
+			}
 			if len(p) >= 3 && (strings.EqualFold(p[2], "add") || strings.EqualFold(p[2], "set")) {
 				if len(p) >= 4 {
 					if id, err := strconv.ParseUint(p[3], 10, 32); err == nil {

@@ -484,7 +484,20 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 			timeoutTicks = maxTicks + 4
 		}
 
-		if b.mineActive && ticks >= timeoutTicks && !stalled {
+		if (b.mineActive || b.mineLearnActive) && ticks >= timeoutTicks && !stalled {
+			if b.mineLearnActive {
+				log.Printf("bebot: mine learn at (%d, %d, %d) timed out after %.1fs\n", bt.X(), bt.Y(), bt.Z(), timeoutSec)
+				b.mu.Lock()
+				b.abortBreakTarget = bt
+				b.mineLearnActive = false
+				b.mineLearnWasBroken = false
+				b.mineLearnInitialRuntimeID = 0
+				b.breakTarget = nil
+				b.breakTicks = 0
+				b.mu.Unlock()
+				b.reply(fmt.Sprintf("Air calibration timed out after %.1fs (block did not break or unreachable).", timeoutSec))
+				return
+			}
 			log.Printf("bebot: block at (%d, %d, %d) timed out after %.1fs (cannot be mined: air/water/bedrock), skipping\n", bt.X(), bt.Y(), bt.Z(), timeoutSec)
 			b.mu.Lock()
 			b.abortBreakTarget = bt

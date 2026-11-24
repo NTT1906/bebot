@@ -344,9 +344,20 @@ func (b *Bot) handleUpdateBlock(pos protocol.BlockPos, runtimeID uint32) {
 		}
 
 		// The block has completed breaking (b.mineLearnWasBroken == true).
+		// We require that an initial solid block runtimeID was captured AND that the new ID is different.
+		if b.mineLearnInitialRuntimeID == 0 {
+			// We didn't have an initial solid block ID recorded yet.
+			// This first UpdateBlock is the solid block itself, not air!
+			b.mineLearnInitialRuntimeID = runtimeID
+			log.Printf("bebot: mine learn target (%d, %d, %d) captured initial solid block runtimeID: %d (waiting for break result)\n",
+				pos.X(), pos.Y(), pos.Z(), runtimeID)
+			b.mu.Unlock()
+			return
+		}
+
 		// Verify that the new runtimeID is different from the solid block.
-		if b.mineLearnInitialRuntimeID != 0 && runtimeID == b.mineLearnInitialRuntimeID {
-			// The server re-sent the solid block (break not processed yet)
+		if runtimeID == b.mineLearnInitialRuntimeID {
+			// The server re-sent the solid block (break not processed yet or denied)
 			b.mu.Unlock()
 			return
 		}
@@ -355,9 +366,7 @@ func (b *Bot) handleUpdateBlock(pos protocol.BlockPos, runtimeID uint32) {
 		if b.mineAirRuntimeIDs == nil {
 			b.mineAirRuntimeIDs = make(map[uint32]bool)
 		}
-		if b.mineLearnInitialRuntimeID != 0 {
-			delete(b.mineAirRuntimeIDs, b.mineLearnInitialRuntimeID)
-		}
+		delete(b.mineAirRuntimeIDs, b.mineLearnInitialRuntimeID)
 		b.mineAirRuntimeIDs[runtimeID] = true
 		if b.knownAirBlocks == nil {
 			b.knownAirBlocks = make(map[protocol.BlockPos]bool)
@@ -372,7 +381,7 @@ func (b *Bot) handleUpdateBlock(pos protocol.BlockPos, runtimeID uint32) {
 		b.mu.Unlock()
 
 		log.Printf("bebot: calibration complete! Solid block (%d) broke -> Confirmed air runtime ID: %d\n", solidID, runtimeID)
-		b.reply(fmt.Sprintf("Calibration complete! Solid block broke -> Confirmed air block runtime ID: %d.", runtimeID))
+		b.reply(fmt.Sprintf("Calibration complete! Solid block (%d) broke -> Confirmed air block runtime ID: %d.", solidID, runtimeID))
 		return
 	}
 
