@@ -546,6 +546,10 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 				b.mu.Lock()
 				if b.breakRepeat {
 					b.breakTicks = 0
+				} else if b.mineLearnActive {
+					b.mineLearnWasBroken = true
+					b.breakTarget = nil
+					b.breakTicks = 0
 				} else if b.mineActive {
 					if b.mineAttempts != nil {
 						b.mineAttempts[*bt] = 2
