@@ -740,7 +740,7 @@ func (b *Bot) command(line string) {
 		}
 		b.dropSlots(slot, 1, amount, method, random, false)
 	case "help", "commands", "commandlist":
-		b.help()
+		b.helpCmd(p)
 	case "hotbar", "slot":
 		if len(p) != 2 {
 			b.reply("Usage: hotbar <0-9>")
@@ -857,66 +857,96 @@ func (b *Bot) netherCmd(args []string) {
 	}
 }
 
-func (b *Bot) help() {
-	lines := []string{
-		"Commands:",
-		"move <x y z> - move to coordinates",
-		"follow <player> - follow a player",
-		"mimic <player> - mimic movement and actions",
-		"camic <player> - mimic camera rotation only",
-		"lookat [player] or lookat <x y z> - look at a player/point",
-		"stoplookat - stop looking at a player",
-		"sneak [on|off|toggle] - toggle or set sneaking",
-		"unsneak - stop sneaking",
-		"headshake yes|no [repeat:true|false] - shake the head (yes=up/down, no=left/right)",
-		"headshake clear - stop headshaking",
-		"emote <uuid> [repeat:true|false] [length] - send an emote (UUID from Bedrock-Emotes list); length = duration in ticks, default 60",
-		"emote clear - stop repeating emote",
-		"skin <slim|normal|wide> <path> [reload] - change to a classic skin PNG",
-		"skin pack <folder> <skin_id> [reload] - change to a skin from a skin pack (skins.json)",
-		"skin pack <folder> list - list skins in a skin pack",
-		"skin default [reload] - revert to default slim skin",
-		"skin toggle override - toggle whether skin changes override other players' view (default: on)",
-		"idle / stop - stop movement (keeps current facing)",
-		"idle reset - idle and reset facing to default",
-		"break <x y z> <animation: true|false> - break a block",
-		"mine <ax ay az> <bx by bz> [repeat: true|false] [faceAccurate: true|false] - mine all blocks in a space (top-down)",
-		"mine timeout <seconds> - set per-block break timeout (default: 3.0s)",
-		"mine learn [x y z] - calibrate and learn air block runtime ID from broken block",
-		"mine air - display currently known air runtime IDs",
-		"stopmine / stopbreak - stop mining",
-		"hotbar <0-9> - select a hotbar slot",
-		"dropall [all|each] [random:true|false] - drop all items (default: all at once; 'each' for sequential 1-by-1)",
-		"dropall2 [all|each] [random:true|false] - drop all items via cursor (default: all at once batch; 'each' for 1-by-1)",
-		"dropall3 [all|each] [random:true|false] - drop all items via stack request (default: all at once batch; 'each' for 1-by-1)",
-		"droploop [random] [ticks] - continuously drop all items every 20gt (1s) at eye direction or random",
-		"stopdroploop / stopdrop - stop the drop loop",
-		"drop <slot> [amount] [random:true|false] - drop items from a slot (or drop2 for cursor, drop3 for stack request)",
-		"sort-inv / sort - group and sort items to minimize occupied inventory slots",
-		"transfer <slot a> <slot b> - move items between inventory slots",
-		"loot [x y z] - loot all items from container (chest, dropper, barrel, etc.)",
-		"take [x y z] <slot> [count] - take item from a container slot",
-		"container [x y z] - view items inside a container",
-		"open [x y z] - open a container and keep it open until 'close'",
-		"close - close currently open container",
-		"bundletest <ax ay az> <bx by bz> [attempts] - race-condition test: repeatedly open two droppers to observe bundle transfer timing",
-		"bundletest stop - stop a running bundle test",
-		"sleep [x y z] - interact with a bed to sleep and set spawn (or 'sleep wake' to wake up)",
-		"wakeup - wake up from bed",
-		"players / list - list online players",
-		"nearby - list nearby players",
-		"coords - show coordinates",
-		"waypoint help - waypoint add/remove/update/list/show",
-		"say <message> - send chat",
-		"payback [on|off] - toggle payback mode (attacks back if hurt)",
-		"autofish [on|off] - toggle auto-fishing",
-		"kill <target> <cps> - rapidly attack a player until they die",
-		"stopkill - stop the current kill command",
-		"quit / exit - disconnect",
+func (b *Bot) helpCmd(p []string) {
+	pages := [][]string{
+		{
+			"§6--- Bebot Help [1/4: Movement & Camera] ---§r",
+			"move <x y z> - move to coordinates",
+			"follow <player> - follow a player",
+			"mimic <player> - mimic movement and actions",
+			"camic <player> - mimic camera rotation only",
+			"lookat [player|x y z] - look at player or coordinates",
+			"stoplookat - stop looking at a player",
+			"sneak [on|off|toggle] - toggle or set sneaking",
+			"unsneak - stop sneaking",
+			"idle / stop - stop movement",
+			"coords - show bot coordinates",
+			"waypoint help - waypoint add/remove/list",
+			"§7(Type 'help 2' for Mining & Beds)§r",
+		},
+		{
+			"§6--- Bebot Help [2/4: Mining & Sleep] ---§r",
+			"break <x y z> [animation] - break a single block",
+			"mine <pos1> <pos2> [repeat] [faceAccurate] - area mine top-down",
+			"mine timeout <seconds> - set per-block break timeout (default 3.0s)",
+			"mine learn [x y z] - calibrate air runtime ID from block",
+			"mine air [clear|add|remove] - view/manage known air IDs",
+			"stopmine / stopbreak - stop mining",
+			"sleep [x y z] - interact with bed to sleep & set spawn",
+			"wakeup / sleep wake - wake up from bed",
+			"§7(Type 'help 3' for Inventory & Items)§r",
+		},
+		{
+			"§6--- Bebot Help [3/4: Inventory & Items] ---§r",
+			"hotbar <0-9> - select hotbar slot",
+			"dropall [all|each] [random] - drop full inventory",
+			"dropall2 / dropall3 [all|each] - cursor/stack request drop",
+			"droploop [random] [ticks] - continuous drop loop",
+			"stopdroploop - stop drop loop",
+			"drop <slot> [amount] [random] - drop from specific slot",
+			"sort-inv / sort - merge and group items in inventory",
+			"transfer <slot a> <slot b> - swap/move slots",
+			"open <x y z> / close - open/close container",
+			"loot <x y z> / take <x y z> <slot> - loot items from container",
+			"container <x y z> - inspect container items",
+			"§7(Type 'help 4' for Combat & Utility)§r",
+		},
+		{
+			"§6--- Bebot Help [4/4: Combat & Utility] ---§r",
+			"players / list / nearby - list online/nearby players",
+			"say <message> - send a chat message",
+			"payback [on|off] - fight back when attacked",
+			"autofish [on|off] - toggle auto-fishing",
+			"kill <target> <cps> / stopkill - attack a player",
+			"skin <slim|normal> <path> - change skin PNG",
+			"skin pack <folder> list - list skins in pack",
+			"skin default - revert to default slim skin",
+			"emote <uuid> [repeat] [length] / emote clear",
+			"headshake yes|no [repeat] / headshake clear",
+			"quit / exit - disconnect bot",
+		},
 	}
-	for _, line := range lines {
-		b.reply(line)
+
+	pageIdx := 0
+	if len(p) >= 2 {
+		arg := strings.ToLower(p[1])
+		switch arg {
+		case "1", "move", "movement":
+			pageIdx = 0
+		case "2", "mine", "mining", "break", "sleep":
+			pageIdx = 1
+		case "3", "inv", "inventory", "item", "items", "drop":
+			pageIdx = 2
+		case "4", "util", "utility", "combat", "misc":
+			pageIdx = 3
+		case "all":
+			go func() {
+				for i, page := range pages {
+					b.reply(strings.Join(page, "\n"))
+					if i < len(pages)-1 {
+						time.Sleep(300 * time.Millisecond)
+					}
+				}
+			}()
+			return
+		default:
+			if n, err := strconv.Atoi(arg); err == nil && n >= 1 && n <= len(pages) {
+				pageIdx = n - 1
+			}
+		}
 	}
+
+	b.reply(strings.Join(pages[pageIdx], "\n"))
 }
 
 func (b *Bot) handleSleepCmd(p []string) {
