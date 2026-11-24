@@ -255,3 +255,5 @@ Implemented in [src/bot/inventory.go](file:///d:/code/goland/bebot/src/bot/inven
 | **`bebot drop2 <slot> [count] [random]`** | **Method 2: Cursor Drag & Drop** | Takes `count` items from `slot` to cursor and drops to world via `ItemStackRequest`. |
 | **`bebot dropall3 [random: true\|false]`** | **Method 3: GUI Direct Slot Drop** | Direct slot `DropStackRequestAction` batching across all slots 0–35 into atomic `ItemStackRequest`. |
 | **`bebot drop3 <slot> [count] [random]`** | **Method 3: GUI Direct Slot Drop** | Direct slot drop via `DropStackRequestAction` natively via `ItemStackRequest`. |
+| **`bebot open <x y z>`** | **Container Management** | Opens external block container (chest, dropper, barrel) and keeps it open on server until `close`. Enables pure `ItemStackRequest` across all slots 0–35. |
+| **`bebot close`** | **Container Management** | Closes currently open container window. |

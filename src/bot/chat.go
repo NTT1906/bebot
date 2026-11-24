@@ -629,6 +629,10 @@ func (b *Bot) command(line string) {
 		b.takeCmd(p)
 	case "container", "chest", "viewchest", "viewcontainer":
 		b.viewContainerCmd(p)
+	case "open", "opencontainer":
+		b.openContainerCmd(p)
+	case "close", "closecontainer":
+		b.closeContainerCmd(p)
 	case "bundletest":
 		b.bundleTestCmd(p)
 	case "drop", "drop2", "drop3":
@@ -814,6 +818,8 @@ func (b *Bot) help() {
 		"loot [x y z] - loot all items from container (chest, dropper, barrel, etc.)",
 		"take [x y z] <slot> [count] - take item from a container slot",
 		"container [x y z] - view items inside a container",
+		"open [x y z] - open a container and keep it open until 'close'",
+		"close - close currently open container",
 		"bundletest <ax ay az> <bx by bz> [attempts] - race-condition test: repeatedly open two droppers to observe bundle transfer timing",
 		"bundletest stop - stop a running bundle test",
 		"sleep [x y z] - set a sleep/spawn checkpoint",

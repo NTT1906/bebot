@@ -912,6 +912,7 @@ func (b *Bot) closeBlockContainer(c *minecraft.Conn, windowID byte) {
 	b.mu.Lock()
 	cType := b.containerType
 	b.containerActive = false
+	b.containerWindowID = 0
 	b.mu.Unlock()
 	_ = c.WritePacket(&packet.ContainerClose{
 		WindowID:      windowID,
@@ -1314,4 +1315,64 @@ func (b *Bot) inventoryCmd(p []string) {
 	} else {
 		b.reply(fmt.Sprintf("Inventory (%d items): %s", itemCount, strings.Join(lines, ", ")))
 	}
+}
+
+func (b *Bot) openContainerCmd(p []string) {
+	b.mu.Lock()
+	c := b.conn
+	b.mu.Unlock()
+	if c == nil {
+		b.reply("Cannot open container: bot is not connected.")
+		return
+	}
+
+	pos, _, err := b.parseContainerPos(p)
+	if err != nil {
+		b.reply("Usage: open [x y z] or open front")
+		return
+	}
+
+	b.invMu.Lock()
+	defer b.invMu.Unlock()
+
+	b.mu.Lock()
+	if b.containerActive && b.containerWindowID != 0 {
+		oldWID := b.containerWindowID
+		b.mu.Unlock()
+		b.closeBlockContainer(c, oldWID)
+		time.Sleep(50 * time.Millisecond)
+	} else {
+		b.mu.Unlock()
+	}
+
+	wID, err := b.openBlockContainer(c, pos)
+	if err != nil {
+		b.reply(fmt.Sprintf("Failed to open container at (%d, %d, %d): %s", pos.X(), pos.Y(), pos.Z(), err.Error()))
+		return
+	}
+
+	b.reply(fmt.Sprintf("Opened container at (%d, %d, %d) [WindowID=%d]. Send 'close' when done.", pos.X(), pos.Y(), pos.Z(), wID))
+}
+
+func (b *Bot) closeContainerCmd(p []string) {
+	b.mu.Lock()
+	c := b.conn
+	active := b.containerActive
+	wID := b.containerWindowID
+	b.mu.Unlock()
+	if c == nil {
+		b.reply("Cannot close container: bot is not connected.")
+		return
+	}
+
+	if !active || wID == 0 {
+		b.reply("No block container is currently open.")
+		return
+	}
+
+	b.invMu.Lock()
+	defer b.invMu.Unlock()
+
+	b.closeBlockContainer(c, wID)
+	b.reply(fmt.Sprintf("Closed container [WindowID=%d].", wID))
 }
