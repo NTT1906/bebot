@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -1734,4 +1735,475 @@ func (b *Bot) dropLoopCmd(p []string) {
 	}
 
 	b.startDropLoop(random, ticks)
+}
+
+func isUnstackable(name string) bool {
+	return strings.HasSuffix(name, "_sword") ||
+		strings.HasSuffix(name, "_pickaxe") ||
+		strings.HasSuffix(name, "_axe") ||
+		strings.HasSuffix(name, "_shovel") ||
+		strings.HasSuffix(name, "_hoe") ||
+		strings.HasSuffix(name, "_helmet") ||
+		strings.HasSuffix(name, "_chestplate") ||
+		strings.HasSuffix(name, "_leggings") ||
+		strings.HasSuffix(name, "_boots") ||
+		strings.HasSuffix(name, "_boat") ||
+		strings.HasSuffix(name, "_raft") ||
+		strings.Contains(name, "minecart") ||
+		strings.Contains(name, "potion") ||
+		strings.Contains(name, "stew") ||
+		strings.Contains(name, "soup") ||
+		strings.HasPrefix(name, "music_disc_") ||
+		name == "bow" || name == "crossbow" || name == "trident" || name == "mace" ||
+		name == "shield" || name == "elytra" || name == "flint_and_steel" || name == "shears" ||
+		name == "fishing_rod" || name == "brush" || name == "spyglass" || name == "saddle" ||
+		name == "totem_of_undying" || name == "bundle" || strings.HasSuffix(name, "_bundle") ||
+		name == "enchanted_book" || name == "written_book" || name == "writable_book" ||
+		name == "goat_horn" || name == "milk_bucket" || name == "ominous_bottle"
+}
+
+func isStack16(name string) bool {
+	return name == "ender_pearl" || name == "egg" || name == "snowball" ||
+		name == "honey_bottle" || name == "bucket" ||
+		strings.HasSuffix(name, "_sign") || strings.HasSuffix(name, "_hanging_sign") ||
+		strings.HasSuffix(name, "_banner")
+}
+
+func (b *Bot) itemMaxStackSize(item protocol.ItemInstance) int {
+	if item.Stack.Count == 0 {
+		return 64
+	}
+	if item.Stack.Count > 16 {
+		return 64
+	}
+	name := b.itemName(item.Stack.ItemType.NetworkID)
+	name = strings.ToLower(strings.TrimPrefix(name, "minecraft:"))
+
+	if item.Stack.NBTData != nil {
+		if _, hasDmg := item.Stack.NBTData["Damage"]; hasDmg {
+			return 1
+		}
+	}
+	if item.Stack.Count == 1 && isUnstackable(name) {
+		return 1
+	}
+	if isStack16(name) {
+		return 16
+	}
+	return 64
+}
+
+func canItemsMerge(a, b protocol.ItemInstance, maxStack int) bool {
+	if a.Stack.Count == 0 || b.Stack.Count == 0 {
+		return false
+	}
+	if maxStack <= 1 {
+		return false
+	}
+	if int(a.Stack.Count) >= maxStack {
+		return false
+	}
+	if a.Stack.ItemType.NetworkID != b.Stack.ItemType.NetworkID {
+		return false
+	}
+	if a.Stack.ItemType.MetadataValue != b.Stack.ItemType.MetadataValue {
+		return false
+	}
+	if !reflect.DeepEqual(a.Stack.NBTData, b.Stack.NBTData) {
+		return false
+	}
+	return true
+}
+
+func (b *Bot) transferSlotItem(c *minecraft.Conn, srcSlot, dstSlot, count int) bool {
+	if count <= 0 || srcSlot == dstSlot {
+		return false
+	}
+	b.mu.Lock()
+	if srcSlot >= len(b.inventory) || dstSlot >= len(b.inventory) {
+		b.mu.Unlock()
+		return false
+	}
+	srcItem := b.inventory[srcSlot]
+	dstItem := b.inventory[dstSlot]
+	b.mu.Unlock()
+
+	if srcItem.Stack.Count == 0 || int(srcItem.Stack.Count) < count {
+		return false
+	}
+
+	// Try ItemStackRequest first
+	wID, opened := b.openInventory(c)
+	if opened {
+		defer b.closeInventory(c, wID)
+	}
+
+	srcCands := playerSlotCandidates(srcSlot)
+	dstCands := playerSlotCandidates(dstSlot)
+
+	reqSucceeded := false
+	if len(srcCands) > 0 && len(dstCands) > 0 {
+		srcCand := srcCands[0]
+		dstCand := dstCands[0]
+
+		take := &protocol.TakeStackRequestAction{}
+		take.Count = byte(count)
+		take.Source = stackReqSlotInfo(srcCand.container, srcCand.slot, srcItem.StackNetworkID)
+		take.Destination = stackReqSlotInfo(protocol.ContainerCursor, 0, 0)
+
+		place := &protocol.PlaceStackRequestAction{}
+		place.Count = byte(count)
+		place.Source = stackReqSlotInfo(protocol.ContainerCursor, 0, srcItem.StackNetworkID)
+		place.Destination = stackReqSlotInfo(dstCand.container, dstCand.slot, dstItem.StackNetworkID)
+
+		ok, _ := b.sendItemStackRequest(c, []protocol.StackRequestAction{take, place})
+		if ok {
+			reqSucceeded = true
+		}
+	}
+
+	if reqSucceeded {
+		b.mu.Lock()
+		if int(b.inventory[srcSlot].Stack.Count) <= count {
+			b.inventory[srcSlot] = protocol.ItemInstance{}
+		} else {
+			b.inventory[srcSlot].Stack.Count -= uint16(count)
+		}
+		if b.inventory[dstSlot].Stack.Count == 0 {
+			b.inventory[dstSlot] = srcItem
+			b.inventory[dstSlot].Stack.Count = uint16(count)
+		} else {
+			b.inventory[dstSlot].Stack.Count += uint16(count)
+		}
+		if byte(srcSlot) == b.hotbarSlot {
+			b.heldItem = b.inventory[srcSlot]
+		}
+		if byte(dstSlot) == b.hotbarSlot {
+			b.heldItem = b.inventory[dstSlot]
+		}
+		b.mu.Unlock()
+		b.sendHeldItem(c)
+		time.Sleep(15 * time.Millisecond)
+		return true
+	}
+
+	// Fallback to balanced packet.InventoryTransaction
+	newSrc := srcItem
+	if int(srcItem.Stack.Count) <= count {
+		newSrc = protocol.ItemInstance{}
+	} else {
+		newSrc.Stack.Count -= uint16(count)
+	}
+
+	newDst := dstItem
+	if dstItem.Stack.Count == 0 {
+		newDst = srcItem
+		newDst.Stack.Count = uint16(count)
+	} else {
+		newDst.Stack.Count += uint16(count)
+	}
+
+	tx := &packet.InventoryTransaction{
+		Actions: []protocol.InventoryAction{
+			{
+				SourceType:    protocol.InventoryActionSourceContainer,
+				WindowID:      protocol.Option(int8(protocol.WindowIDInventory)),
+				InventorySlot: uint32(srcSlot),
+				OldItem:       srcItem,
+				NewItem:       newSrc,
+			},
+			{
+				SourceType:    protocol.InventoryActionSourceContainer,
+				WindowID:      protocol.Option(int8(protocol.WindowIDInventory)),
+				InventorySlot: uint32(dstSlot),
+				OldItem:       dstItem,
+				NewItem:       newDst,
+			},
+		},
+		TransactionData: &protocol.NormalTransactionData{},
+	}
+	if err := c.WritePacket(tx); err != nil {
+		log.Printf("bebot: sort-inv transfer tx slot %d -> %d failed: %v\n", srcSlot, dstSlot, err)
+		return false
+	}
+	_ = c.Flush()
+
+	b.mu.Lock()
+	b.inventory[srcSlot] = newSrc
+	b.inventory[dstSlot] = newDst
+	if byte(srcSlot) == b.hotbarSlot {
+		b.heldItem = newSrc
+	}
+	if byte(dstSlot) == b.hotbarSlot {
+		b.heldItem = newDst
+	}
+	b.mu.Unlock()
+	b.sendHeldItem(c)
+	time.Sleep(15 * time.Millisecond)
+	return true
+}
+
+func (b *Bot) swapOrMoveSlot(c *minecraft.Conn, srcSlot, dstSlot int) bool {
+	if srcSlot == dstSlot {
+		return true
+	}
+	b.mu.Lock()
+	if srcSlot >= len(b.inventory) || dstSlot >= len(b.inventory) {
+		b.mu.Unlock()
+		return false
+	}
+	srcItem := b.inventory[srcSlot]
+	dstItem := b.inventory[dstSlot]
+	b.mu.Unlock()
+
+	if srcItem.Stack.Count == 0 && dstItem.Stack.Count == 0 {
+		return true
+	}
+
+	// Try ItemStackRequest first
+	wID, opened := b.openInventory(c)
+	if opened {
+		defer b.closeInventory(c, wID)
+	}
+
+	srcCands := playerSlotCandidates(srcSlot)
+	dstCands := playerSlotCandidates(dstSlot)
+
+	reqSucceeded := false
+	if len(srcCands) > 0 && len(dstCands) > 0 {
+		srcCand := srcCands[0]
+		dstCand := dstCands[0]
+
+		if dstItem.Stack.Count == 0 {
+			count := srcItem.Stack.Count
+			if count > 255 {
+				count = 255
+			}
+			take := &protocol.TakeStackRequestAction{}
+			take.Count = byte(count)
+			take.Source = stackReqSlotInfo(srcCand.container, srcCand.slot, srcItem.StackNetworkID)
+			take.Destination = stackReqSlotInfo(protocol.ContainerCursor, 0, 0)
+
+			place := &protocol.PlaceStackRequestAction{}
+			place.Count = byte(count)
+			place.Source = stackReqSlotInfo(protocol.ContainerCursor, 0, srcItem.StackNetworkID)
+			place.Destination = stackReqSlotInfo(dstCand.container, dstCand.slot, 0)
+
+			ok, _ := b.sendItemStackRequest(c, []protocol.StackRequestAction{take, place})
+			if ok {
+				reqSucceeded = true
+			}
+		} else {
+			swap := &protocol.SwapStackRequestAction{
+				Source:      stackReqSlotInfo(srcCand.container, srcCand.slot, srcItem.StackNetworkID),
+				Destination: stackReqSlotInfo(dstCand.container, dstCand.slot, dstItem.StackNetworkID),
+			}
+			ok, _ := b.sendItemStackRequest(c, []protocol.StackRequestAction{swap})
+			if ok {
+				reqSucceeded = true
+			}
+		}
+	}
+
+	if reqSucceeded {
+		b.mu.Lock()
+		b.inventory[srcSlot] = dstItem
+		b.inventory[dstSlot] = srcItem
+		if byte(srcSlot) == b.hotbarSlot {
+			b.heldItem = dstItem
+		}
+		if byte(dstSlot) == b.hotbarSlot {
+			b.heldItem = srcItem
+		}
+		b.mu.Unlock()
+		b.sendHeldItem(c)
+		time.Sleep(15 * time.Millisecond)
+		return true
+	}
+
+	// Fallback to balanced packet.InventoryTransaction
+	tx := &packet.InventoryTransaction{
+		Actions: []protocol.InventoryAction{
+			{
+				SourceType:    protocol.InventoryActionSourceContainer,
+				WindowID:      protocol.Option(int8(protocol.WindowIDInventory)),
+				InventorySlot: uint32(srcSlot),
+				OldItem:       srcItem,
+				NewItem:       dstItem,
+			},
+			{
+				SourceType:    protocol.InventoryActionSourceContainer,
+				WindowID:      protocol.Option(int8(protocol.WindowIDInventory)),
+				InventorySlot: uint32(dstSlot),
+				OldItem:       dstItem,
+				NewItem:       srcItem,
+			},
+		},
+		TransactionData: &protocol.NormalTransactionData{},
+	}
+	if err := c.WritePacket(tx); err != nil {
+		log.Printf("bebot: sort-inv swap tx slot %d <-> %d failed: %v\n", srcSlot, dstSlot, err)
+		return false
+	}
+	_ = c.Flush()
+
+	b.mu.Lock()
+	b.inventory[srcSlot] = dstItem
+	b.inventory[dstSlot] = srcItem
+	if byte(srcSlot) == b.hotbarSlot {
+		b.heldItem = dstItem
+	}
+	if byte(dstSlot) == b.hotbarSlot {
+		b.heldItem = srcItem
+	}
+	b.mu.Unlock()
+	b.sendHeldItem(c)
+	time.Sleep(15 * time.Millisecond)
+	return true
+}
+
+func (b *Bot) sortInventoryCmd(p []string) {
+	b.invMu.Lock()
+	defer b.invMu.Unlock()
+
+	b.mu.Lock()
+	c := b.conn
+	if c == nil {
+		b.mu.Unlock()
+		b.reply("Cannot sort inventory: bot is not connected.")
+		return
+	}
+	invLen := len(b.inventory)
+	if invLen > 36 {
+		invLen = 36
+	}
+	inv := make([]protocol.ItemInstance, invLen)
+	copy(inv, b.inventory[:invLen])
+	b.mu.Unlock()
+
+	initialSlots := 0
+	for _, it := range inv {
+		if it.Stack.Count > 0 {
+			initialSlots++
+		}
+	}
+	if initialSlots == 0 {
+		b.reply("Inventory is empty, nothing to sort.")
+		return
+	}
+
+	// Phase 1: Merge partial stacks to minimize slots taken
+	merges := 0
+	for i := 0; i < len(inv); i++ {
+		if inv[i].Stack.Count == 0 {
+			continue
+		}
+		maxStack := b.itemMaxStackSize(inv[i])
+		if maxStack <= 1 || int(inv[i].Stack.Count) >= maxStack {
+			continue
+		}
+		for j := i + 1; j < len(inv); j++ {
+			if inv[j].Stack.Count == 0 {
+				continue
+			}
+			if canItemsMerge(inv[i], inv[j], maxStack) {
+				needed := maxStack - int(inv[i].Stack.Count)
+				transferCount := int(inv[j].Stack.Count)
+				if transferCount > needed {
+					transferCount = needed
+				}
+				if transferCount > 0 {
+					if b.transferSlotItem(c, j, i, transferCount) {
+						merges++
+						b.mu.Lock()
+						copy(inv, b.inventory[:invLen])
+						b.mu.Unlock()
+					}
+					if int(inv[i].Stack.Count) >= maxStack {
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// Phase 2: Group identical items together and compact to earliest slots
+	type itemRef struct {
+		slot int
+		item protocol.ItemInstance
+		name string
+	}
+	var nonEmpties []itemRef
+	b.mu.Lock()
+	for s := 0; s < invLen && s < len(b.inventory); s++ {
+		it := b.inventory[s]
+		if it.Stack.Count > 0 {
+			nonEmpties = append(nonEmpties, itemRef{
+				slot: s,
+				item: it,
+				name: b.itemNameLocked(it.Stack.ItemType.NetworkID),
+			})
+		}
+	}
+	b.mu.Unlock()
+
+	// Sort the non-empty item list to establish desired grouping:
+	// 1. Group by Item Name (alphabetical)
+	// 2. NetworkID
+	// 3. Descending by Stack Count (full stacks first)
+	// 4. Metadata value
+	sort.SliceStable(nonEmpties, func(i, j int) bool {
+		if nonEmpties[i].name != nonEmpties[j].name {
+			return nonEmpties[i].name < nonEmpties[j].name
+		}
+		if nonEmpties[i].item.Stack.ItemType.NetworkID != nonEmpties[j].item.Stack.ItemType.NetworkID {
+			return nonEmpties[i].item.Stack.ItemType.NetworkID < nonEmpties[j].item.Stack.ItemType.NetworkID
+		}
+		if nonEmpties[i].item.Stack.Count != nonEmpties[j].item.Stack.Count {
+			return nonEmpties[i].item.Stack.Count > nonEmpties[j].item.Stack.Count
+		}
+		return nonEmpties[i].item.Stack.ItemType.MetadataValue < nonEmpties[j].item.Stack.ItemType.MetadataValue
+	})
+
+	moves := 0
+	for targetSlot := 0; targetSlot < len(nonEmpties); targetSlot++ {
+		desired := nonEmpties[targetSlot]
+
+		b.mu.Lock()
+		curSlot := -1
+		for s := targetSlot; s < invLen && s < len(b.inventory); s++ {
+			it := b.inventory[s]
+			if it.Stack.Count == desired.item.Stack.Count &&
+				it.Stack.ItemType.NetworkID == desired.item.Stack.ItemType.NetworkID &&
+				it.Stack.ItemType.MetadataValue == desired.item.Stack.ItemType.MetadataValue &&
+				reflect.DeepEqual(it.Stack.NBTData, desired.item.Stack.NBTData) {
+				curSlot = s
+				break
+			}
+		}
+		b.mu.Unlock()
+
+		if curSlot != -1 && curSlot != targetSlot {
+			if b.swapOrMoveSlot(c, curSlot, targetSlot) {
+				moves++
+			}
+		}
+	}
+
+	b.mu.Lock()
+	finalSlots := 0
+	for s := 0; s < invLen && s < len(b.inventory); s++ {
+		if b.inventory[s].Stack.Count > 0 {
+			finalSlots++
+		}
+	}
+	b.mu.Unlock()
+
+	if merges == 0 && moves == 0 {
+		b.reply(fmt.Sprintf("Inventory is already sorted and compacted (%d item(s) in %d slot(s)).", initialSlots, initialSlots))
+		return
+	}
+
+	b.reply(fmt.Sprintf("Inventory sorted and compacted! Occupied slots reduced from %d to %d (%d stack merge(s), %d move(s)).",
+		initialSlots, finalSlots, merges, moves))
 }

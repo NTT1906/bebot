@@ -634,7 +634,13 @@ func (b *Bot) command(line string) {
 		}
 		b.dropSlots(0, len(b.inventory), 0, method, random, each)
 	case "inv", "inventory", "myinv", "items":
+		if len(p) >= 2 && (strings.EqualFold(p[1], "sort") || strings.EqualFold(p[1], "compact")) {
+			b.sortInventoryCmd(p)
+			return
+		}
 		b.inventoryCmd(p)
+	case "sort-inv", "sortinv", "sort", "sort-inventory":
+		b.sortInventoryCmd(p)
 	case "transfer":
 		b.transferCmd(p)
 	case "loot", "steal":
@@ -830,6 +836,7 @@ func (b *Bot) help() {
 		"droploop [random] [ticks] - continuously drop all items every 20gt (1s) at eye direction or random",
 		"stopdroploop / stopdrop - stop the drop loop",
 		"drop <slot> [amount] [random:true|false] - drop items from a slot (or drop2 for cursor, drop3 for stack request)",
+		"sort-inv / sort - group and sort items to minimize occupied inventory slots",
 		"transfer <slot a> <slot b> - move items between inventory slots",
 		"loot [x y z] - loot all items from container (chest, dropper, barrel, etc.)",
 		"take [x y z] <slot> [count] - take item from a container slot",
