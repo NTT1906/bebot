@@ -160,6 +160,7 @@ type Bot struct {
 	headshake                    headshakeMode
 	headshakeRepeat              bool
 	headshakeTicks               int
+	emotes                       map[string]string
 	emoteID                      string
 	emoteRepeat                  bool
 	payback                      bool
@@ -287,6 +288,7 @@ func New(opts Options) *Bot {
 		entities:          make(map[int64]string),
 		mode:              modeIdle,
 		waypoints:         waypoint.LoadWaypoints(waypoint.DefaultWaypointsFile),
+		emotes:            loadEmotes(DefaultEmotesFile),
 		configPath:        opts.ConfigPath,
 		skinPath:          opts.SkinPath,
 		xblCache:          opts.XBLCache,

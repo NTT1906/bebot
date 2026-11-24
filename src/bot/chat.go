@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/go-gl/mathgl/mgl32"
 	"github.com/google/uuid"
@@ -41,8 +42,61 @@ func (b *Bot) commandFromChat(sender, text string) {
 	}()
 }
 
+// parseArgs splits a command line string into arguments, supporting double and single quotes.
+func parseArgs(s string) []string {
+	var args []string
+	var current strings.Builder
+	inQuote := false
+	quoteChar := rune(0)
+	escaped := false
+	hasContent := false
+
+	for _, r := range s {
+		if escaped {
+			current.WriteRune(r)
+			escaped = false
+			hasContent = true
+			continue
+		}
+		if r == '\\' {
+			escaped = true
+			continue
+		}
+		if inQuote {
+			if r == quoteChar {
+				inQuote = false
+				quoteChar = 0
+			} else {
+				current.WriteRune(r)
+			}
+			hasContent = true
+			continue
+		}
+		if r == '"' || r == '\'' {
+			inQuote = true
+			quoteChar = r
+			hasContent = true
+			continue
+		}
+		if unicode.IsSpace(r) {
+			if hasContent {
+				args = append(args, current.String())
+				current.Reset()
+				hasContent = false
+			}
+			continue
+		}
+		current.WriteRune(r)
+		hasContent = true
+	}
+	if hasContent {
+		args = append(args, current.String())
+	}
+	return args
+}
+
 func isPublicCommand(line string) bool {
-	p := strings.Fields(line)
+	p := parseArgs(line)
 	if len(p) == 0 {
 		return false
 	}
@@ -235,7 +289,7 @@ func (b *Bot) reply(message string) {
 
 func (b *Bot) command(line string) {
 	line = strings.Trim(line, "\ufeff\u200b\u200c\u200d \t\r\n")
-	p := strings.Fields(line)
+	p := parseArgs(line)
 	if len(p) == 0 {
 		return
 	}
@@ -457,51 +511,7 @@ func (b *Bot) command(line string) {
 		b.headshakeTicks = 0
 		b.reply(fmt.Sprintf("Headshaking %s (repeat=%v).", p[1], repeat))
 	case "emote":
-		if len(p) >= 2 && strings.EqualFold(p[1], "clear") {
-			b.emoteID = ""
-			b.emoteRepeat = false
-			b.reply("Emote stopped.")
-			return
-		}
-		if len(p) < 2 || len(p) > 4 {
-			b.reply("Usage: emote <uuid> [repeat:true|false] [length] | emote clear")
-			return
-		}
-		emoteUUID := strings.ToLower(p[1])
-		if _, err := uuid.Parse(emoteUUID); err != nil {
-			b.reply(fmt.Sprintf("Invalid emote uuid: %s (use a UUID from the Bedrock-Emotes list)", p[1]))
-			return
-		}
-		repeat := false
-		var length uint32 = defaultEmoteLength
-		for _, arg := range p[2:] {
-			switch {
-			case strings.EqualFold(arg, "true") || strings.EqualFold(arg, "yes") || arg == "1":
-				repeat = true
-			case strings.EqualFold(arg, "false") || strings.EqualFold(arg, "no") || arg == "0":
-				repeat = false
-			default:
-				n, err := strconv.Atoi(arg)
-				if err != nil || n < 1 || n > 7200 {
-					b.reply(fmt.Sprintf("Invalid length: %s (expected ticks 1-7200)", arg))
-					return
-				}
-				length = uint32(n)
-			}
-		}
-		if b.conn != nil {
-			_ = b.conn.WritePacket(&packet.Emote{EntityRuntimeID: b.entityID, EmoteID: emoteUUID, EmoteLength: length, Flags: 0})
-		}
-		b.emoteRepeat = repeat
-		if repeat {
-			b.emoteID = emoteUUID
-			b.emoteLength = length
-			b.emoteNextTick = b.tick + uint64(length)
-			b.reply(fmt.Sprintf("Emote %s repeating (length=%d).", emoteUUID, length))
-		} else {
-			b.emoteID = ""
-			b.reply(fmt.Sprintf("Emote %s sent (length=%d).", emoteUUID, length))
-		}
+		b.emoteCmd(p[1:])
 	case "skin":
 		b.skinCmd(p[1:])
 	case "nether":

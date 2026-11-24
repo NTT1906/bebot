@@ -336,10 +336,19 @@ Examples:
   bebot skin default`,
 
 	"emote": `§6=== Help: emote ===§r
-Description: Plays a Bedrock emote by UUID.
-Syntax: emote <uuid> [repeat:true|false] [length] or emote clear
+Description: Plays a Bedrock emote by bookmark name or UUID, with support for saved bookmarks.
+Syntax:
+  emote <name|uuid> [repeat:true|false] [length] - play an emote
+  emote add <name> <uuid> - save an emote bookmark (supports quoted names)
+  emote remove <name> - delete an emote bookmark
+  emote list - list all saved emote bookmarks
+  emote clear / emote stop - stop active or repeating emote
 Examples:
-  bebot emote c1819d2b-c8c3-4d69-b5f7-66a7b370605a
+  bebot emote wave
+  bebot emote "hello world"
+  bebot emote add "hello world" c1819d2b-c8c3-4d69-b5f7-66a7b370605a
+  bebot emote list
+  bebot emote remove "hello world"
   bebot emote clear`,
 
 	"headshake": `§6=== Help: headshake ===§r
@@ -508,7 +517,8 @@ func (b *Bot) helpCmd(p []string) {
 			"skin <slim|normal> <path> - change skin PNG",
 			"skin pack <folder> list - list skins in pack",
 			"skin default - revert to default slim skin",
-			"emote <uuid> [repeat] [length] / emote clear",
+			"emote <name|uuid> [repeat] [length] / emote clear",
+			"emote add <name> <uuid> / remove <name> / list",
 			"headshake yes|no [repeat] / headshake clear",
 			"quit / exit - disconnect bot",
 		},
