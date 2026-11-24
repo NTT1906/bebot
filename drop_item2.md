@@ -201,28 +201,26 @@ In Minecraft Bedrock, bundles inside personal inventory slots are single items (
 * **The Protocol Cause:**
   BDS only instantiates `PlayerCursorContainer` when an external container (chest, dropper, barrel, etc.) is open via a server-authoritative `ContainerManagerModel`. When standing in the world, BDS does not register a virtual cursor container.
 * **The Fix:**
-  If `take` to `ContainerCursor` is rejected with `status=50`, Bebot automatically falls back to executing `DropStackRequestAction` directly from the source slot. If that also fails, it immediately falls back to `dropSlotTx` (`packet.InventoryTransaction`), ensuring 100% of items are dropped.
+  If `take` to `ContainerCursor` is rejected with `status=50`, Bebot automatically falls back to executing `DropStackRequestAction` directly from the source slot.
 
 ---
 
-### Pitfall 8: `ScreenHandlerHUD` vs `ScreenHandlerContainer` & Backpack Slots 9–35
+### Pitfall 8: `ContainerCombinedHotBarAndInventory` vs `ContainerInventory`
 * **What Happened:**
-  When executing `dropall2` or `dropall3` in the open world, hotbar slots 0–8 succeeded, but backpack slots 9–35 consistently failed:
+  When executing `dropall2` or `dropall3`, hotbar slots 0–8 succeeded, but backpack slots 9–35 failed:
   ```
   bebot: inventory request=-861 rejected status=49
   bebot: drop3 slot 9 failed: status=49 (failed to validate source slot)
   ```
-* **The Deep Protocol Cause (BDS Server Internals):**
-  1. In BDS C++, when a player is standing in the world without an open block/entity container (chest, barrel, etc.), the active screen handler on the server is **`ScreenHandlerHUD`**.
-  2. `ScreenHandlerHUD` only registers **`ContainerHotBar`** (slots 0–8). It does **not** register `ContainerInventory` (slots 9–35) nor `ContainerCursor`.
-  3. Sending `packet.Interact{ActionType: packet.InteractActionOpenInventory, TargetEntityRuntimeID: 0}` notifies the client UI that the personal inventory is viewed, but on BDS it does **not** replace `ScreenHandlerHUD` with a server-authoritative container screen.
-  4. Any `packet.ItemStackRequest` referencing `ContainerInventory` (slots 9–35) triggers `ItemStackRequestActionHandler::_validateRequestSlot - failed to init sparse container`, rejecting with `status=49 (failed to validate source slot)`.
-* **The Universal Hybrid Solution:**
-  * Bebot implements a robust, two-tier architecture:
-    1. Try `packet.ItemStackRequest` first (which succeeds for hotbar slots 0–8, or all slots 0–35 if an actual container like a chest/dropper is open).
-    2. If BDS rejects any slot with `status=49` or `status=50`, Bebot instantly falls back to `dropSlotTx` using Bedrock's legacy balanced **`packet.InventoryTransaction`** (Method 1).
-    3. `packet.InventoryTransaction` operates on `WindowIDInventory` (0) and handles slots 0 through 35 universally without needing any active container screen handler.
-  * **Result**: Zero items are left behind. 100% of inventory items across all slots (0–35) are dropped successfully regardless of which drop command the user chooses.
+* **The Root Cause:**
+  * Previously, slots 9–35 were mapped to `protocol.ContainerInventory` (ID 29 / 33) with offset `slot - 9` (0..26).
+  * In Minecraft Bedrock's GUI inventory model, the player's 36 slots (hotbar 0–8 and storage 9–35) form a unified container: **`protocol.ContainerCombinedHotBarAndInventory`** (ID 12).
+  * When sending an `ItemStackRequest` targeting storage slots, referencing `ContainerInventory` fails sparse container validation on BDS (`status=49`).
+* **The Fix:**
+  * In `playerSlotContainer`:
+    * Hotbar slots (0–8) map to `protocol.ContainerHotBar` (slots 0..8).
+    * Backpack slots (9–35) map to `protocol.ContainerCombinedHotBarAndInventory` (slots 9..35).
+  * Method 2 (`drop2` / `dropall2`) and Method 3 (`drop3` / `dropall3`) run as pure, native `packet.ItemStackRequest` transactions without synthetic fallbacks to `packet.InventoryTransaction`.
 
 ---
 
@@ -247,7 +245,7 @@ Implemented in [src/bot/inventory.go](file:///d:/code/goland/bebot/src/bot/inven
 | :--- | :--- | :--- |
 | **`bebot dropall [random: true\|false]`** | **Method 1: First-Person In-World** | Drops all non-empty inventory slots in a single network flush without opening container screens. Drops in eye direction (default) or random scatter. Drops bundles intact. Works across all slots 0–35. |
 | **`bebot drop <slot> [count] [random]`** | **Method 1: First-Person In-World** | Drops `count` items (or all) from inventory slot `slot` directly in eye direction (default `random=false`). |
-| **`bebot dropall2 [random: true\|false]`** | **Method 2: Cursor Drag & Drop (Hybrid)** | Takes items to virtual cursor via `ItemStackRequest`. Automatically falls back to direct slot drop and `packet.InventoryTransaction` for slots 9–35. 100% drops all slots 0–35. |
-| **`bebot drop2 <slot> [count] [random]`** | **Method 2: Cursor Drag & Drop (Hybrid)** | Takes `count` items from `slot` to cursor and drops to world, with seamless `InventoryTransaction` fallback. |
-| **`bebot dropall3 [random: true\|false]`** | **Method 3: GUI Direct Slot Drop (Hybrid)** | Direct slot `DropStackRequestAction` batching for hotbar slots, with automatic `InventoryTransaction` fallback for backpack slots. Drops all slots 0–35. |
-| **`bebot drop3 <slot> [count] [random]`** | **Method 3: GUI Direct Slot Drop (Hybrid)** | Direct slot drop via `DropStackRequestAction` with automatic `InventoryTransaction` fallback. |
+| **`bebot dropall2 [random: true\|false]`** | **Method 2: Cursor Drag & Drop** | Takes items to virtual cursor via `ItemStackRequest` (with direct drop fallback if cursor is inactive). Drops all slots 0–35 natively. |
+| **`bebot drop2 <slot> [count] [random]`** | **Method 2: Cursor Drag & Drop** | Takes `count` items from `slot` to cursor and drops to world via `ItemStackRequest`. |
+| **`bebot dropall3 [random: true\|false]`** | **Method 3: GUI Direct Slot Drop** | Direct slot `DropStackRequestAction` batching across all slots 0–35 into atomic `ItemStackRequest`. |
+| **`bebot drop3 <slot> [count] [random]`** | **Method 3: GUI Direct Slot Drop** | Direct slot drop via `DropStackRequestAction` natively via `ItemStackRequest`. |
