@@ -6,39 +6,33 @@ This document provides a complete technical reference for all three canonical wa
 
 ## 1. High-Level Comparison Matrix
 
-| Feature | Method 1: First-Person In-World Drop | Method 2: GUI Direct Slot Drop | Method 3: Cursor Drag & Drop |
+| Feature | Method 1: First-Person In-World Drop (`drop` / `dropall`) | Method 2: Cursor Drag & Drop (`drop2` / `dropall2`) | Method 3: GUI Direct Slot Drop (`drop3` / `dropall3`) |
 | :--- | :--- | :--- | :--- |
-| **User Input in Game** | Pressing drop key while walking in the world | Hovering cursor over a slot in GUI and pressing `Q` | Left-clicking stack to cursor, dragging outside GUI window, and clicking |
+| **User Input in Game** | Pressing drop key (`Q`) while walking in the world | Left-clicking stack to cursor, dragging outside GUI window, and clicking | Hovering cursor over a slot in GUI and pressing `Q` |
 | **Protocol Packet** | `packet.InventoryTransaction` | `packet.ItemStackRequest` | `packet.ItemStackRequest` |
 | **Transaction Model** | Balanced container-to-world transaction | Server-authoritative action batch | Server-authoritative action batch |
-| **Actions Involved** | 2 balanced `InventoryAction`s:<br>1. Container slot decrement<br>2. World spawn item entity | 1 action per slot:<br>`DropStackRequestAction` | 2 actions per slot:<br>1. `TakeStackRequestAction`<br>2. `DropStackRequestAction` |
-| **Uses Virtual Cursor (`ContainerCursor`)?** | ❌ No | ❌ No *(bypasses cursor completely)* | ✔️ Yes (`protocol.ContainerCursor` ID 59) |
-| **Container Screen Required?** | ❌ **No** (works anywhere in world) | ⚠️ **Yes** (requires active GUI screen; fails in HUD with `status=49`) | ⚠️ **Yes** (requires active block/container window) |
-| **Multi-Slot Batching in 1 Packet?** | ✔️ Coalesced egress flush across all slots | **✔️ Yes** (batch `ItemStackRequest` when GUI is open) | ❌ No (Destination collision on cursor slot 0 triggers `status=50`) |
+| **Actions Involved** | 2 balanced `InventoryAction`s:<br>1. Container slot decrement<br>2. World spawn item entity | 2 actions per slot:<br>1. `TakeStackRequestAction`<br>2. `DropStackRequestAction` | 1 action per slot:<br>`DropStackRequestAction` |
+| **Uses Virtual Cursor (`ContainerCursor`)?** | ❌ No | ✔️ Yes (`protocol.ContainerCursor` ID 59) | ❌ No *(bypasses cursor completely)* |
+| **Container Screen Lifecycle** | ❌ **None** (works anywhere in world without opening/closing screens) | 🔄 **Auto Open/Close** (opens inventory screen with `TargetEntityRuntimeID: 0`, drops, closes) | 🔄 **Auto Open/Close** (opens inventory screen with `TargetEntityRuntimeID: 0`, drops, closes) |
+| **Multi-Slot Batching in 1 Packet?** | ✔️ Coalesced egress flush across all slots | ❌ No (Destination collision on cursor slot 0 triggers `status=50`) | **✔️ Yes** (batch `ItemStackRequest` containing all slots simultaneously) |
 | **Drops Bundles Intact?** | ✔️ **Yes** (drops bundle item itself, preserving contents) | ✔️ **Yes** (drops bundle item itself) | ✔️ **Yes** (drops bundle item itself) |
-| **Bebot Command** | **`bebot dropall [all]`**<br>**`bebot drop <slot> [amount]`** | GUI context drop | **`bebot dropall2 [all]`**<br>**`bebot drop2 <slot> [amount]`** |
+| **Drop Direction** | Look/eye vector (default `random=false`) or spherical scatter (`random=true`) | Look/eye vector (default `random=false`) or spherical scatter (`random=true`) | Look/eye vector (default `random=false`) or spherical scatter (`random=true`) |
+| **Bebot Command** | **`bebot dropall [random: true\|false]`**<br>**`bebot drop <slot> [count] [random]`** | **`bebot dropall2 [random: true\|false]`**<br>**`bebot drop2 <slot> [count] [random]`** | **`bebot dropall3 [random: true\|false]`**<br>**`bebot drop3 <slot> [count] [random]`** |
 
 ---
 
 ## 2. In-Depth Protocol Mechanics
 
-### Method 1: First-Person Hotbar / In-World Drop
+### Method 1: First-Person In-World Drop (`drop` / `dropall`)
 When walking around in the world with no inventory GUI open, the client communicates drops via legacy balanced transactions rather than the modern `ItemStackRequest` queue.
 
 ```
-[ Player Hotbar Slot ] ──(Container Action)──> [ Player Hand / Eyes ] ──(World Action)──> [ World Entity Spawn ]
+[ Player Inventory Slot ] ──(Container Action)──> [ Player Hand / Eyes ] ──(World Action)──> [ World Entity Spawn ]
 ```
 
 #### Packet Structure
 * **Packet**: `packet.InventoryTransaction`
 * **TransactionData**: `&protocol.NormalTransactionData{}`
-* **Legacy Request ID**: Negative odd/even integer tracking request sequence (e.g. `-860`).
-* **LegacySetItemSlots**: Lists the container and slot modified:
-  ```go
-  LegacySetItemSlots: []protocol.LegacySetItemSlot{
-      {ContainerID: protocol.ContainerHotBar, Slots: []byte{slotIn}},
-  }
-  ```
 * **Actions**: Exactly two paired `protocol.InventoryAction` entries that balance the equation ($\text{OldItem} = \text{NewItem} + \text{DroppedItem}$):
   1. **Action 1 (Source Slot - Container)**:
      * `SourceType`: `protocol.InventoryActionSourceContainer` (ID `0`)
@@ -48,23 +42,65 @@ When walking around in the world with no inventory GUI open, the client communic
      * `NewItem`: Remaining item stack (count $N - \text{dropCount}$, or empty air if $0$)
   2. **Action 2 (World Entity Spawn - World)**:
      * `SourceType`: `protocol.InventoryActionSourceWorld` (ID `2`)
-     * `SourceFlags`: `protocol.Option(uint32(1))` (`InventoryActionSourceWorldFlagDropItem`)
+     * `SourceFlags`: `protocol.Option(uint32(0))` for look/eye vector (or `1` for random scatter)
      * `InventorySlot`: `0`
      * `OldItem`: Air (`protocol.ItemInstance{}`)
      * `NewItem`: Dropped stack entity (count $\text{dropCount}$)
 
+#### Why It Is Ideal for General Play:
+* **Zero UI Overhead**: Never opens or closes an inventory screen.
+* **All Slots Accessible**: Drops items from hotbar (0–8) and backpack (9–35) alike.
+* **Instant Single Network Flush**: All drops are serialized and sent in a single network flush.
+
 ---
 
-### Method 2: Direct Slot Drop (GUI `Q` Key)
-When viewing an inventory screen, hovering the mouse cursor over a slot and pressing `Q` (or `Ctrl+Q` to drop the whole stack) fires a direct slot drop.
+### Method 2: Cursor Drag & Drop (`drop2` / `dropall2`)
+When a player clicks an item with the mouse cursor, drags it outside the GUI window boundaries, and clicks to drop it:
 
 ```
-[ Inventory Slot ] ─────────────────────(DropStackRequestAction)─────────────────────> [ World Entity Spawn ]
-                                   (No Cursor Involved)
+[ Open Container Screen ] ──> [ Slot ] ──(Take)──> [ ContainerCursor #59 ] ──(Drop)──> [ World ] ──> [ Close Container Screen ]
 ```
 
 #### Key Characteristics
 * **Packet**: `packet.ItemStackRequest`
+* **Auto Container Lifecycle**:
+  * If no container screen is open, automatically opens inventory screen:
+    `packet.Interact{ActionType: packet.InteractActionOpenInventory, TargetEntityRuntimeID: 0}`
+  * Performs drops sequentially slot-by-slot.
+  * Closes inventory screen when done:
+    `packet.ContainerClose{WindowID: 0, ContainerType: byte(protocol.ContainerTypeInventory), ServerSide: false}`
+* **Actions per Slot**: Two sequential actions executed in order:
+  1. **Step 1: Pick up to Cursor (`TakeStackRequestAction`)**:
+     * `Source`: `protocol.StackRequestSlotInfo` of the origin inventory slot.
+     * `Destination`: `protocol.StackRequestSlotInfo` of `protocol.ContainerCursor` (Container ID `59`, Slot `0`, `StackNetworkID: 0`).
+     * `Count`: Count picked up to cursor (clamped to $[1, 64]$).
+  2. **Step 2: Drop from Cursor (`DropStackRequestAction`)**:
+     * `Source`: `protocol.StackRequestSlotInfo` of `protocol.ContainerCursor` (Container ID `59`, Slot `0`, `StackNetworkID: itemStackNetID`).
+     * `Count`: Count dropped from cursor into the world.
+     * `Randomly`: `false` (eye direction) or `true` (random scatter).
+
+#### Crucial Batching Constraint: Must Be Slot-by-Slot
+Because `protocol.ContainerCursor` contains only **a single slot (Slot 0)**, multiple items cannot be picked up to the cursor at the same time. If a client attempts to batch multiple `[Take, Drop]` pairs in a single `ItemStackRequest`, BDS evaluates the destination slots upfront before executing drops, resulting in:
+```
+status=50 (failed to validate destination slot)
+```
+Therefore, Cursor Drag & Drop iterates sequentially slot-by-slot with a small interval (30ms).
+
+---
+
+### Method 3: GUI Direct Slot Drop (`drop3` / `dropall3`)
+When viewing an inventory screen, hovering the mouse cursor over a slot and pressing `Q` (or `Ctrl+Q` to drop the whole stack) fires a direct slot drop.
+
+```
+[ Open Container Screen ] ──> [ Inventory Slot ] ─────(DropStackRequestAction)─────> [ World Entity Spawn ] ──> [ Close Screen ]
+                                                (No Cursor Involved)
+```
+
+#### Key Characteristics
+* **Packet**: `packet.ItemStackRequest`
+* **Auto Container Lifecycle**:
+  * Automatically opens inventory screen (`InteractActionOpenInventory`, `TargetEntityRuntimeID: 0`).
+  * Closes inventory screen when done (`ContainerClose`).
 * **Actions**: Exactly one `protocol.DropStackRequestAction` per dropped stack:
   ```go
   &protocol.DropStackRequestAction{
@@ -74,93 +110,37 @@ When viewing an inventory screen, hovering the mouse cursor over a slot and pres
           Slot:           slotInContainer,
           StackNetworkID: currentStackNetworkID,
       },
-      Randomly: false, // Random scatter velocity flag
+      Randomly: random, // false = eye direction, true = random scatter
   }
   ```
-* **Why It Is the Most Efficient Method**:
+* **Why It Is Highly Efficient**:
   1. **Zero Cursor Interaction**: Bypasses `ContainerCursor` completely, eliminating virtual cursor desync and `status=50` errors.
-  2. **Single-Packet Batching**: Bedrock servers permit multiple `DropStackRequestAction` entries inside a single `packet.ItemStackRequest`. Bebot can drop all 36 inventory slots simultaneously in one atomic network packet (`bebot dropall all`).
+  2. **Single-Packet Batching**: Bedrock servers permit multiple `DropStackRequestAction` entries inside a single `packet.ItemStackRequest`. Bebot drops all non-empty inventory slots simultaneously in one atomic network packet (`bebot dropall3`). If batching is rejected, it automatically falls back to slot-by-slot execution.
   3. **Halved Packet Size**: Requires only 1 action per slot instead of 2 actions.
-
----
-
-### Method 3: Cursor Drag & Drop (Outside GUI Window)
-When a player clicks an item with the mouse cursor, drags it into the void outside the GUI window boundaries, and clicks to toss it on the ground:
-
-```
-[ Inventory Slot ] ──(TakeStackRequestAction)──> [ ContainerCursor #59 ] ──(DropStackRequestAction)──> [ World Entity Spawn ]
-```
-
-#### Key Characteristics
-* **Packet**: `packet.ItemStackRequest`
-* **Actions**: Two sequential actions executed in order:
-  1. **Step 1: Pick up to Cursor (`TakeStackRequestAction`)**:
-     * `Source`: `protocol.StackRequestSlotInfo` of the origin inventory slot.
-     * `Destination`: `protocol.StackRequestSlotInfo` of `protocol.ContainerCursor` (Container ID `59`, Slot `0`, `StackNetworkID: 0`).
-     * `Count`: Count picked up to cursor.
-  2. **Step 2: Drop from Cursor (`DropStackRequestAction`)**:
-     * `Source`: `protocol.StackRequestSlotInfo` of `protocol.ContainerCursor` (Container ID `59`, Slot `0`, `StackNetworkID: itemStackNetID`).
-     * `Count`: Count dropped from cursor into the world.
-     * `Randomly`: `false`.
-
-#### Crucial Batching Constraint: Must Be Slot-by-Slot
-Because `protocol.ContainerCursor` contains only **a single slot (Slot 0)**, multiple items cannot be picked up to the cursor at the same time. If a client attempts to batch multiple `[Take, Drop]` pairs in a single `ItemStackRequest`, BDS evaluates the destination slots upfront before executing drops, resulting in:
-```
-status=50 (failed to validate destination slot)
-```
-Therefore, Cursor Drag & Drop (`bebot dropall2`) must iterate sequentially slot-by-slot with a small interval (e.g. 30ms).
 
 ---
 
 ## 3. Real-World Debugging Lessons & Server Pitfalls
 
-### Pitfall 1: The `InteractActionOpenInventory` on Self Trap
-A common architectural error in Bedrock bot development is assuming that dropping items requires opening the player's inventory GUI over the network:
-```go
-// DO NOT DO THIS!
-c.WritePacket(&packet.Interact{
-    ActionType:            packet.InteractActionOpenInventory,
-    TargetEntityRuntimeID: botEntityID, // Interacting with self
-})
-```
-* **What Happens**: In Bedrock, `InteractActionOpenInventory` is strictly for **external entities** (horses, donkeys, llamas, chest boats). When sent targeting the player's own entity ID, BDS responds with a placeholder window:
-  ```
-  ContainerOpen WindowID=X ContainerType=255 Pos=[-13 67 19]
-  ```
-  (`ContainerType=255` is `CONTAINER_TYPE_NONE`).
-* **The Fatal Consequence**: 500ms after opening `ContainerType=255`, BDS's anti-cheat flags an unauthorized entity interaction:
-  ```
-  last packet recv: *packet.PacketViolationWarning
-  nethernet: SCTP transport closed
-  ```
-  The server instantly terminates the connection!
-* **Rule**: **Never send `InteractActionOpenInventory` for player inventory drops.** Personal inventory is client-side and does not require any network interaction packet to view or drop.
+### Pitfall 1: Target Entity Runtime ID for `InteractActionOpenInventory`
+* **The Bug:**
+  When implementing `openInventory`, setting `TargetEntityRuntimeID: botEntityID` was interpreted by BDS as right-clicking/interacting with oneself. BDS anti-cheat flagged this as an illegal entity interaction, sending `PacketViolationWarning (Severity 2)` and terminating the connection (`nethernet: SCTP transport closed`).
+* **The Protocol Fix:**
+  Per Bedrock protocol specifications (gophertunnel `packet.Interact`):
+  > *"TargetEntityRuntimeID is the runtime ID of the entity that the player interacted with. This is empty (0) for the InteractActionOpenInventory action type."*
+  Setting `TargetEntityRuntimeID: 0` properly notifies BDS that the player has opened their client-side inventory screen without triggering anti-cheat checks.
 
 ---
 
-### Pitfall 2: `ContainerCursor` (ID 59) Lifecycle on BDS
-* When an **external block container** (chest, dropper, dispenser, furnace) is open:
-  BDS creates an active `ContainerManagerModel` containing a registered `PlayerCursorContainer`. In this state, `TakeStackRequestAction` to `ContainerCursor` (59) succeeds (`status=0 OK`).
-* When **no container screen is open** (or when dummy `ContainerType=255` is open):
-  BDS has no registered cursor container in the active container model. Any `TakeStackRequestAction` specifying `ContainerCursor` returns:
-  ```
-  status=50 (ItemStackResponseStatusFailedToValidateDstSlot)
-  ```
-  because the destination container does not exist.
+### Pitfall 2: `ContainerClose` Window and Container Type
+* When closing the player's personal inventory screen, the packet must specify:
+  * `WindowID: 0` (`protocol.WindowIDInventory`)
+  * `ContainerType: byte(protocol.ContainerTypeInventory)` (value `255` / `-1` as uint8)
+  * `ServerSide: false`
 
 ---
 
-### Pitfall 3: Dynamic `StackNetworkID` Desynchronization
-Bedrock Dedicated Server strictly enforces that `Source.StackNetworkID` matches the server's internal runtime ID:
-* If the client passes `StackNetworkID: 0` (or an outdated ID from before a container transfer), BDS rejects the transaction with:
-  ```
-  status=49 (ItemStackResponseStatusFailedToValidateSrcSlot)
-  ```
-* **Solution**: Bebot listens for incoming `packet.ItemStackResponse` and updates `b.inventory[slot].StackNetworkID` directly from `response.ContainerInfo.SlotInfo` on every transaction.
-
----
-
-### Pitfall 4: Action Count Range Assertion `[1, 64]`
+### Pitfall 3: Action Count Range Assertion `[1, 64]`
 In Bedrock's C++ binary packet deserializer (`ItemStackRequestPacket::read` / `readNoHeader`), the item `Count` field in `DropStackRequestAction`, `TakeStackRequestAction`, and `PlaceStackRequestAction` has an explicit stream-level bounds check:
 * **Strict Range:** The count value **must be in the closed range $[1, 64]$**.
 * **What Happens if Violated:**
@@ -168,32 +148,14 @@ In Bedrock's C++ binary packet deserializer (`ItemStackRequestPacket::read` / `r
   ```
   PacketViolationWarning Type=0 Severity=2 PacketID=147 Context="the input is outside of the accepted range [1, 64]\nreadNoHeader failed! packetId: 147"
   ```
-  The server flags this as a critical protocol violation and immediately terminates the SCTP network channel (`nethernet: SCTP transport closed`).
+  The server terminates the SCTP network channel.
 * **Solution**:
-  1. `findPlayerSlotForCount(netID, incomingCount)` ensures placing items into player inventory never allows a slot stack to exceed 64 items (automatically spilling into a new empty slot).
-  2. `dropSlots` chunks every drop action into slices of at most 64 items (`rem = 66 -> [64, 2]`), ensuring every transmitted `DropStackRequestAction` strictly complies with $[1, 64]$.
+  1. `dropSlots` chunks every drop action into slices of at most 64 items (`rem = 66 -> [64, 2]`), ensuring every transmitted action strictly complies with $[1, 64]$.
 
 ---
 
-### Pitfall 5: HUD ScreenHandler Rejection (`status=49`) & First-Person Drop Solution
-* **What Happened:**
-  When a bot stands in the world without an open container screen and sends an `ItemStackRequest` containing `DropStackRequestAction`, BDS evaluates the request through `ScreenHandlerHUD` / `HUDContainerScreenValidator`.
-  Because `HUDContainerScreenValidator` only permits HUD quick-interactions and does NOT permit container-screen `DropStackRequestAction`s on personal inventory slots, BDS rejects the request immediately with:
-  ```
-  inventory request=-861 rejected status=49 (failed to validate source slot)
-  ```
-* **Why Bundles Drop Intact:**
-  In Minecraft Bedrock, bundles inside personal inventory slots are single items (`protocol.ItemInstance`) containing bundle ID and item arrays in their NBT metadata. When dropping a bundle slot directly via `InventoryTransaction`, the bundle item itself is transferred to `InventoryActionSourceWorld`, leaving its internal items preserved inside the dropped entity.
-* **The Solution:**
-  Native Bedrock clients drop items in first-person via `packet.InventoryTransaction` with `NormalTransactionData` (Method 1). All slot transactions are queued and flushed in a single network transmission, dropping items instantaneously without requiring an open container screen.
-
----
-
-### Pitfall 6: Drop Velocity & Eye Direction vs. Random Scattering (`SourceFlags`)
-* **What Happened:**
-  Previously, dropped items flew in random directions instead of straight forward in the bot's look/eye direction.
-* **The BDS Protocol Cause:**
-  In Bedrock Dedicated Server (`InventorySource.h` / `Player.h`):
+### Pitfall 4: Drop Velocity & Eye Direction vs. Random Scattering (`SourceFlags`)
+* In Bedrock Dedicated Server (`InventorySource.h` / `Player.h`):
   ```cpp
   enum class InventorySourceFlags : uint {
       NoFlag                 = 0,
@@ -203,20 +165,26 @@ In Bedrock's C++ binary packet deserializer (`ItemStackRequestPacket::read` / `r
   ```
   * When `SourceFlags` in `InventoryActionSourceWorld` is set to `1` (`WorldInteractionRandom`), BDS calculates a random spherical scatter vector.
   * When `SourceFlags` is set to `0` (`NoFlag`), BDS projects the item velocity vector along the player's exact `yaw` and `pitch` (eye look vector from `PlayerAuthInput`).
-* **The Solution:**
-  Made `random` an optional parameter with default `false`:
-  * Default (`random: false`): Sets `SourceFlags = 0`, throwing items directly in the direction the bot is looking (eye vector).
-  * Random (`random: true`): Sets `SourceFlags = 1` (or `DropStackRequestAction.Randomly = true`), scattering items randomly.
+* **Implementation:**
+  All drop commands default to eye direction (`random: false`). An optional parameter `random: true` enables random scatter.
+
+---
+
+### Pitfall 5: Bundles Dropped Intact
+In Minecraft Bedrock, bundles inside personal inventory slots are single items (`protocol.ItemInstance`) containing bundle ID and item arrays in their NBT metadata.
+* Dropping a slot containing a bundle drops the bundle item itself into the world intact, preserving all items inside.
 
 ---
 
 ## 4. Bebot Implementation & Command Reference
 
-Implemented in [src/bot/inventory.go](file:///d:/code/goland/bebot/src/bot/inventory.go):
+Implemented in [src/bot/inventory.go](file:///d:/code/goland/bebot/src/bot/inventory.go) and [src/bot/chat.go](file:///d:/code/goland/bebot/src/bot/chat.go):
 
 | In-Game Chat Command | Method Used | Execution Characteristics |
 | :--- | :--- | :--- |
-| **`bebot dropall [random: true\|false]`** | **First-Person World Drop** | Iterates all non-empty inventory slots, constructs balanced `InventoryTransaction` pairs, and flushes in a single network burst. Drops forward in eye direction (default) or random scatter. Drops bundles intact. |
-| **`bebot drop <slot> [count] [random]`** | **First-Person World Drop** | Drops `count` items (or all) from inventory slot `slot` directly in eye direction (default `random=false`). |
-| **`bebot dropall2 [random: true\|false]`** | **Cursor Drag & Drop** | Drops each inventory slot sequentially via virtual cursor (`[Take to cursor, Drop from cursor]`). Requires an active container window. |
-| **`bebot drop2 <slot> [count] [random]`** | **Cursor Drag & Drop** | Takes `count` items from `slot` to virtual cursor, then drops them to the world in eye direction (default `random=false`). Requires an active container window. |
+| **`bebot dropall [random: true\|false]`** | **Method 1: First-Person In-World** | Drops all non-empty inventory slots in a single network flush without opening container screens. Drops in eye direction (default) or random scatter. Drops bundles intact. |
+| **`bebot drop <slot> [count] [random]`** | **Method 1: First-Person In-World** | Drops `count` items (or all) from inventory slot `slot` directly in eye direction (default `random=false`). |
+| **`bebot dropall2 [random: true\|false]`** | **Method 2: Cursor Drag & Drop** | Automatically opens inventory (`openInventory`, target 0), sequentially takes items to cursor and drops them slot-by-slot, and closes inventory (`closeInventory`) when done. |
+| **`bebot drop2 <slot> [count] [random]`** | **Method 2: Cursor Drag & Drop** | Automatically opens inventory, takes `count` items from `slot` to cursor, drops to world, and closes inventory. |
+| **`bebot dropall3 [random: true\|false]`** | **Method 3: GUI Direct Slot Drop** | Automatically opens inventory, batches `DropStackRequestAction`s for all slots into a single atomic `ItemStackRequest` (with automatic slot-by-slot fallback), and closes inventory when done. |
+| **`bebot drop3 <slot> [count] [random]`** | **Method 3: GUI Direct Slot Drop** | Automatically opens inventory, drops `count` items directly from `slot` via `DropStackRequestAction`, and closes inventory when done. |

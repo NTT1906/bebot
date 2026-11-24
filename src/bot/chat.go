@@ -603,8 +603,13 @@ func (b *Bot) command(line string) {
 	case "stopbreak", "cancelbreak", "abortbreak", "stopmine", "cancelmine":
 		b.stopMiningArea()
 		b.stopBreaking()
-	case "dropall", "dropall2":
-		useCursor := strings.EqualFold(p[0], "dropall2")
+	case "dropall", "dropall2", "dropall3":
+		method := DropMethodFirstPerson
+		if strings.EqualFold(p[0], "dropall2") {
+			method = DropMethodCursor
+		} else if strings.EqualFold(p[0], "dropall3") {
+			method = DropMethodDirectStack
+		}
 		random := false
 		for _, arg := range p[1:] {
 			if bVal, err := strconv.ParseBool(arg); err == nil {
@@ -613,7 +618,7 @@ func (b *Bot) command(line string) {
 				random = true
 			}
 		}
-		b.dropSlots(0, len(b.inventory), 0, useCursor, random)
+		b.dropSlots(0, len(b.inventory), 0, method, random)
 	case "inv", "inventory", "myinv", "items":
 		b.inventoryCmd(p)
 	case "transfer":
@@ -626,10 +631,15 @@ func (b *Bot) command(line string) {
 		b.viewContainerCmd(p)
 	case "bundletest":
 		b.bundleTestCmd(p)
-	case "drop", "drop2":
-		useCursor := strings.EqualFold(p[0], "drop2")
+	case "drop", "drop2", "drop3":
+		method := DropMethodFirstPerson
+		if strings.EqualFold(p[0], "drop2") {
+			method = DropMethodCursor
+		} else if strings.EqualFold(p[0], "drop3") {
+			method = DropMethodDirectStack
+		}
 		if len(p) < 2 || len(p) > 4 {
-			b.reply("Usage: drop <slot> [amount] [random: true|false] (or drop2 for cursor method)")
+			b.reply("Usage: drop <slot> [amount] [random: true|false] (or drop2 for cursor, drop3 for stack request)")
 			return
 		}
 		slot, err := strconv.Atoi(p[1])
@@ -648,7 +658,7 @@ func (b *Bot) command(line string) {
 				random = true
 			}
 		}
-		b.dropSlots(slot, 1, amount, useCursor, random)
+		b.dropSlots(slot, 1, amount, method, random)
 	case "help", "commands", "commandlist":
 		b.help()
 	case "hotbar", "slot":
@@ -796,9 +806,10 @@ func (b *Bot) help() {
 		"mine air - display currently known air runtime IDs",
 		"stopmine / stopbreak - stop mining",
 		"hotbar <0-9> - select a hotbar slot",
-		"dropall [random:true|false] - drop all items in eye direction (or random scatter)",
-		"dropall2 [random:true|false] - drop all items via cursor (requires open container)",
-		"drop <slot> [amount] [random:true|false] - drop items from a slot in eye direction (or drop2 for cursor)",
+		"dropall [random:true|false] - drop all items in eye direction (Method 1: first-person)",
+		"dropall2 [random:true|false] - drop all items via cursor (Method 2: cursor drag & drop)",
+		"dropall3 [random:true|false] - drop all items via stack request (Method 3: GUI slot drop)",
+		"drop <slot> [amount] [random:true|false] - drop items from a slot (or drop2 for cursor, drop3 for stack request)",
 		"transfer <slot a> <slot b> - move items between inventory slots",
 		"loot [x y z] - loot all items from container (chest, dropper, barrel, etc.)",
 		"take [x y z] <slot> [count] - take item from a container slot",
