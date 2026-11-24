@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"math"
@@ -1512,4 +1513,225 @@ func (b *Bot) closeContainerCmd(p []string) {
 
 	b.closeBlockContainer(c, wID)
 	b.reply(fmt.Sprintf("Closed container [WindowID=%d].", wID))
+}
+
+// dropAllNow drops all non-empty inventory slots at once using Method 1 (First-Person In-World).
+// If verbose is true, it replies to chat with the result. If false, it logs silently to console.
+// Returns the number of dropped slots.
+func (b *Bot) dropAllNow(random bool, verbose bool) int {
+	b.invMu.Lock()
+	defer b.invMu.Unlock()
+
+	b.mu.Lock()
+	c := b.conn
+	if c == nil {
+		b.mu.Unlock()
+		return 0
+	}
+
+	type dropInfo struct {
+		slot  int
+		item  protocol.ItemInstance
+		count uint16
+	}
+	var drops []dropInfo
+	for slot, item := range b.inventory {
+		if item.Stack.Count > 0 {
+			drops = append(drops, dropInfo{
+				slot:  slot,
+				item:  item,
+				count: item.Stack.Count,
+			})
+		}
+	}
+	b.mu.Unlock()
+
+	if len(drops) == 0 {
+		if verbose {
+			b.reply("No items found to drop.")
+		}
+		return 0
+	}
+
+	sourceFlags := uint32(0)
+	if random {
+		sourceFlags = 1
+	}
+
+	var droppedSlots []dropInfo
+	for _, drop := range drops {
+		oldItem := drop.item
+		newItem := protocol.ItemInstance{}
+		droppedItem := oldItem
+		droppedItem.Stack.Count = drop.count
+
+		tx := &packet.InventoryTransaction{
+			Actions: []protocol.InventoryAction{
+				{
+					SourceType:    protocol.InventoryActionSourceContainer,
+					WindowID:      protocol.Option(int8(protocol.WindowIDInventory)),
+					InventorySlot: uint32(drop.slot),
+					OldItem:       oldItem,
+					NewItem:       newItem,
+				},
+				{
+					SourceType:    protocol.InventoryActionSourceWorld,
+					SourceFlags:   protocol.Option(sourceFlags),
+					InventorySlot: 0,
+					OldItem:       protocol.ItemInstance{},
+					NewItem:       droppedItem,
+				},
+			},
+			TransactionData: &protocol.NormalTransactionData{},
+		}
+		if err := c.WritePacket(tx); err != nil {
+			log.Printf("bebot: drop slot %d write failed: %v\n", drop.slot, err)
+			continue
+		}
+		droppedSlots = append(droppedSlots, drop)
+	}
+
+	if len(droppedSlots) == 0 {
+		return 0
+	}
+
+	_ = c.Flush()
+
+	b.mu.Lock()
+	for _, drop := range droppedSlots {
+		if drop.slot < len(b.inventory) {
+			b.inventory[drop.slot] = protocol.ItemInstance{}
+			if byte(drop.slot) == b.hotbarSlot {
+				b.heldItem = protocol.ItemInstance{}
+			}
+		}
+	}
+	b.mu.Unlock()
+	b.sendHeldItem(c)
+
+	if verbose {
+		modeStr := "eye direction"
+		if random {
+			modeStr = "random scatter"
+		}
+		b.reply(fmt.Sprintf("Dropped items from %d slot(s) [direct first-person, %s].", len(droppedSlots), modeStr))
+	} else {
+		log.Printf("bebot: droploop dropped items from %d slot(s) (random=%v)\n", len(droppedSlots), random)
+	}
+	return len(droppedSlots)
+}
+
+// startDropLoop initiates a continuous inventory drop loop every `ticks` game ticks (default 20gt = 1s).
+func (b *Bot) startDropLoop(random bool, ticks int) {
+	if ticks <= 0 {
+		ticks = 20
+	}
+	b.stopDropLoop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	b.mu.Lock()
+	b.dropLoopActive = true
+	b.dropLoopCancel = cancel
+	b.dropLoopRandom = random
+	b.dropLoopTicks = ticks
+	b.mu.Unlock()
+
+	go b.runDropLoop(ctx, random, ticks)
+
+	modeStr := "eye direction"
+	if random {
+		modeStr = "random direction"
+	}
+	b.reply(fmt.Sprintf("Drop loop started (%dgt / %.1fs interval, %s). Send 'droploop stop' or 'stopdrop' to cancel.",
+		ticks, float64(ticks)*0.05, modeStr))
+}
+
+// stopDropLoop cancels any active drop loop. Returns true if a loop was cancelled.
+func (b *Bot) stopDropLoop() bool {
+	b.mu.Lock()
+	active := b.dropLoopActive
+	cancel := b.dropLoopCancel
+	b.dropLoopActive = false
+	b.dropLoopCancel = nil
+	b.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	return active
+}
+
+func (b *Bot) runDropLoop(ctx context.Context, random bool, ticks int) {
+	if ticks <= 0 {
+		ticks = 20
+	}
+	interval := time.Duration(ticks) * 50 * time.Millisecond
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	// Initial drop immediately on start if inventory has items
+	b.dropAllNow(random, false)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if b.isServerStalled() {
+				continue
+			}
+			b.dropAllNow(random, false)
+		}
+	}
+}
+
+func (b *Bot) dropLoopCmd(p []string) {
+	if len(p) >= 2 {
+		arg1 := strings.ToLower(p[1])
+		if arg1 == "stop" || arg1 == "off" || arg1 == "cancel" || arg1 == "end" {
+			if b.stopDropLoop() {
+				b.reply("Drop loop stopped.")
+			} else {
+				b.reply("Drop loop was not running.")
+			}
+			return
+		}
+		if arg1 == "status" {
+			b.mu.Lock()
+			active := b.dropLoopActive
+			rnd := b.dropLoopRandom
+			ticks := b.dropLoopTicks
+			b.mu.Unlock()
+			if active {
+				mode := "eye direction"
+				if rnd {
+					mode = "random direction"
+				}
+				b.reply(fmt.Sprintf("Drop loop is running (%dgt interval, %s). Send 'droploop stop' to stop.", ticks, mode))
+			} else {
+				b.reply("Drop loop is inactive.")
+			}
+			return
+		}
+	}
+
+	random := false
+	ticks := 20
+	for _, arg := range p[1:] {
+		argLower := strings.ToLower(arg)
+		if argLower == "random" {
+			random = true
+		} else if argLower == "eye" || argLower == "front" || argLower == "normal" {
+			random = false
+		} else if bVal, err := strconv.ParseBool(argLower); err == nil {
+			random = bVal
+		} else {
+			clean := strings.TrimSuffix(strings.TrimSuffix(argLower, "gt"), "ticks")
+			if tVal, err := strconv.Atoi(clean); err == nil && tVal > 0 {
+				ticks = tVal
+			}
+		}
+	}
+
+	b.startDropLoop(random, ticks)
 }

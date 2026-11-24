@@ -243,6 +243,7 @@ DiscoveryLoop:
 	b.mineQueue = nil
 	b.mineCurrent = nil
 	b.mineStuckTicks = 0
+	b.stopDropLoop()
 	game := c.GameData()
 	b.serverAuthoritativeInventory = game.ServerAuthoritativeInventory
 	b.worldTime = game.Time
@@ -455,6 +456,7 @@ func (b *Bot) connect(ctx context.Context) error {
 	b.mineQueue = nil
 	b.mineCurrent = nil
 	b.mineStuckTicks = 0
+	b.stopDropLoop()
 	game := c.GameData()
 	b.serverAuthoritativeInventory = game.ServerAuthoritativeInventory
 	b.worldTime = game.Time
@@ -888,10 +890,12 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 				log.Printf("bebot: trace: InventoryContent WindowID=%d ContainerID=%d DynamicID=%d items=%d\n", p.WindowID, p.Container.ContainerID, dynID, len(p.Content))
 			}
 			if p.WindowID == 0 {
+				b.mu.Lock()
 				b.inventory = append([]protocol.ItemInstance(nil), p.Content...)
 				if int(b.hotbarSlot) < len(b.inventory) {
 					b.heldItem = b.inventory[b.hotbarSlot]
 				}
+				b.mu.Unlock()
 				b.sendHeldItem(c)
 			} else if p.WindowID < 119 {
 				b.mu.Lock()
@@ -961,14 +965,18 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 			}
 		case *packet.PlayerHotBar:
 			if p.SelectHotBarSlot && p.SelectedHotBarSlot < 10 {
+				b.mu.Lock()
 				b.hotbarSlot = byte(p.SelectedHotBarSlot)
 				if int(b.hotbarSlot) < len(b.inventory) {
 					b.heldItem = b.inventory[b.hotbarSlot]
-					b.sendHeldItem(c)
 				}
+				b.mu.Unlock()
+				b.sendHeldItem(c)
 			}
 		case *packet.InventoryTransaction:
 			if _, ok := p.TransactionData.(*protocol.NormalTransactionData); ok {
+				b.mu.Lock()
+				heldChanged := false
 				for _, action := range p.Actions {
 					if action.SourceType == protocol.InventoryActionSourceContainer {
 						if windowID, ok := action.WindowID.Value(); ok && windowID == protocol.WindowIDInventory {
@@ -980,10 +988,14 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 							b.inventory[action.InventorySlot] = action.NewItem
 							if byte(action.InventorySlot) == b.hotbarSlot {
 								b.heldItem = action.NewItem
-								b.sendHeldItem(c)
+								heldChanged = true
 							}
 						}
 					}
+				}
+				b.mu.Unlock()
+				if heldChanged {
+					b.sendHeldItem(c)
 				}
 			}
 		}

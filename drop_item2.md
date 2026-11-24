@@ -250,6 +250,8 @@ Implemented in [src/bot/inventory.go](file:///d:/code/goland/bebot/src/bot/inven
 | In-Game Chat Command | Method Used | Execution Characteristics |
 | :--- | :--- | :--- |
 | **`bebot dropall [all\|each] [random]`** | **Method 1: First-Person In-World** | Default (`all` or omitted): drops all slots simultaneously in a single network flush. With `each`: drops sequentially 1-by-1 with 50ms interval. Eye direction (default) or random scatter (`random`). |
+| **`bebot droploop [random] [ticks]`** | **Method 1: First-Person Continuous Loop** | Continuously drops full inventory every 20gt (1s default, or specified ticks) via Method 1. Drops in eye direction (default) or random direction (`random`). Automatically drops new items as players pick them up or receive them from `/give`. Silent when inventory empty. |
+| **`bebot stopdroploop` / `bebot stopdrop`** | **Loop Management** | Stops any active drop loop. (Also supported: `bebot droploop stop`). |
 | **`bebot drop <slot> [count] [random]`** | **Method 1: First-Person In-World** | Drops `count` items (or all) from inventory slot `slot` directly in eye direction (default `random=false`). |
 | **`bebot dropall2 [all\|each] [random]`** | **Method 2: Cursor Drag & Drop** | Default (`all` or omitted): batches all slots into a single atomic `ItemStackRequest` (or rapid fallback). With `each`: drops sequentially 1-by-1 with 50ms interval. |
 | **`bebot drop2 <slot> [count] [random]`** | **Method 2: Cursor Drag & Drop** | Takes `count` items from `slot` to cursor and drops to world via `ItemStackRequest`. |

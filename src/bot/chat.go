@@ -603,6 +603,14 @@ func (b *Bot) command(line string) {
 	case "stopbreak", "cancelbreak", "abortbreak", "stopmine", "cancelmine":
 		b.stopMiningArea()
 		b.stopBreaking()
+	case "droploop", "loopdrop":
+		b.dropLoopCmd(p)
+	case "stopdroploop", "stoploopdrop", "stopdrop":
+		if b.stopDropLoop() {
+			b.reply("Drop loop stopped.")
+		} else {
+			b.reply("Drop loop was not running.")
+		}
 	case "dropall", "dropall2", "dropall3":
 		method := DropMethodFirstPerson
 		if strings.EqualFold(p[0], "dropall2") {
@@ -819,6 +827,8 @@ func (b *Bot) help() {
 		"dropall [all|each] [random:true|false] - drop all items (default: all at once; 'each' for sequential 1-by-1)",
 		"dropall2 [all|each] [random:true|false] - drop all items via cursor (default: all at once batch; 'each' for 1-by-1)",
 		"dropall3 [all|each] [random:true|false] - drop all items via stack request (default: all at once batch; 'each' for 1-by-1)",
+		"droploop [random] [ticks] - continuously drop all items every 20gt (1s) at eye direction or random",
+		"stopdroploop / stopdrop - stop the drop loop",
 		"drop <slot> [amount] [random:true|false] - drop items from a slot (or drop2 for cursor, drop3 for stack request)",
 		"transfer <slot a> <slot b> - move items between inventory slots",
 		"loot [x y z] - loot all items from container (chest, dropper, barrel, etc.)",

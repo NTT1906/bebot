@@ -205,6 +205,10 @@ type Bot struct {
 	stallTicks                   int
 	bundleTestActive             bool
 	bundleTestCancel             context.CancelFunc
+	dropLoopActive               bool
+	dropLoopCancel               context.CancelFunc
+	dropLoopRandom               bool
+	dropLoopTicks                int
 }
 
 // ServerStallThreshold returns the configured duration without server packets before considering the server stalled.
