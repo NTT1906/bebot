@@ -108,12 +108,12 @@ const (
 
 func (b *Bot) openInventory(c *minecraft.Conn) (byte, bool) {
 	b.mu.Lock()
-	if b.containerActive {
+	if b.containerActive && b.containerWindowID != 0 {
 		wID := b.containerWindowID
 		b.mu.Unlock()
 		return wID, false
 	}
-	b.containerActive = true
+	b.containerActive = false
 	b.containerWindowID = protocol.WindowIDInventory
 	b.mu.Unlock()
 
@@ -128,10 +128,10 @@ func (b *Bot) openInventory(c *minecraft.Conn) (byte, bool) {
 
 func (b *Bot) closeInventory(c *minecraft.Conn, wID byte) {
 	b.mu.Lock()
-	if b.containerActive && b.containerWindowID != 0 {
-		wID = b.containerWindowID
+	if wID == 0 || b.containerWindowID == wID {
+		b.containerActive = false
+		b.containerWindowID = 0
 	}
-	b.containerActive = false
 	b.mu.Unlock()
 	_ = c.WritePacket(&packet.ContainerClose{
 		WindowID:      wID,
@@ -140,6 +140,53 @@ func (b *Bot) closeInventory(c *minecraft.Conn, wID byte) {
 	})
 	_ = c.Flush()
 	time.Sleep(30 * time.Millisecond)
+}
+
+func (b *Bot) dropSlotTx(c *minecraft.Conn, slot int, count uint16, sourceFlags uint32) bool {
+	b.mu.Lock()
+	if slot < 0 || slot >= len(b.inventory) || b.inventory[slot].Stack.Count == 0 {
+		b.mu.Unlock()
+		return false
+	}
+	oldItem := b.inventory[slot]
+	newItem := oldItem
+	droppedItem := oldItem
+	if count > oldItem.Stack.Count {
+		count = oldItem.Stack.Count
+	}
+	droppedItem.Stack.Count = count
+	if oldItem.Stack.Count > count {
+		newItem.Stack.Count -= count
+	} else {
+		newItem = protocol.ItemInstance{}
+	}
+	b.mu.Unlock()
+
+	tx := &packet.InventoryTransaction{
+		Actions: []protocol.InventoryAction{
+			{
+				SourceType:    protocol.InventoryActionSourceContainer,
+				WindowID:      protocol.Option(int8(protocol.WindowIDInventory)),
+				InventorySlot: uint32(slot),
+				OldItem:       oldItem,
+				NewItem:       newItem,
+			},
+			{
+				SourceType:    protocol.InventoryActionSourceWorld,
+				SourceFlags:   protocol.Option(sourceFlags),
+				InventorySlot: 0,
+				OldItem:       protocol.ItemInstance{},
+				NewItem:       droppedItem,
+			},
+		},
+		TransactionData: &protocol.NormalTransactionData{},
+	}
+	if err := c.WritePacket(tx); err != nil {
+		log.Printf("bebot: dropSlotTx slot %d failed: %v\n", slot, err)
+		return false
+	}
+	_ = c.Flush()
+	return true
 }
 
 func (b *Bot) clearStackPending(id int32) {
@@ -345,7 +392,15 @@ func (b *Bot) dropSlots(start, count, requested, method int, random bool) {
 					ok, status = b.sendItemStackRequest(c, []protocol.StackRequestAction{directDrop})
 				}
 				if !ok {
-					log.Printf("bebot: drop2 slot %d failed: status=%d (%s)\n", drop.slot, status, stackStatusName(status))
+					log.Printf("bebot: drop2 slot %d failed (status=%d, %s), falling back to first-person drop\n", drop.slot, status, stackStatusName(status))
+					sourceFlags := uint32(0)
+					if random {
+						sourceFlags = 1
+					}
+					remainingToDrop := cnt + rem
+					if b.dropSlotTx(c, drop.slot, remainingToDrop, sourceFlags) {
+						break
+					}
 					lastStatus = status
 					slotSuccess = false
 					break
@@ -459,7 +514,15 @@ func (b *Bot) dropSlots(start, count, requested, method int, random bool) {
 
 				ok, status := b.sendItemStackRequest(c, []protocol.StackRequestAction{dropAction})
 				if !ok {
-					log.Printf("bebot: drop3 slot %d failed: status=%d (%s)\n", drop.slot, status, stackStatusName(status))
+					log.Printf("bebot: drop3 slot %d failed (status=%d, %s), falling back to first-person drop\n", drop.slot, status, stackStatusName(status))
+					sourceFlags := uint32(0)
+					if random {
+						sourceFlags = 1
+					}
+					remainingToDrop := cnt + rem
+					if b.dropSlotTx(c, drop.slot, remainingToDrop, sourceFlags) {
+						break
+					}
 					lastStatus = status
 					slotSuccess = false
 					break
