@@ -109,7 +109,7 @@ The bot automatically listens on UDP port 7551 for modern Bedrock NetherNet disc
 
 ## Commands
 
-Commands can be typed directly into the bot's terminal console or sent via in-game whisper (`bebot <command>` or `/w <bot_name> <command>`):
+Commands can be typed directly into the bot's terminal console or sent via in-game chat / whisper using the `bebot` prefix or `!b` alias (e.g. `!b say <msg>`, `!b coords`, `!b help`):
 
 ### 1. Mining & Block Breaking
 

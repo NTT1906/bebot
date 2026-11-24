@@ -52,3 +52,46 @@ func TestParseArgs(t *testing.T) {
 		})
 	}
 }
+
+func TestHasBotPrefix(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected bool
+	}{
+		{"!b say hello", true},
+		{"!b coords", true},
+		{"!bhelp", true},
+		{"bebot say hello", true},
+		{"bebot: say hello", true},
+		{"bebop coords", true},
+		{"hello world", false},
+		{"!c say hello", false},
+	}
+
+	for _, tt := range tests {
+		if got := hasBotPrefix(tt.input); got != tt.expected {
+			t.Errorf("hasBotPrefix(%q) = %v, want %v", tt.input, got, tt.expected)
+		}
+	}
+}
+
+func TestIsBotTrigger(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected bool
+	}{
+		{"!b", true},
+		{"!b:", true},
+		{"!bebot", true},
+		{"bebot", true},
+		{"bebot:", true},
+		{"bebop", true},
+		{"other", false},
+	}
+
+	for _, tt := range tests {
+		if got := isBotTrigger(tt.input); got != tt.expected {
+			t.Errorf("isBotTrigger(%q) = %v, want %v", tt.input, got, tt.expected)
+		}
+	}
+}

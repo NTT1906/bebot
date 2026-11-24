@@ -25,9 +25,33 @@ func (b *Bot) say(s string) {
 	}
 }
 
+// hasBotPrefix checks if a chat message starts with a recognized bot command prefix.
+func hasBotPrefix(s string) bool {
+	low := strings.ToLower(strings.TrimSpace(s))
+	if strings.HasPrefix(low, "!b") {
+		return true
+	}
+	for _, prefix := range []string{"bebot", "bebop"} {
+		if low == prefix || strings.HasPrefix(low, prefix+" ") || strings.HasPrefix(low, prefix+":") || strings.HasPrefix(low, prefix+",") {
+			return true
+		}
+	}
+	return false
+}
+
+// isBotTrigger returns true if the token is a bot prefix keyword.
+func isBotTrigger(token string) bool {
+	clean := strings.ToLower(strings.TrimSuffix(strings.TrimSuffix(token, ":"), ","))
+	switch clean {
+	case "bebot", "bebop", "!b", "!bebot":
+		return true
+	}
+	return false
+}
+
 func (b *Bot) commandFromChat(sender, text string) {
 	text = strings.TrimSpace(strings.Trim(text, "\ufeff\u200b\u200c\u200d"))
-	if !strings.HasPrefix(strings.ToLower(text), "bebot") {
+	if !hasBotPrefix(text) {
 		return
 	}
 	if !b.isSuperuser(sender) && !isPublicCommand(text) {
@@ -100,8 +124,11 @@ func isPublicCommand(line string) bool {
 	if len(p) == 0 {
 		return false
 	}
-	if strings.EqualFold(p[0], "bebot") || strings.EqualFold(p[0], "bebop") {
+	clean0 := strings.TrimSuffix(strings.TrimSuffix(p[0], ":"), ",")
+	if isBotTrigger(clean0) {
 		p = p[1:]
+	} else if strings.HasPrefix(strings.ToLower(clean0), "!b") && len(clean0) > 2 {
+		p[0] = clean0[2:]
 	}
 	if len(p) == 0 {
 		return false
@@ -154,7 +181,7 @@ func (b *Bot) handleWhisper(sender, message string) {
 		return
 	}
 	fmt.Printf("[whisper - %s] <%s> %s\n", time.Now().Format("2006-01-02 15:04:05"), sender, message)
-	if !b.isSuperuser(sender) || !strings.HasPrefix(strings.ToLower(message), "bebot") {
+	if !b.isSuperuser(sender) || !hasBotPrefix(message) {
 		return
 	}
 	b.mu.Lock()
@@ -293,9 +320,11 @@ func (b *Bot) command(line string) {
 	if len(p) == 0 {
 		return
 	}
-	p[0] = strings.TrimSuffix(strings.TrimSuffix(p[0], ":"), ",")
-	if strings.EqualFold(p[0], "bebot") || strings.EqualFold(p[0], "bebop") {
+	clean0 := strings.TrimSuffix(strings.TrimSuffix(p[0], ":"), ",")
+	if isBotTrigger(clean0) {
 		p = p[1:]
+	} else if strings.HasPrefix(strings.ToLower(clean0), "!b") && len(clean0) > 2 {
+		p[0] = clean0[2:]
 	}
 	if len(p) == 0 {
 		return

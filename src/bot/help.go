@@ -465,6 +465,7 @@ func (b *Bot) helpCmd(p []string) {
 	pages := [][]string{
 		{
 			"§6--- Bebot Help [1/4: Movement & Camera] ---§r",
+			"§7Prefix: 'bebot <cmd>' or '!b <cmd>' (e.g. '!b say hi')§r",
 			"move <x y z> - move to coordinates",
 			"follow <player> - follow a player",
 			"mimic <player> - mimic movement and actions",
