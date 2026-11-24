@@ -504,7 +504,14 @@ func (b *Bot) command(line string) {
 			b.startLearningAir(target)
 			return
 		}
-		if len(p) == 2 && strings.EqualFold(p[1], "air") {
+		if len(p) >= 2 && strings.EqualFold(p[1], "air") {
+			if len(p) >= 3 && (strings.EqualFold(p[2], "clear") || strings.EqualFold(p[2], "reset")) {
+				b.mu.Lock()
+				b.mineAirRuntimeIDs = make(map[uint32]bool)
+				b.mu.Unlock()
+				b.reply("Cleared all known air block runtime IDs.")
+				return
+			}
 			b.mu.Lock()
 			var ids []uint32
 			for id := range b.mineAirRuntimeIDs {

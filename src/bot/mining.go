@@ -331,38 +331,48 @@ func (b *Bot) handleUpdateBlock(pos protocol.BlockPos, runtimeID uint32) {
 
 	b.mu.Lock()
 	if b.mineLearnActive && pos == b.mineLearnPos {
-		isCreative := b.gameMode == 1 || b.gameMode == 4
-		hasBroken := b.mineLearnWasBroken || isCreative || b.breakTicks >= b.getBreakDurationLocked()
-		isDifferent := b.mineLearnInitialRuntimeID != 0 && runtimeID != b.mineLearnInitialRuntimeID
-
-		if !hasBroken && !isDifferent {
-			// This is the server confirming/syncing the existing solid block when StartBreak was sent.
+		// A block update arrived for the calibration block.
+		// If the block has NOT been broken yet, this update is the solid block being targeted.
+		if !b.mineLearnWasBroken {
 			if b.mineLearnInitialRuntimeID == 0 {
 				b.mineLearnInitialRuntimeID = runtimeID
-				log.Printf("bebot: mine learn target (%d, %d, %d) initial solid runtimeID detected: %d\n",
+				log.Printf("bebot: mine learn target (%d, %d, %d) initial solid block runtimeID: %d\n",
 					pos.X(), pos.Y(), pos.Z(), runtimeID)
 			}
 			b.mu.Unlock()
 			return
 		}
 
-		// The block has genuinely broken into air
+		// The block has completed breaking (b.mineLearnWasBroken == true).
+		// Verify that the new runtimeID is different from the solid block.
+		if b.mineLearnInitialRuntimeID != 0 && runtimeID == b.mineLearnInitialRuntimeID {
+			// The server re-sent the solid block (break not processed yet)
+			b.mu.Unlock()
+			return
+		}
+
+		// Genuine air block confirmed!
 		if b.mineAirRuntimeIDs == nil {
 			b.mineAirRuntimeIDs = make(map[uint32]bool)
+		}
+		if b.mineLearnInitialRuntimeID != 0 {
+			delete(b.mineAirRuntimeIDs, b.mineLearnInitialRuntimeID)
 		}
 		b.mineAirRuntimeIDs[runtimeID] = true
 		if b.knownAirBlocks == nil {
 			b.knownAirBlocks = make(map[protocol.BlockPos]bool)
 		}
 		b.knownAirBlocks[pos] = true
+		solidID := b.mineLearnInitialRuntimeID
 		b.mineLearnActive = false
 		b.mineLearnWasBroken = false
+		b.mineLearnInitialRuntimeID = 0
 		b.breakTarget = nil
 		b.breakTicks = 0
 		b.mu.Unlock()
 
-		log.Printf("bebot: calibration complete! Confirmed air block runtime ID: %d\n", runtimeID)
-		b.reply(fmt.Sprintf("Calibration complete! Confirmed air block runtime ID: %d.", runtimeID))
+		log.Printf("bebot: calibration complete! Solid block (%d) broke -> Confirmed air runtime ID: %d\n", solidID, runtimeID)
+		b.reply(fmt.Sprintf("Calibration complete! Solid block broke -> Confirmed air block runtime ID: %d.", runtimeID))
 		return
 	}
 
@@ -546,6 +556,9 @@ func (b *Bot) startLearningAir(pos *protocol.BlockPos) {
 	initialRuntimeID := uint32(0)
 	if rid, ok := b.blockRuntimeIDs[target]; ok {
 		initialRuntimeID = rid
+		if b.mineAirRuntimeIDs != nil {
+			delete(b.mineAirRuntimeIDs, rid)
+		}
 	}
 	b.mineLearnActive = true
 	b.mineLearnPos = target

@@ -648,6 +648,11 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 			}
 		case *packet.HurtArmour:
 			log.Printf("bebot: armour damage cause=%d damage=%d slots=0x%x\n", p.Cause, p.Damage, p.ArmourSlots)
+		case *packet.SetPlayerGameType:
+			b.mu.Lock()
+			b.gameMode = p.GameType
+			b.mu.Unlock()
+			log.Printf("bebot: received SetPlayerGameType: gameMode=%d\n", p.GameType)
 		case *packet.Respawn:
 			if p.State == packet.RespawnStateReadyToSpawn {
 				log.Printf("bebot: respawn state=%d position=(%.2f, %.2f, %.2f)\n", p.State, p.Position.X(), p.Position.Y(), p.Position.Z())
