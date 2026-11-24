@@ -115,6 +115,7 @@ func (b *Bot) skinCmd(args []string) {
 func (b *Bot) sendSkin(sc config.SkinConfig) error {
 	b.mu.Lock()
 	c := b.conn
+	selfUUID := b.selfUUID
 	b.mu.Unlock()
 	if c == nil {
 		return fmt.Errorf("not connected")
@@ -124,10 +125,13 @@ func (b *Bot) sendSkin(sc config.SkinConfig) error {
 		return err
 	}
 	skin.OverrideAppearance = config.OverrideAppearanceOn(sc)
-	return c.WritePacket(&packet.PlayerSkin{
-		UUID: b.selfUUID,
+	if err := c.WritePacket(&packet.PlayerSkin{
+		UUID: selfUUID,
 		Skin: skin,
-	})
+	}); err != nil {
+		return err
+	}
+	return c.Flush()
 }
 
 func isReloadArg(args []string) bool {
