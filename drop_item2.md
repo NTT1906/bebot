@@ -17,7 +17,7 @@ This document provides a complete technical reference for all three canonical wa
 | **Multi-Slot Batching in 1 Packet?** | ✔️ Coalesced egress flush across all slots | ❌ No (Destination collision on cursor slot 0 triggers `status=50`) | **✔️ Yes** (batch `ItemStackRequest` containing all slots simultaneously) |
 | **Drops Bundles Intact?** | ✔️ **Yes** (drops bundle item itself, preserving contents) | ✔️ **Yes** (drops bundle item itself) | ✔️ **Yes** (drops bundle item itself) |
 | **Drop Direction** | Look/eye vector (default `random=false`) or spherical scatter (`random=true`) | Look/eye vector (default `random=false`) or spherical scatter (`random=true`) | Look/eye vector (default `random=false`) or spherical scatter (`random=true`) |
-| **Bebot Command** | **`bebot dropall [random: true\|false]`**<br>**`bebot drop <slot> [count] [random]`** | **`bebot dropall2 [random: true\|false]`**<br>**`bebot drop2 <slot> [count] [random]`** | **`bebot dropall3 [random: true\|false]`**<br>**`bebot drop3 <slot> [count] [random]`** |
+| **Bebot Command** | **`bebot dropall [all\|each] [random]`**<br>**`bebot drop <slot> [count] [random]`** | **`bebot dropall2 [all\|each] [random]`**<br>**`bebot drop2 <slot> [count] [random]`** | **`bebot dropall3 [all\|each] [random]`**<br>**`bebot drop3 <slot> [count] [random]`** |
 
 ---
 
@@ -249,11 +249,11 @@ Implemented in [src/bot/inventory.go](file:///d:/code/goland/bebot/src/bot/inven
 
 | In-Game Chat Command | Method Used | Execution Characteristics |
 | :--- | :--- | :--- |
-| **`bebot dropall [random: true\|false]`** | **Method 1: First-Person In-World** | Drops all non-empty inventory slots in a single network flush without opening container screens. Drops in eye direction (default) or random scatter. Drops bundles intact. Works across all slots 0–35. |
+| **`bebot dropall [all\|each] [random]`** | **Method 1: First-Person In-World** | Default (`all` or omitted): drops all slots simultaneously in a single network flush. With `each`: drops sequentially 1-by-1 with 50ms interval. Eye direction (default) or random scatter (`random`). |
 | **`bebot drop <slot> [count] [random]`** | **Method 1: First-Person In-World** | Drops `count` items (or all) from inventory slot `slot` directly in eye direction (default `random=false`). |
-| **`bebot dropall2 [random: true\|false]`** | **Method 2: Cursor Drag & Drop** | Takes items to virtual cursor via `ItemStackRequest` (with direct drop fallback if cursor is inactive). Drops all slots 0–35 natively. |
+| **`bebot dropall2 [all\|each] [random]`** | **Method 2: Cursor Drag & Drop** | Default (`all` or omitted): batches all slots into a single atomic `ItemStackRequest` (or rapid fallback). With `each`: drops sequentially 1-by-1 with 50ms interval. |
 | **`bebot drop2 <slot> [count] [random]`** | **Method 2: Cursor Drag & Drop** | Takes `count` items from `slot` to cursor and drops to world via `ItemStackRequest`. |
-| **`bebot dropall3 [random: true\|false]`** | **Method 3: GUI Direct Slot Drop** | Direct slot `DropStackRequestAction` batching across all slots 0–35 into atomic `ItemStackRequest`. |
+| **`bebot dropall3 [all\|each] [random]`** | **Method 3: GUI Direct Slot Drop** | Default (`all` or omitted): batches all slots into a single atomic `ItemStackRequest` (or rapid fallback). With `each`: drops sequentially 1-by-1 with 50ms interval. |
 | **`bebot drop3 <slot> [count] [random]`** | **Method 3: GUI Direct Slot Drop** | Direct slot drop via `DropStackRequestAction` natively via `ItemStackRequest`. |
 | **`bebot open <x y z>`** | **Container Management** | Opens external block container (chest, dropper, barrel) and keeps it open on server until `close`. Enables pure `ItemStackRequest` across all slots 0–35. |
 | **`bebot close`** | **Container Management** | Closes currently open container window. |

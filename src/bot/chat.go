@@ -611,14 +611,20 @@ func (b *Bot) command(line string) {
 			method = DropMethodDirectStack
 		}
 		random := false
+		each := false
 		for _, arg := range p[1:] {
-			if bVal, err := strconv.ParseBool(arg); err == nil {
+			argLower := strings.ToLower(arg)
+			if bVal, err := strconv.ParseBool(argLower); err == nil {
 				random = bVal
-			} else if strings.EqualFold(arg, "random") {
+			} else if argLower == "random" {
 				random = true
+			} else if argLower == "each" || argLower == "seq" || argLower == "sequence" || argLower == "sequential" || argLower == "1by1" {
+				each = true
+			} else if argLower == "all" || argLower == "batch" || argLower == "instant" {
+				each = false
 			}
 		}
-		b.dropSlots(0, len(b.inventory), 0, method, random)
+		b.dropSlots(0, len(b.inventory), 0, method, random, each)
 	case "inv", "inventory", "myinv", "items":
 		b.inventoryCmd(p)
 	case "transfer":
@@ -662,7 +668,7 @@ func (b *Bot) command(line string) {
 				random = true
 			}
 		}
-		b.dropSlots(slot, 1, amount, method, random)
+		b.dropSlots(slot, 1, amount, method, random, false)
 	case "help", "commands", "commandlist":
 		b.help()
 	case "hotbar", "slot":
@@ -810,9 +816,9 @@ func (b *Bot) help() {
 		"mine air - display currently known air runtime IDs",
 		"stopmine / stopbreak - stop mining",
 		"hotbar <0-9> - select a hotbar slot",
-		"dropall [random:true|false] - drop all items in eye direction (Method 1: first-person)",
-		"dropall2 [random:true|false] - drop all items via cursor (Method 2: cursor drag & drop)",
-		"dropall3 [random:true|false] - drop all items via stack request (Method 3: GUI slot drop)",
+		"dropall [all|each] [random:true|false] - drop all items (default: all at once; 'each' for sequential 1-by-1)",
+		"dropall2 [all|each] [random:true|false] - drop all items via cursor (default: all at once batch; 'each' for 1-by-1)",
+		"dropall3 [all|each] [random:true|false] - drop all items via stack request (default: all at once batch; 'each' for 1-by-1)",
 		"drop <slot> [amount] [random:true|false] - drop items from a slot (or drop2 for cursor, drop3 for stack request)",
 		"transfer <slot a> <slot b> - move items between inventory slots",
 		"loot [x y z] - loot all items from container (chest, dropper, barrel, etc.)",
