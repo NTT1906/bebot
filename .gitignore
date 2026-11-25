@@ -9,6 +9,7 @@ config.json
 skin.json
 waypoints.json
 offline_uuid.json
+emotes.json
 
 # Certs
 cert/
