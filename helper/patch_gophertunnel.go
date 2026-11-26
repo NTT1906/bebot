@@ -12,20 +12,28 @@ import (
 )
 
 func main() {
-	fmt.Println("Finding GOPATH...")
-	out, err := exec.Command("go", "env", "GOPATH").Output()
-	if err != nil {
-		fmt.Printf("Error finding GOPATH: %v\n", err)
-		os.Exit(1)
+	fmt.Println("Finding gophertunnel module directory...")
+	var connGoPath string
+
+	out, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", "github.com/sandertv/gophertunnel").Output()
+	if err == nil && len(strings.TrimSpace(string(out))) > 0 {
+		modDir := strings.TrimSpace(string(out))
+		connGoPath = filepath.Join(modDir, "minecraft", "conn.go")
+	} else {
+		// Fallback to GOPATH
+		gopathOut, err := exec.Command("go", "env", "GOPATH").Output()
+		if err != nil {
+			fmt.Printf("Error finding GOPATH: %v\n", err)
+			os.Exit(1)
+		}
+		gopath := strings.TrimSpace(string(gopathOut))
+		if gopath == "" {
+			fmt.Println("GOPATH is empty.")
+			os.Exit(1)
+		}
+		connGoPath = filepath.Join(gopath, "pkg", "mod", "github.com", "sandertv", "gophertunnel@v1.63.0", "minecraft", "conn.go")
 	}
 
-	gopath := strings.TrimSpace(string(out))
-	if gopath == "" {
-		fmt.Println("GOPATH is empty.")
-		os.Exit(1)
-	}
-
-	connGoPath := filepath.Join(gopath, "pkg", "mod", "github.com", "sandertv", "gophertunnel@v1.63.0", "minecraft", "conn.go")
 	fmt.Printf("Target file: %s\n", connGoPath)
 
 	content, err := os.ReadFile(connGoPath)
