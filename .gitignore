@@ -13,6 +13,7 @@ emotes.json
 
 bots/
 cache/
+data/
 
 # Certs
 cert/

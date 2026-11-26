@@ -48,6 +48,7 @@ const DefaultServerStallThresholdMs = 250
 type Config struct {
 	Version          int        `json:"version" toml:"version"`
 	Superuser        string     `json:"superuser" toml:"superuser"`
+	BlockPalettePath string     `json:"block_palette_path,omitempty" toml:"block-palette-path,omitempty"`
 	FreeMemAfterJoin *bool      `json:"free_mem_after_join,omitempty" toml:"free-mem-after-join,omitempty"`
 	Server           struct {
 		Host    string `json:"host" toml:"host"`

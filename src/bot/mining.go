@@ -142,7 +142,7 @@ func (b *Bot) isInMineBox(pos protocol.BlockPos) bool {
 		pos.Z() >= b.mineBoxMin.Z() && pos.Z() <= b.mineBoxMax.Z()
 }
 
-const defaultAirRuntimeIDsCacheFile = "cache/air_runtime_ids.json"
+const defaultAirRuntimeIDsCacheFile = "data/air_runtime_ids.json"
 
 type airCacheData struct {
 	ServerUseHashes bool     `json:"server_use_hashes"`

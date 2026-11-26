@@ -46,6 +46,7 @@ func main() {
 	botNameFlag := flag.String("name", "Bebot", "bot display name (used in offline/LAN mode)")
 	renewFlag := flag.Bool("renew", false, "generate a fresh identity/UUID for offline/LAN mode instead of reusing saved UUID")
 	pprofFlag := flag.String("pprof", "", "bind address for net/http/pprof diagnostics (e.g. :6060 or localhost:6060)")
+	blockPaletteFlag := flag.String("block-palette", "", "path to custom block palette file (.nbt or .json)")
 	flag.Parse()
 
 	if *pprofFlag != "" {
@@ -140,8 +141,9 @@ func main() {
 		Offline:     *offlineFlag,
 		BotName:     *botNameFlag,
 		OfflineUUID: offlineUUID,
-		Local:       *localFlag,
-		Debug:       *debugFlag,
+		Local:            *localFlag,
+		Debug:            *debugFlag,
+		BlockPalettePath: *blockPaletteFlag,
 	})
 
 	go b.Run(ctx)
