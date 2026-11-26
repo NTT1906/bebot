@@ -254,6 +254,7 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 			step = hDist
 		}
 		b.pos = b.pos.Add(mgl32.Vec3{dx / hDist * step, 0, dz / hDist * step})
+		b.updateChunkCenterIfMoved()
 	}
 	b.mu.Lock()
 	if b.jumpIntervalTicks > 0 {

@@ -550,10 +550,24 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 			b.lastDisconnectMsg = p.Message
 			b.mu.Unlock()
 			log.Printf("bebot: server disconnected: %q\n", p.Message)
+		case *packet.LevelChunk:
+			if b.chunkCache != nil {
+				b.chunkCache.OnLevelChunk(p)
+			}
+		case *packet.SubChunk:
+			if b.chunkCache != nil {
+				b.chunkCache.OnSubChunk(p)
+			}
 		case *packet.UpdateBlock:
 			b.handleUpdateBlock(p.Position, p.NewBlockRuntimeID)
+			if b.chunkCache != nil {
+				b.chunkCache.OnBlockUpdate(p.Position, p.NewBlockRuntimeID)
+			}
 		case *packet.UpdateBlockSynced:
 			b.handleUpdateBlock(p.Position, p.NewBlockRuntimeID)
+			if b.chunkCache != nil {
+				b.chunkCache.OnBlockUpdate(p.Position, p.NewBlockRuntimeID)
+			}
 		case *packet.UpdateSubChunkBlocks:
 			for _, entry := range p.Blocks {
 				pos := b.resolveSubChunkBlockPos(p.Position, entry.BlockPos)
@@ -562,6 +576,10 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 			for _, entry := range p.Extra {
 				pos := b.resolveSubChunkBlockPos(p.Position, entry.BlockPos)
 				b.handleUpdateBlock(pos, entry.BlockRuntimeID)
+			}
+			if b.chunkCache != nil {
+				b.chunkCache.OnSubChunkBlocks(p.Position, p.Blocks)
+				b.chunkCache.OnSubChunkBlocks(p.Position, p.Extra)
 			}
 		case *packet.BlockActorData:
 			if tracePackets {
@@ -638,6 +656,7 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 				b.players[name] = v
 			}
 			b.mu.Unlock()
+			b.updateChunkCenterIfMoved()
 		case *packet.MoveActorAbsolute:
 			b.mu.Lock()
 			if name, ok := b.playersByID[p.EntityRuntimeID]; ok {

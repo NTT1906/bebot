@@ -191,7 +191,15 @@ func (b *Bot) placeBlockAt(targetPos protocol.BlockPos) {
 
 	// 4. Check if target block position is already occupied
 	// A: Check if local cache knows this block and it is not air
-	if targetRID, known := b.blockRuntimeIDs[targetPos]; known {
+	var targetRID uint32
+	var targetKnown bool
+	if b.chunkCache != nil && b.chunkCache.IsEnabled() {
+		targetRID, targetKnown = b.chunkCache.BlockAt(targetPos)
+	}
+	if !targetKnown {
+		targetRID, targetKnown = b.blockRuntimeIDs[targetPos]
+	}
+	if targetKnown {
 		isAir := targetRID == 0 || (b.mineAirRuntimeIDs != nil && b.mineAirRuntimeIDs[targetRID])
 		if !isAir {
 			b.mu.Unlock()
@@ -261,8 +269,15 @@ func (b *Bot) placeBlockAt(targetPos protocol.BlockPos) {
 	}
 
 	for _, cand := range candidates {
-		rid, known := b.blockRuntimeIDs[cand.neighborOf]
-		if known && !b.mineAirRuntimeIDs[rid] {
+		var rid uint32
+		var known bool
+		if b.chunkCache != nil && b.chunkCache.IsEnabled() {
+			rid, known = b.chunkCache.BlockAt(cand.neighborOf)
+		}
+		if !known {
+			rid, known = b.blockRuntimeIDs[cand.neighborOf]
+		}
+		if known && rid != 0 && (b.mineAirRuntimeIDs == nil || !b.mineAirRuntimeIDs[rid]) {
 			clickedBlockPos = cand.neighborOf
 			clickedFace = cand.face
 			neighborRuntime = rid

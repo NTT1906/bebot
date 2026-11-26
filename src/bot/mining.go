@@ -282,16 +282,41 @@ func (b *Bot) startMiningArea(ax, ay, az, bx, by, bz int32, ticksReq int, repeat
 	}
 
 	queue := make([]protocol.BlockPos, 0, total)
+	airFiltered := 0
 	for y := maxY; y >= minY; y-- {
 		forward := true
 		for x := minX; x <= maxX; x++ {
 			if forward {
 				for z := minZ; z <= maxZ; z++ {
-					queue = append(queue, protocol.BlockPos{x, y, z})
+					pos := protocol.BlockPos{x, y, z}
+					if b.chunkCache != nil && b.chunkCache.IsEnabled() {
+						if rid, ok := b.chunkCache.BlockAt(pos); ok {
+							b.mu.Lock()
+							isAir := rid == 0 || (b.mineAirRuntimeIDs != nil && b.mineAirRuntimeIDs[rid])
+							b.mu.Unlock()
+							if isAir {
+								airFiltered++
+								continue
+							}
+						}
+					}
+					queue = append(queue, pos)
 				}
 			} else {
 				for z := maxZ; z >= minZ; z-- {
-					queue = append(queue, protocol.BlockPos{x, y, z})
+					pos := protocol.BlockPos{x, y, z}
+					if b.chunkCache != nil && b.chunkCache.IsEnabled() {
+						if rid, ok := b.chunkCache.BlockAt(pos); ok {
+							b.mu.Lock()
+							isAir := rid == 0 || (b.mineAirRuntimeIDs != nil && b.mineAirRuntimeIDs[rid])
+							b.mu.Unlock()
+							if isAir {
+								airFiltered++
+								continue
+							}
+						}
+					}
+					queue = append(queue, pos)
 				}
 			}
 			forward = !forward
@@ -332,7 +357,13 @@ func (b *Bot) startMiningArea(ax, ay, az, bx, by, bz int32, ticksReq int, repeat
 	if faceAccurate {
 		faceStr = "face-accurate"
 	}
-	b.reply(fmt.Sprintf("Mining space (%d, %d, %d) to (%d, %d, %d): %d blocks queued (%s, %s).", minX, minY, minZ, maxX, maxY, maxZ, total, modeStr, faceStr))
+	if airFiltered > 0 {
+		b.reply(fmt.Sprintf("Mining space (%d, %d, %d) to (%d, %d, %d): %d solid blocks queued (%d air pre-filtered, %s, %s).",
+			minX, minY, minZ, maxX, maxY, maxZ, len(queue), airFiltered, modeStr, faceStr))
+	} else {
+		b.reply(fmt.Sprintf("Mining space (%d, %d, %d) to (%d, %d, %d): %d blocks queued (%s, %s).",
+			minX, minY, minZ, maxX, maxY, maxZ, total, modeStr, faceStr))
+	}
 }
 
 func (b *Bot) stopMiningArea() {

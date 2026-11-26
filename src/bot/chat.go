@@ -141,7 +141,7 @@ func isPublicCommand(line string) bool {
 		return false
 	}
 	switch strings.ToLower(p[0]) {
-	case "nether", "day", "radar", "focus", "unfocus":
+	case "nether", "day", "radar", "focus", "unfocus", "chunk", "inspect", "probe":
 		return true
 	case "run-as", "runas", "as":
 		if len(p) >= 3 {
@@ -386,6 +386,13 @@ func (b *Bot) followCmd(args []string) {
 }
 
 func (b *Bot) reply(message string) {
+	b.mu.Lock()
+	hook := b.testReplyHook
+	b.mu.Unlock()
+	if hook != nil {
+		hook(message)
+	}
+
 	lines := strings.Split(message, "\n")
 	for i, rawLine := range lines {
 		line := strings.TrimSpace(rawLine)
@@ -673,6 +680,10 @@ func (b *Bot) commandInternal(line string, bypassFocus bool) {
 		b.wakeUp()
 	case "place", "placeblock":
 		b.placeCmd(p)
+	case "chunk":
+		b.chunkCmd(p[1:])
+	case "inspect", "probe":
+		b.inspectCmd(p[1:])
 	case "break", "breakat", "breakcoord", "mine", "mineat", "minearea", "minespace", "breakarea", "breakspace", "mineloop", "minefarm", "minetimeout", "learn", "learnair", "calibrate", "minelearn", "minecalibrate":
 		if strings.EqualFold(p[0], "learn") || strings.EqualFold(p[0], "learnair") || strings.EqualFold(p[0], "calibrate") ||
 			strings.EqualFold(p[0], "minelearn") || strings.EqualFold(p[0], "minecalibrate") ||

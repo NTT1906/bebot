@@ -423,6 +423,25 @@ Examples:
   bebot count villagers
   bebot count golems`,
 
+	"chunk": `§6=== Help: chunk ===§r
+Description: Loads, unloads, or inspects the local 3x3x3 sub-chunk window (27 sub-chunks) in memory.
+Syntax:
+  chunk load - enable sub-chunk caching around current position
+  chunk unload - disable caching and free all sub-chunk memory
+  chunk status - view active sub-chunks and center coordinate
+Examples:
+  bebot chunk load
+  bebot chunk status
+  bebot chunk unload`,
+
+	"inspect": `§6=== Help: inspect ===§r
+Description: Instantly queries the block state and runtime ID at target coordinates using the local chunk cache.
+Aliases: probe
+Syntax: inspect <x> <y> <z>
+Examples:
+  bebot inspect 250 64 -220
+  bebot probe 100 70 500`,
+
 	"mem": `§6=== Help: mem ===§r
 Description: Displays real-time Go runtime heap and OS memory metrics.
 Aliases: memory
@@ -504,6 +523,7 @@ var aliasMapping = map[string]string{
 	"near":            "nearby",
 	"shake":           "headshake",
 	"stopjump":        "stopjump",
+	"probe":           "inspect",
 	"memory":          "mem",
 	"reconnect":       "rejoin",
 	"exit":            "quit",

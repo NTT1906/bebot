@@ -231,6 +231,8 @@ type Bot struct {
 	spinSpeed                    float32
 	waypointGroups               map[uuid.UUID]int64
 	serverUseHashes              bool
+	chunkCache                   *ChunkCache
+	testReplyHook                func(string)
 }
 
 // ServerStallThreshold returns the configured duration without server packets before considering the server stalled.
@@ -318,6 +320,7 @@ func New(opts Options) *Bot {
 		dynamicContainerItems:     make(map[uint32][]protocol.ItemInstance),
 		containerRuntimeIDUpdated: make(chan uint32, 1),
 		stackPending:              make(map[int32]chan uint8),
+		chunkCache:                NewChunkCache(),
 	}
 }
 
