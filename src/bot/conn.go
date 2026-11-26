@@ -219,8 +219,11 @@ DiscoveryLoop:
 	b.entityID = c.GameData().EntityRuntimeID
 	b.gameMode = c.GameData().PlayerGameMode
 	b.tick = uint64(c.GameData().Time)
+	b.initAirRuntimeIDs(c.GameData().UseBlockNetworkIDHashes)
 	b.players = make(map[string]player)
 	b.playersByID = make(map[uint64]string)
+	b.playersByUniqueID = make(map[int64]string)
+	b.waypointGroups = make(map[uuid.UUID]int64)
 	b.playerListReady = false
 	b.playerEventsAfter = time.Now().Add(2 * time.Second)
 	b.mode = modeIdle
@@ -424,8 +427,11 @@ func (b *Bot) connect(ctx context.Context) error {
 	}
 	b.gameMode = c.GameData().PlayerGameMode
 	b.tick = uint64(c.GameData().Time)
+	b.initAirRuntimeIDs(c.GameData().UseBlockNetworkIDHashes)
 	b.players = make(map[string]player)
 	b.playersByID = make(map[uint64]string)
+	b.playersByUniqueID = make(map[int64]string)
+	b.waypointGroups = make(map[uuid.UUID]int64)
 	b.playerListReady = false
 	b.playerEventsAfter = time.Now().Add(2 * time.Second)
 	b.mode = modeIdle
@@ -608,6 +614,7 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 			v.name, v.id, v.online = p.Username, p.EntityRuntimeID, true
 			v.accountUUID = p.UUID
 			v.position, v.yaw, v.pitch = p.Position, p.Yaw, p.Pitch
+			v.hasLocation = true
 			v.sneaking, v.sprinting, v.swimming, v.usingItem = playerMetadataState(p.EntityMetadata)
 			b.players[name] = v
 			b.playersByID[p.EntityRuntimeID] = name
@@ -627,7 +634,135 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 				oldY := v.position.Y()
 				v.position, v.yaw, v.pitch = p.Position, p.Yaw, p.Pitch
 				v.jumping = p.Position.Y()-oldY > .25
+				v.hasLocation = true
 				b.players[name] = v
+			}
+			b.mu.Unlock()
+		case *packet.MoveActorAbsolute:
+			b.mu.Lock()
+			if name, ok := b.playersByID[p.EntityRuntimeID]; ok {
+				v := b.players[name]
+				v.position = p.Position
+				v.pitch, v.yaw = p.Rotation[0], p.Rotation[1]
+				v.hasLocation = true
+				b.players[name] = v
+			}
+			b.mu.Unlock()
+		case *packet.MoveActorDelta:
+			b.mu.Lock()
+			if name, ok := b.playersByID[p.EntityRuntimeID]; ok {
+				v := b.players[name]
+				pos := v.position
+				if val, ok := p.PositionX.Value(); ok {
+					pos[0] = val
+				}
+				if val, ok := p.PositionY.Value(); ok {
+					pos[1] = val
+				}
+				if val, ok := p.PositionZ.Value(); ok {
+					pos[2] = val
+				}
+				v.position = pos
+				if val, ok := p.RotationY.Value(); ok {
+					v.yaw = val
+				}
+				if val, ok := p.RotationX.Value(); ok {
+					v.pitch = val
+				}
+				v.hasLocation = true
+				b.players[name] = v
+			}
+			b.mu.Unlock()
+		case *packet.PlayerLocation:
+			b.mu.Lock()
+			matchedName := ""
+			if name, ok := b.playersByUniqueID[p.EntityUniqueID]; ok {
+				matchedName = name
+			} else {
+				for name, v := range b.players {
+					if v.uniqueID == p.EntityUniqueID || (v.id != 0 && uint64(p.EntityUniqueID) == v.id) {
+						matchedName = name
+						break
+					}
+				}
+			}
+			if matchedName != "" {
+				v := b.players[matchedName]
+				if p.Type == packet.PlayerLocationTypeCoordinates {
+					v.position = p.Position
+					v.hasLocation = true
+					b.players[matchedName] = v
+					log.Printf("bebot: PlayerLocation updated %s -> pos=(%.1f, %.1f, %.1f)\n",
+						matchedName, p.Position.X(), p.Position.Y(), p.Position.Z())
+				}
+			}
+			b.mu.Unlock()
+		case *packet.LocatorBar:
+			b.mu.Lock()
+			for _, wpEntry := range p.Waypoints {
+				wp := wpEntry.Waypoint
+				uniqueID, hasActorID := wp.ActorUniqueID.Value()
+				posInfo, hasPos := wp.WorldPosition.Value()
+
+				// If ActorUniqueID is present, map GroupHandle to ActorUniqueID
+				if hasActorID && uniqueID != 0 {
+					b.waypointGroups[wpEntry.GroupHandle] = uniqueID
+				}
+
+				// If Action is remove, clean up waypoint group mapping
+				if wpEntry.Action == protocol.WaypointActionRemove {
+					delete(b.waypointGroups, wpEntry.GroupHandle)
+					continue
+				}
+
+				// Position is required to update location
+				if !hasPos {
+					continue
+				}
+
+				// Resolve target UniqueID from explicit ActorUniqueID or cached GroupHandle mapping
+				targetUniqueID := uniqueID
+				if targetUniqueID == 0 && wpEntry.GroupHandle != uuid.Nil {
+					if id, ok := b.waypointGroups[wpEntry.GroupHandle]; ok {
+						targetUniqueID = id
+					}
+				}
+
+				matchedName := ""
+				if targetUniqueID != 0 {
+					if name, ok := b.playersByUniqueID[targetUniqueID]; ok {
+						matchedName = name
+					} else {
+						for name, v := range b.players {
+							if v.uniqueID == targetUniqueID || (v.id != 0 && uint64(targetUniqueID) == v.id) {
+								matchedName = name
+								break
+							}
+						}
+					}
+				}
+
+				// Fallback: check if GroupHandle matches any player's accountUUID
+				if matchedName == "" && wpEntry.GroupHandle != uuid.Nil {
+					for name, v := range b.players {
+						if v.accountUUID == wpEntry.GroupHandle {
+							matchedName = name
+							break
+						}
+					}
+				}
+
+				if matchedName != "" {
+					v := b.players[matchedName]
+					v.position = posInfo.Position
+					v.hasLocation = true
+					b.players[matchedName] = v
+					log.Printf("bebot: LocatorBar updated %s -> pos=(%.1f, %.1f, %.1f) action=%d group=%s\n",
+						matchedName, posInfo.Position.X(), posInfo.Position.Y(), posInfo.Position.Z(), wpEntry.Action, wpEntry.GroupHandle)
+				} else {
+					log.Printf("bebot: LocatorBar received action=%d group=%s uniqueID=%d pos=(%.1f, %.1f, %.1f) (no matched player)\n",
+						wpEntry.Action, wpEntry.GroupHandle, targetUniqueID, posInfo.Position.X(), posInfo.Position.Y(), posInfo.Position.Z())
+				}
 			}
 			b.mu.Unlock()
 		case *packet.CorrectPlayerMovePrediction:
@@ -683,6 +818,9 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 					v.name, v.online, v.accountUUID = entry.Username, true, entry.UUID
 					v.uniqueID = entry.EntityUniqueID
 					b.players[name] = v
+					if entry.EntityUniqueID != 0 {
+						b.playersByUniqueID[entry.EntityUniqueID] = name
+					}
 					if b.playerListReady && !wasOnline && time.Now().After(b.playerEventsAfter) {
 						b.logPlayerEvent("joined", entry.Username)
 					}
@@ -691,6 +829,9 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 						if v.accountUUID == entry.UUID {
 							if v.id != 0 {
 								delete(b.playersByID, v.id)
+							}
+							if v.uniqueID != 0 {
+								delete(b.playersByUniqueID, v.uniqueID)
 							}
 							delete(b.players, key)
 							if v.name != "" {

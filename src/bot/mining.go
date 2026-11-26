@@ -1,13 +1,19 @@
 package bot
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"math"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/go-gl/mathgl/mgl32"
+	"github.com/sandertv/gophertunnel/minecraft/nbt"
 	"github.com/sandertv/gophertunnel/minecraft/protocol"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
 )
@@ -136,13 +142,123 @@ func (b *Bot) isInMineBox(pos protocol.BlockPos) bool {
 		pos.Z() >= b.mineBoxMin.Z() && pos.Z() <= b.mineBoxMax.Z()
 }
 
-func defaultAirRuntimeIDs() map[uint32]bool {
-	return map[uint32]bool{
-		0:          true,
-		3690217760: true, // minecraft:air (Bedrock FNV-1a block hash)
-		3959618627: true, // minecraft:cave_air
-		848705078:  true, // minecraft:void_air
+const defaultAirRuntimeIDsCacheFile = "cache/air_runtime_ids.json"
+
+type airCacheData struct {
+	ServerUseHashes bool     `json:"server_use_hashes"`
+	RuntimeIDs      []uint32 `json:"runtime_ids"`
+}
+
+type blockStateTag struct {
+	Name   string         `nbt:"name"`
+	States map[string]any `nbt:"states"`
+}
+
+// HashBlockState computes the Bedrock Little-Endian NBT 32-bit FNV-1a hash for a block permutation.
+func HashBlockState(name string, states map[string]any) uint32 {
+	if states == nil {
+		states = map[string]any{}
 	}
+	tag := blockStateTag{
+		Name:   name,
+		States: states,
+	}
+	buf := new(bytes.Buffer)
+	_ = nbt.NewEncoderWithEncoding(buf, nbt.LittleEndian).Encode(tag)
+
+	h := fnv.New32a()
+	_, _ = h.Write(buf.Bytes())
+	return h.Sum32()
+}
+
+// computeDefaultAirRuntimeIDs computes initial air runtime IDs based on whether the server uses network hashes.
+func computeDefaultAirRuntimeIDs(useHashes bool) map[uint32]bool {
+	res := make(map[uint32]bool)
+	res[0] = true // 0 is universally recognized (vanilla BDS air index or uninitialized fallback)
+	if useHashes {
+		for _, name := range []string{"minecraft:air", "minecraft:cave_air", "minecraft:void_air"} {
+			res[HashBlockState(name, nil)] = true
+		}
+	}
+	return res
+}
+
+func (b *Bot) loadAirRuntimeIDsCache(filePath string) ([]uint32, bool) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, false
+	}
+	var cache airCacheData
+	if err := json.Unmarshal(data, &cache); err != nil {
+		return nil, false
+	}
+	return cache.RuntimeIDs, true
+}
+
+func (b *Bot) saveAirRuntimeIDsCacheLocked(filePath string) error {
+	if b.mineAirRuntimeIDs == nil {
+		return nil
+	}
+	ids := make([]uint32, 0, len(b.mineAirRuntimeIDs))
+	for id := range b.mineAirRuntimeIDs {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+
+	cache := airCacheData{
+		ServerUseHashes: b.serverUseHashes,
+		RuntimeIDs:      ids,
+	}
+	data, err := json.MarshalIndent(cache, "", "  ")
+	if err != nil {
+		return err
+	}
+	if dir := filepath.Dir(filePath); dir != "." && dir != "" {
+		_ = os.MkdirAll(dir, 0755)
+	}
+	return os.WriteFile(filePath, data, 0644)
+}
+
+// initAirRuntimeIDs initializes air block IDs upon server connection and merges cached learned IDs.
+func (b *Bot) initAirRuntimeIDs(useHashes bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.serverUseHashes = useHashes
+	b.mineAirRuntimeIDs = computeDefaultAirRuntimeIDs(useHashes)
+
+	// Load and merge cached IDs from disk
+	if cachedIDs, ok := b.loadAirRuntimeIDsCache(defaultAirRuntimeIDsCacheFile); ok {
+		for _, id := range cachedIDs {
+			b.mineAirRuntimeIDs[id] = true
+		}
+	}
+
+	// Persist the initialized/merged set to cache
+	_ = b.saveAirRuntimeIDsCacheLocked(defaultAirRuntimeIDsCacheFile)
+
+	ids := make([]uint32, 0, len(b.mineAirRuntimeIDs))
+	for id := range b.mineAirRuntimeIDs {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	log.Printf("bebot: initialized %d air block runtime IDs (useNetworkHashes=%v): %v\n", len(ids), useHashes, ids)
+}
+
+// BlockRuntimeIDByName resolves a block namespaced identifier (with optional state properties)
+// to its Bedrock runtime network ID.
+func (b *Bot) BlockRuntimeIDByName(name string, states map[string]any) (uint32, bool) {
+	b.mu.Lock()
+	useHashes := b.serverUseHashes
+	b.mu.Unlock()
+
+	if useHashes {
+		return HashBlockState(name, states), true
+	}
+	if name == "minecraft:air" {
+		return 0, true
+	}
+	return 0, false
 }
 
 func (b *Bot) startMiningArea(ax, ay, az, bx, by, bz int32, ticksReq int, repeat bool, faceAccurate bool) {
@@ -199,7 +315,7 @@ func (b *Bot) startMiningArea(ax, ay, az, bx, by, bz int32, ticksReq int, repeat
 	b.mineAttempts = make(map[protocol.BlockPos]int)
 	b.knownAirBlocks = make(map[protocol.BlockPos]bool)
 	if b.mineAirRuntimeIDs == nil {
-		b.mineAirRuntimeIDs = defaultAirRuntimeIDs()
+		b.mineAirRuntimeIDs = computeDefaultAirRuntimeIDs(b.serverUseHashes)
 	}
 	b.mineFastBreak = false
 	b.mineWaitingForBlocks = false
@@ -332,7 +448,15 @@ func (b *Bot) handleUpdateBlock(pos protocol.BlockPos, runtimeID uint32) {
 	b.blockRuntimeIDs[pos] = runtimeID
 	isContainerTarget := b.containerOpening && pos == b.containerPos
 	ch := b.containerRuntimeIDUpdated
+	upCh := b.blockRuntimeIDUpdated
 	b.mu.Unlock()
+
+	if upCh != nil {
+		select {
+		case upCh <- pos:
+		default:
+		}
+	}
 
 	if isContainerTarget && ch != nil {
 		select {
@@ -372,10 +496,11 @@ func (b *Bot) handleUpdateBlock(pos protocol.BlockPos, runtimeID uint32) {
 		// The block runtime ID changed!
 		// This handles BOTH normal blocks (after maxTicks) AND instant-break blocks (short grass, flowers, torches, slime)!
 		if b.mineAirRuntimeIDs == nil {
-			b.mineAirRuntimeIDs = defaultAirRuntimeIDs()
+			b.mineAirRuntimeIDs = computeDefaultAirRuntimeIDs(b.serverUseHashes)
 		}
 		delete(b.mineAirRuntimeIDs, b.mineLearnInitialRuntimeID)
 		b.mineAirRuntimeIDs[runtimeID] = true
+		_ = b.saveAirRuntimeIDsCacheLocked(defaultAirRuntimeIDsCacheFile)
 		if b.knownAirBlocks == nil {
 			b.knownAirBlocks = make(map[protocol.BlockPos]bool)
 		}
@@ -414,10 +539,11 @@ func (b *Bot) handleUpdateBlock(pos protocol.BlockPos, runtimeID uint32) {
 
 	if isRecentFinish && b.mineLastWasBroken {
 		if b.mineAirRuntimeIDs == nil {
-			b.mineAirRuntimeIDs = make(map[uint32]bool)
+			b.mineAirRuntimeIDs = computeDefaultAirRuntimeIDs(b.serverUseHashes)
 		}
 		if !b.mineAirRuntimeIDs[runtimeID] {
 			b.mineAirRuntimeIDs[runtimeID] = true
+			_ = b.saveAirRuntimeIDsCacheLocked(defaultAirRuntimeIDsCacheFile)
 			log.Printf("bebot: learned air block runtime ID %d\n", runtimeID)
 		}
 	}

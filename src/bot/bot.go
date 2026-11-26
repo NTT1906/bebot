@@ -71,6 +71,7 @@ type player struct {
 	id                                     uint64
 	uniqueID                               int64
 	online                                 bool
+	hasLocation                            bool
 	position                               mgl32.Vec3
 	yaw, pitch                             float32
 	sprinting, sneaking, swimming, jumping bool
@@ -97,11 +98,16 @@ type Bot struct {
 	quitting                     bool
 	players                      map[string]player
 	playersByID                  map[uint64]string
+	playersByUniqueID            map[int64]string
 	playerListReady              bool
 	playerEventsAfter            time.Time
 	waypoints                    map[string]waypoint.Waypoint
 	fromConsole                  bool
 	whisperTarget                string
+	commandSender                string
+	focusActive                  bool
+	focusTarget                  string
+	isFocused                    bool
 	worldTime                    int64
 	startGameTime                int64
 	capture                      chan commandResult
@@ -136,6 +142,9 @@ type Bot struct {
 	lastRecvPacketTime           time.Time
 	lastDisconnectMsg            string
 	blockRuntimeIDs              map[protocol.BlockPos]uint32
+	blockRuntimeIDUpdated        chan protocol.BlockPos
+	placePending                 *protocol.UseItemTransactionData
+	placePendingSwing            bool
 	invMu                        sync.Mutex
 	facingYaw, facingPitch       float32
 	idleYaw, idlePitch           float32
@@ -217,6 +226,11 @@ type Bot struct {
 	dropLoopCancel               context.CancelFunc
 	dropLoopRandom               bool
 	dropLoopTicks                int
+	spinActive                   bool
+	spinDirection                float32
+	spinSpeed                    float32
+	waypointGroups               map[uuid.UUID]int64
+	serverUseHashes              bool
 }
 
 // ServerStallThreshold returns the configured duration without server packets before considering the server stalled.
@@ -293,16 +307,13 @@ func New(opts Options) *Bot {
 		skinPath:          opts.SkinPath,
 		xblCache:          opts.XBLCache,
 		itemNamesByID:     make(map[int32]string),
+		isFocused:         true,
 		mineAttempts:      make(map[protocol.BlockPos]int),
-		mineAirRuntimeIDs: map[uint32]bool{
-			0:          true,
-			3690217760: true, // minecraft:air (Bedrock FNV-1a block hash)
-			3959618627: true, // minecraft:cave_air
-			848705078:  true, // minecraft:void_air
-		},
-		knownAirBlocks:            make(map[protocol.BlockPos]bool),
+		mineAirRuntimeIDs: computeDefaultAirRuntimeIDs(true),
+		knownAirBlocks:    make(map[protocol.BlockPos]bool),
 		mineTimeoutSec:            mineTimeout,
 		blockRuntimeIDs:           make(map[protocol.BlockPos]uint32),
+		blockRuntimeIDUpdated:     make(chan protocol.BlockPos, 16),
 		containerTileEntities:     make(map[protocol.BlockPos]map[string]any),
 		dynamicContainerItems:     make(map[uint32][]protocol.ItemInstance),
 		containerRuntimeIDUpdated: make(chan uint32, 1),
@@ -438,13 +449,29 @@ func (b *Bot) Close() {
 	}
 }
 
+// Reconnect cleanly disconnects from the current server and triggers the reconnect loop without quitting.
+func (b *Bot) Reconnect() {
+	b.mu.Lock()
+	c := b.conn
+	b.conn = nil
+	b.reconnectDelay = config.BaseReconnectDelay(b.cfg)
+	b.mu.Unlock()
+
+	if c != nil {
+		_ = c.WritePacket(&packet.Disconnect{HideDisconnectionScreen: true, Message: "Client reconnecting"})
+		_ = c.Flush()
+		_ = c.Close()
+		runtime.GC()
+	}
+}
+
 // TracePacket logs packet metadata when debug tracing is enabled.
 func TracePacket(header packet.Header, payload []byte, src, dst net.Addr) {
 	if !tracePackets {
 		return
 	}
 	n := tracedPackets.Add(1)
-	if n > 200 && header.PacketID != packet.IDDisconnect && header.PacketID != packet.IDStartGame && header.PacketID != packet.IDPlayStatus && header.PacketID != packet.IDResourcePacksInfo && header.PacketID != packet.IDResourcePackStack && header.PacketID != packet.IDResourcePackClientResponse && header.PacketID != packet.IDSetLocalPlayerAsInitialised && header.PacketID != packet.IDRequestChunkRadius && header.PacketID != packet.IDChunkRadiusUpdated {
+	if n > 200 && header.PacketID != packet.IDDisconnect && header.PacketID != packet.IDStartGame && header.PacketID != packet.IDPlayStatus && header.PacketID != packet.IDResourcePacksInfo && header.PacketID != packet.IDResourcePackStack && header.PacketID != packet.IDResourcePackClientResponse && header.PacketID != packet.IDSetLocalPlayerAsInitialised && header.PacketID != packet.IDRequestChunkRadius && header.PacketID != packet.IDChunkRadiusUpdated && header.PacketID != packet.IDLocatorBar && header.PacketID != packet.IDPlayerLocation {
 		return
 	}
 	from, to := "?", "?"

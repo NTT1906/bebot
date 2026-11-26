@@ -62,7 +62,13 @@ func (b *Bot) commandFromChat(sender, text string) {
 		b.mu.Lock()
 		b.fromConsole = false
 		b.whisperTarget = ""
+		b.commandSender = sender
 		b.mu.Unlock()
+		defer func() {
+			b.mu.Lock()
+			b.commandSender = ""
+			b.mu.Unlock()
+		}()
 		b.command(text)
 	}()
 }
@@ -135,7 +141,12 @@ func isPublicCommand(line string) bool {
 		return false
 	}
 	switch strings.ToLower(p[0]) {
-	case "nether", "day":
+	case "nether", "day", "radar", "focus", "unfocus":
+		return true
+	case "run-as", "runas", "as":
+		if len(p) >= 3 {
+			return isPublicCommand(strings.Join(p[2:], " "))
+		}
 		return true
 	}
 	return false
@@ -149,10 +160,12 @@ func (b *Bot) consoleCommand(line string) {
 	b.mu.Lock()
 	b.fromConsole = true
 	b.whisperTarget = ""
+	b.commandSender = ""
 	b.mu.Unlock()
 	defer func() {
 		b.mu.Lock()
 		b.fromConsole = false
+		b.commandSender = ""
 		b.mu.Unlock()
 	}()
 	b.command(line)
@@ -187,12 +200,14 @@ func (b *Bot) handleWhisper(sender, message string) {
 	}
 	b.mu.Lock()
 	b.whisperTarget = sender
+	b.commandSender = sender
 	b.fromConsole = false
 	b.mu.Unlock()
 	go func() {
 		defer func() {
 			b.mu.Lock()
 			b.whisperTarget = ""
+			b.commandSender = ""
 			b.mu.Unlock()
 		}()
 		b.command(message)
@@ -289,6 +304,87 @@ func cleanChatName(name string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// resolvePlayer searches for an online player by name (case-insensitive, ignoring color codes).
+func (b *Bot) resolvePlayer(name string) (player, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	clean := cleanChatName(name)
+	target := strings.ToLower(clean)
+	if target == "" {
+		return player{}, false
+	}
+
+	// 1. Direct lowercase lookup
+	if p, ok := b.players[target]; ok && p.online {
+		return p, true
+	}
+
+	// 2. Iterate map comparing cleaned names
+	for k, p := range b.players {
+		if !p.online {
+			continue
+		}
+		if strings.EqualFold(k, target) ||
+			strings.EqualFold(cleanChatName(p.name), clean) ||
+			strings.EqualFold(p.name, name) {
+			return p, true
+		}
+	}
+	return player{}, false
+}
+
+// followCmd handles the 'follow' command.
+// Syntax: follow [playername] or follow stop
+// If no name is provided, the command sender is followed.
+func (b *Bot) followCmd(args []string) {
+	if len(args) >= 1 {
+		arg0 := strings.ToLower(args[0])
+		if arg0 == "stop" || arg0 == "clear" || arg0 == "off" {
+			b.mode = modeIdle
+			b.followTarget = ""
+			b.mimicTarget = ""
+			b.reply("Stopped following.")
+			return
+		}
+	}
+
+	targetName := ""
+	if len(args) == 0 || strings.TrimSpace(args[0]) == "" {
+		b.mu.Lock()
+		targetName = b.commandSender
+		b.mu.Unlock()
+		targetName = cleanChatName(strings.TrimSpace(targetName))
+		if targetName == "" {
+			b.reply("Usage: follow <playername> (or use in-game to follow yourself)")
+			return
+		}
+	} else {
+		targetName = cleanChatName(strings.TrimSpace(args[0]))
+	}
+
+	// Cannot follow self
+	if b.matchesIdentifier(targetName) || strings.EqualFold(cleanChatName(b.botName), targetName) {
+		b.reply("Cannot follow myself!")
+		return
+	}
+
+	// Verify player exists on server
+	pEntry, found := b.resolvePlayer(targetName)
+	if !found {
+		b.reply(fmt.Sprintf("Player '%s' not found or offline.", targetName))
+		return
+	}
+
+	displayName := pEntry.name
+	if displayName == "" {
+		displayName = targetName
+	}
+	b.followTarget = displayName
+	b.mimicTarget = displayName
+	b.mode = modeFollowing
+	b.reply("Following " + displayName + "…")
+}
+
 func (b *Bot) reply(message string) {
 	lines := strings.Split(message, "\n")
 	for i, rawLine := range lines {
@@ -316,6 +412,10 @@ func (b *Bot) reply(message string) {
 }
 
 func (b *Bot) command(line string) {
+	b.commandInternal(line, false)
+}
+
+func (b *Bot) commandInternal(line string, bypassFocus bool) {
 	line = strings.Trim(line, "\ufeff\u200b\u200c\u200d \t\r\n")
 	p := parseArgs(line)
 	if len(p) == 0 {
@@ -330,7 +430,17 @@ func (b *Bot) command(line string) {
 	if len(p) == 0 {
 		return
 	}
-	switch strings.ToLower(p[0]) {
+	cmdName := strings.ToLower(p[0])
+	if !bypassFocus && b.shouldIgnoreCommandDueToFocus(cmdName) {
+		return
+	}
+	switch cmdName {
+	case "focus":
+		b.focusCmd(p[1:])
+	case "unfocus":
+		b.unfocusCmd()
+	case "run-as", "runas", "as":
+		b.runAsCmd(p[1:])
 	case "say":
 		if len(p) < 2 {
 			b.reply("Usage: say <message>")
@@ -392,14 +502,7 @@ func (b *Bot) command(line string) {
 			b.useItemInHand()
 		}
 	case "follow":
-		if len(p) < 2 {
-			b.reply("Usage: follow <playername>")
-			return
-		}
-		b.followTarget = p[1]
-		b.mimicTarget = p[1]
-		b.mode = modeFollowing
-		b.reply("Following " + p[1] + "…")
+		b.followCmd(p[1:])
 	case "mimic":
 		if len(p) < 2 || strings.EqualFold(p[1], "clear") || strings.EqualFold(p[1], "stop") {
 			b.mode = modeIdle
@@ -568,6 +671,8 @@ func (b *Bot) command(line string) {
 		b.handleSleepCmd(p)
 	case "wake", "wakeup", "unsleep":
 		b.wakeUp()
+	case "place", "placeblock":
+		b.placeCmd(p)
 	case "break", "breakat", "breakcoord", "mine", "mineat", "minearea", "minespace", "breakarea", "breakspace", "mineloop", "minefarm", "minetimeout", "learn", "learnair", "calibrate", "minelearn", "minecalibrate":
 		if strings.EqualFold(p[0], "learn") || strings.EqualFold(p[0], "learnair") || strings.EqualFold(p[0], "calibrate") ||
 			strings.EqualFold(p[0], "minelearn") || strings.EqualFold(p[0], "minecalibrate") ||
@@ -593,9 +698,10 @@ func (b *Bot) command(line string) {
 		if len(p) >= 2 && strings.EqualFold(p[1], "air") {
 			if len(p) >= 3 && (strings.EqualFold(p[2], "clear") || strings.EqualFold(p[2], "reset")) {
 				b.mu.Lock()
-				b.mineAirRuntimeIDs = defaultAirRuntimeIDs()
+				b.mineAirRuntimeIDs = computeDefaultAirRuntimeIDs(b.serverUseHashes)
+				_ = b.saveAirRuntimeIDsCacheLocked(defaultAirRuntimeIDsCacheFile)
 				b.mu.Unlock()
-				b.reply("Reset air block runtime IDs to defaults (including minecraft:air = 3690217760).")
+				b.reply(fmt.Sprintf("Reset air block runtime IDs to defaults (useNetworkHashes=%v).", b.serverUseHashes))
 				return
 			}
 			if len(p) >= 3 && (strings.EqualFold(p[2], "remove") || strings.EqualFold(p[2], "rm") || strings.EqualFold(p[2], "del") || strings.EqualFold(p[2], "delete")) {
@@ -604,6 +710,7 @@ func (b *Bot) command(line string) {
 						b.mu.Lock()
 						if b.mineAirRuntimeIDs != nil {
 							delete(b.mineAirRuntimeIDs, uint32(id))
+							_ = b.saveAirRuntimeIDsCacheLocked(defaultAirRuntimeIDsCacheFile)
 						}
 						b.mu.Unlock()
 						b.reply(fmt.Sprintf("Removed %d from known air runtime IDs.", id))
@@ -621,6 +728,7 @@ func (b *Bot) command(line string) {
 							b.mineAirRuntimeIDs = make(map[uint32]bool)
 						}
 						b.mineAirRuntimeIDs[uint32(id)] = true
+						_ = b.saveAirRuntimeIDsCacheLocked(defaultAirRuntimeIDsCacheFile)
 						b.mu.Unlock()
 						b.reply(fmt.Sprintf("Added %d to known air runtime IDs.", id))
 						return
@@ -879,6 +987,8 @@ func (b *Bot) command(line string) {
 		b.online()
 	case "nearby", "near":
 		b.nearby()
+	case "radar":
+		b.radarCmd()
 	case "coords", "coord", "coordinates", "playercoords", "playerpos", "pos", "positions", "where":
 		b.coords()
 	case "mem", "memory":
@@ -907,6 +1017,7 @@ func (b *Bot) command(line string) {
 		b.lookAtTarget = ""
 		b.lookAtPos = nil
 		b.velocityY = 0
+		b.spinActive = false
 		b.mu.Lock()
 		b.jumpIntervalTicks = 0
 		b.jumpTicks = 0
@@ -937,9 +1048,11 @@ func (b *Bot) command(line string) {
 		b.lookAtTarget = ""
 		b.lookAtPos = nil
 		b.reply(fmt.Sprintf("Moving to (%.1f, %.1f, %.1f)…", b.cfg.Target.X, b.cfg.Target.Y, b.cfg.Target.Z))
+	case "spin":
+		b.spinCmd(p[1:])
 	case "rejoin", "reconnect":
 		b.reply("Reconnecting...")
-		b.Close()
+		go b.Reconnect()
 	case "quit", "exit":
 		b.reply("Disconnecting. Bye!")
 		b.quitting = true

@@ -11,6 +11,9 @@ waypoints.json
 offline_uuid.json
 emotes.json
 
+bots/
+cache/
+
 # Certs
 cert/
 certs/
@@ -30,6 +33,7 @@ logs/
 *.dylib
 
 # Other
+bots/
 example/
 arie19062/
 floating-fix.md

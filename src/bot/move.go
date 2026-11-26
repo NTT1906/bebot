@@ -229,8 +229,13 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 			v.jumping = false
 			b.players[strings.ToLower(b.followTarget)] = v
 		}
+		if b.mode == modeFollowing && lookup != "" && !targetPlayer.online {
+			b.mode = modeIdle
+			b.followTarget = ""
+			b.mimicTarget = ""
+		}
 		b.mu.Unlock()
-		if targetPlayer.id != 0 && b.mode != modeLookAt {
+		if (targetPlayer.id != 0 || targetPlayer.hasLocation) && b.mode != modeLookAt {
 			target = targetPlayer.position
 		}
 	}
@@ -387,7 +392,21 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 			lookPitch = float32(-math.Atan2(float64(lookDY), horizontal) * 180 / math.Pi)
 		}
 	}
-	if b.mode == modeIdle {
+	if b.spinActive {
+		spd := b.spinSpeed
+		if spd <= 0 {
+			spd = 10.0
+		}
+		b.idleYaw += spd * b.spinDirection
+		for b.idleYaw >= 360 {
+			b.idleYaw -= 360
+		}
+		for b.idleYaw < 0 {
+			b.idleYaw += 360
+		}
+		yaw = b.idleYaw
+		b.facingYaw = yaw
+	} else if b.mode == modeIdle {
 		yaw = b.idleYaw
 	}
 	b.facingYaw = yaw
@@ -448,19 +467,31 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 		b.facingPitch = pitch
 	}
 
+	radPitch := float64(pitch) * math.Pi / 180
+	radYaw := float64(yaw) * math.Pi / 180
+	cosPitch := math.Cos(radPitch)
+	camOrientation := mgl32.Vec3{
+		float32(-math.Sin(radYaw) * cosPitch),
+		float32(-math.Sin(radPitch)),
+		float32(math.Cos(radYaw) * cosPitch),
+	}
+
 	auth := packet.PlayerAuthInput{
 		Position:           b.pos,
 		Delta:              b.pos.Sub(b.last),
 		Yaw:                yaw,
 		HeadYaw:            yaw,
 		Pitch:              pitch,
+		InteractYaw:        yaw,
+		InteractPitch:      pitch,
+		CameraOrientation:  camOrientation,
 		MoveVector:         mgl32.Vec2{0, moveZ},
 		AnalogueMoveVector: mgl32.Vec2{0, moveZ},
 		RawMoveVector:      mgl32.Vec2{0, moveZ},
 		InputData:          flags,
-		InputMode:          packet.InputModeGamePad,
-		PlayMode:           packet.PlayModeScreen,
-		InteractionModel:   packet.InteractionModelTouch,
+		InputMode:          packet.InputModeMouse,
+		PlayMode:           packet.PlayModeNormal,
+		InteractionModel:   packet.InteractionModelClassic,
 		Tick:               b.tick,
 	}
 	mineSwing := false
@@ -625,6 +656,20 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 		}
 	}
 
+	b.mu.Lock()
+	placeItem := b.placePending
+	placeSwing := b.placePendingSwing
+	b.placePending = nil
+	b.placePendingSwing = false
+	b.mu.Unlock()
+
+	if placeItem != nil {
+		auth.ItemInteractionData = protocol.Option(*placeItem)
+		auth.InputData.Set(packet.InputFlagPerformItemInteraction)
+		auth.InteractPitch = pitch
+		auth.InteractYaw = yaw
+	}
+
 	if stalled {
 		b.mu.Lock()
 		b.stallTicks++
@@ -645,6 +690,9 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 	}
 
 	_ = c.WritePacket(&auth)
+	if placeSwing {
+		_ = c.WritePacket(&packet.Animate{ActionType: packet.AnimateActionSwingArm, EntityRuntimeID: b.entityID})
+	}
 	if mineSwing || (bt != nil && b.mineActive && b.breakTicks%4 == 0) {
 		_ = c.WritePacket(&packet.Animate{ActionType: packet.AnimateActionSwingArm, EntityRuntimeID: b.entityID, SwingSource: packet.AnimateSwingSourceMine})
 		if mineSwing {

@@ -16,11 +16,12 @@ Examples:
   bebot move 100 70 500`,
 
 	"follow": `§6=== Help: follow ===§r
-Description: Continuously follows a player at distance.
-Syntax: follow <player>
+Description: Continuously follows a player. If no player name is given, follows the command sender.
+Syntax: follow [player] or follow stop
 Examples:
+  bebot follow (follows command sender)
   bebot follow Arie1906
-  bebot stop (to stop following)`,
+  bebot follow stop (or bebot stop)`,
 
 	"mimic": `§6=== Help: mimic ===§r
 Description: Mirrors a target player's movements, jumps, camera rotation, sneaking, and swimming.
@@ -87,6 +88,17 @@ Examples:
   bebot stop
   bebot idle reset (stops and resets facing to north)`,
 
+	"spin": `§6=== Help: spin ===§r
+Description: Continuously rotates the bot's camera yaw every tick (360 degrees sweep). Useful to satisfy server FOV checks for waypoint updates.
+Syntax: spin [clockwise|counterclockwise|reverse|stop] [speed]
+Aliases: cw, ccw, rev, stop, off
+Default speed: 10 degrees/tick (~200 deg/s)
+Examples:
+  bebot spin
+  bebot spin counterclockwise 15
+  bebot spin reverse
+  bebot spin stop (or bebot stop)`,
+
 	"coords": `§6=== Help: coords ===§r
 Description: Displays the bot's current coordinates, dimension, and facing angles.
 Aliases: pos, coord, coordinates, playerpos, where
@@ -106,6 +118,14 @@ Examples:
   bebot waypoint add base 250 64 -220
   bebot waypoint list
   bebot waypoint goto base`,
+
+	"place": `§6=== Help: place ===§r
+Description: Places the block the bot is currently holding in hand at specified coordinates.
+Aliases: placeblock
+Syntax: place <x y z>
+Examples:
+  bebot place 256 62 -219
+  !b place 100 64 -200`,
 
 	"break": `§6=== Help: break ===§r
 Description: Breaks a single block at specified coordinates.
@@ -291,6 +311,34 @@ Syntax: nearby
 Example:
   bebot nearby`,
 
+	"radar": `§6=== Help: radar ===§r
+Description: Scans for other players, reporting their exact coordinates and distance while excluding the sender.
+Syntax: radar
+Example:
+  bebot radar`,
+
+	"focus": `§6=== Help: focus ===§r
+Description: Focuses a specific bot by name or UUID. When focused, all other bots ignore commands.
+Syntax: focus <bot name|bot uuid>
+Examples:
+  !b focus Bot1
+  !b focus 550e8400-e29b-41d4-a716-446655440000`,
+
+	"run-as": `§6=== Help: run-as ===§r
+Description: Runs a command targeted at a specific bot by name or UUID, even when focus mode is active on another bot.
+Aliases: runas, as
+Syntax: run-as <bot name|bot uuid> <command...>
+Examples:
+  !b run-as CobbleGolem_53 coords
+  !b run-as Bebot follow
+  !b run-as 550e8400-e29b-41d4-a716-446655440000 spin`,
+
+	"unfocus": `§6=== Help: unfocus ===§r
+Description: Clears bot focus so all bots accept commands again.
+Syntax: unfocus
+Example:
+  !b unfocus`,
+
 	"say": `§6=== Help: say ===§r
 Description: Makes the bot speak a message in public chat.
 Syntax: say <message>
@@ -415,6 +463,7 @@ var aliasMapping = map[string]string{
 	"waypoints":       "waypoint",
 	"breakat":         "break",
 	"breakcoord":      "break",
+	"placeblock":      "place",
 	"minearea":        "mine",
 	"minespace":       "mine",
 	"breakarea":       "mine",
@@ -484,13 +533,16 @@ func (b *Bot) helpCmd(p []string) {
 			"unsneak - stop sneaking",
 			"jump [freq] - jump periodically (default: 10s)",
 			"stopjump / jump stop - stop periodic jumping",
-			"idle / stop - stop movement & jumping",
+			"spin [cw|ccw] [speed] - spin camera continuously",
+			"idle / stop - stop movement, jumping & spin",
 			"coords - show bot coordinates",
 			"waypoint help - waypoint add/remove/list",
+			"rejoin / reconnect - reconnect to server",
 			"§7(Type 'help 2' for Mining & Beds, or 'help <cmd>')§r",
 		},
 		{
-			"§6--- Bebot Help [2/4: Mining & Sleep] ---§r",
+			"§6--- Bebot Help [2/4: Mining & Building] ---§r",
+			"place <x y z> - place held block at coordinates",
 			"break <x y z> [animation] - break a single block",
 			"mine <pos1> <pos2> [repeat] [faceAccurate] - area mine top-down",
 			"mine timeout <seconds> - set per-block break timeout (default 3.0s)",
@@ -518,7 +570,9 @@ func (b *Bot) helpCmd(p []string) {
 		},
 		{
 			"§6--- Bebot Help [4/4: Combat & Utility] ---§r",
-			"players / list / nearby - list online/nearby players",
+			"focus / unfocus - target commands to a specific bot",
+			"run-as <bot> <cmd> - run command as specific bot",
+			"players / list / nearby / radar - list/track online players",
 			"say <message> - send a chat message",
 			"payback [on|off] - fight back when attacked",
 			"autofish [on|off] - toggle auto-fishing",
