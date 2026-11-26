@@ -220,6 +220,9 @@ DiscoveryLoop:
 	b.gameMode = c.GameData().PlayerGameMode
 	b.tick = uint64(c.GameData().Time)
 	b.initAirRuntimeIDs(c.GameData().UseBlockNetworkIDHashes)
+	if b.blockRegistry != nil {
+		b.blockRegistry.InitFromGameData(c.GameData().UseBlockNetworkIDHashes, c.GameData().CustomBlocks, b.blockPalettePath)
+	}
 	b.players = make(map[string]player)
 	b.playersByID = make(map[uint64]string)
 	b.playersByUniqueID = make(map[int64]string)
@@ -428,6 +431,9 @@ func (b *Bot) connect(ctx context.Context) error {
 	b.gameMode = c.GameData().PlayerGameMode
 	b.tick = uint64(c.GameData().Time)
 	b.initAirRuntimeIDs(c.GameData().UseBlockNetworkIDHashes)
+	if b.blockRegistry != nil {
+		b.blockRegistry.InitFromGameData(c.GameData().UseBlockNetworkIDHashes, c.GameData().CustomBlocks, b.blockPalettePath)
+	}
 	b.players = make(map[string]player)
 	b.playersByID = make(map[uint64]string)
 	b.playersByUniqueID = make(map[int64]string)

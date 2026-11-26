@@ -435,12 +435,24 @@ Examples:
   bebot chunk unload`,
 
 	"inspect": `§6=== Help: inspect ===§r
-Description: Instantly queries the block state and runtime ID at target coordinates using the local chunk cache.
+Description: Instantly queries the block name and runtime ID at target coordinates using the local chunk cache.
 Aliases: probe
 Syntax: inspect <x> <y> <z>
 Examples:
   bebot inspect 250 64 -220
   bebot probe 100 70 500`,
+
+	"block": `§6=== Help: block ===§r
+Description: Queries and resolves bidirectional block names and Bedrock runtime IDs.
+Syntax:
+  block lookup <name|id> - resolves block name from runtime ID, or runtime ID from block name
+  block inspect <x> <y> <z> - inspects block name and runtime ID at coordinate
+  block count - displays number of registered block states in memory
+Examples:
+  bebot block lookup diamond_ore
+  bebot block lookup 2186211206
+  bebot block inspect 160 64 -320
+  bebot block count`,
 
 	"mem": `§6=== Help: mem ===§r
 Description: Displays real-time Go runtime heap and OS memory metrics.

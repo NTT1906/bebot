@@ -682,6 +682,8 @@ func (b *Bot) commandInternal(line string, bypassFocus bool) {
 		b.placeCmd(p)
 	case "chunk":
 		b.chunkCmd(p[1:])
+	case "block":
+		b.blockCmd(p[1:])
 	case "inspect", "probe":
 		b.inspectCmd(p[1:])
 	case "break", "breakat", "breakcoord", "mine", "mineat", "minearea", "minespace", "breakarea", "breakspace", "mineloop", "minefarm", "minetimeout", "learn", "learnair", "calibrate", "minelearn", "minecalibrate":

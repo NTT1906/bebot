@@ -232,6 +232,8 @@ type Bot struct {
 	waypointGroups               map[uuid.UUID]int64
 	serverUseHashes              bool
 	chunkCache                   *ChunkCache
+	blockRegistry                *BlockRegistry
+	blockPalettePath             string
 	testReplyHook                func(string)
 }
 
@@ -270,11 +272,12 @@ type Options struct {
 	SkinPath    string
 	Source      oauth2.TokenSource
 	XBLCache    *mauth.XBLTokenCache
-	Offline     bool
-	BotName     string
-	OfflineUUID uuid.UUID
-	Local       bool
-	Debug       bool
+	Offline          bool
+	BotName          string
+	OfflineUUID      uuid.UUID
+	Local            bool
+	Debug            bool
+	BlockPalettePath string
 }
 
 var tracePackets bool
@@ -291,6 +294,11 @@ func New(opts Options) *Bot {
 	mineTimeout := opts.Config.Mine.TimeoutSec
 	if mineTimeout <= 0 {
 		mineTimeout = 3.0
+	}
+
+	palettePath := opts.BlockPalettePath
+	if palettePath == "" {
+		palettePath = opts.Config.BlockPalettePath
 	}
 
 	return &Bot{
@@ -321,6 +329,8 @@ func New(opts Options) *Bot {
 		containerRuntimeIDUpdated: make(chan uint32, 1),
 		stackPending:              make(map[int32]chan uint8),
 		chunkCache:                NewChunkCache(),
+		blockRegistry:             NewBlockRegistry(),
+		blockPalettePath:          palettePath,
 	}
 }
 

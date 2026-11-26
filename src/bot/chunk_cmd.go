@@ -96,9 +96,18 @@ func (b *Bot) inspectCmd(args []string) {
 	isAir := rid == 0 || (b.mineAirRuntimeIDs != nil && b.mineAirRuntimeIDs[rid])
 	b.mu.Unlock()
 
-	blockDesc := fmt.Sprintf("RuntimeID: %d", rid)
-	if isAir {
-		blockDesc = fmt.Sprintf("minecraft:air (RuntimeID: %d)", rid)
+	var blockDesc string
+	if b.blockRegistry != nil {
+		if name, ok := b.blockRegistry.ResolveName(rid); ok {
+			blockDesc = fmt.Sprintf("%s (RuntimeID: %d)", name, rid)
+		}
+	}
+	if blockDesc == "" {
+		if isAir {
+			blockDesc = fmt.Sprintf("minecraft:air (RuntimeID: %d)", rid)
+		} else {
+			blockDesc = fmt.Sprintf("RuntimeID: %d", rid)
+		}
 	}
 
 	b.reply(fmt.Sprintf("Block at (%d, %d, %d): %s", target.X(), target.Y(), target.Z(), blockDesc))
