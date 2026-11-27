@@ -88,7 +88,7 @@ Bebot supports several flags when launched from the command line:
 | `-host <host>` | Config | Overrides target server host IP or domain (e.g. `127.0.0.1` or LAN IP `192.168.1.5`). |
 | `-port <port>` | Config | Overrides target server port (e.g. `19132`). |
 | `-config <file>` | `config.json` | Path to custom bot configuration file. |
-| `-skin <file>` | `data/skin.json` | Path to custom skin configuration file. |
+| `-skin <file>` | `data/skin.json` | Path to skin configuration (`.json`) or directly to a skin image (`.png`). |
 | `-token-cache <file>` | `data/token_cache.json` | Path used to persist the Microsoft OAuth session tokens (alias: `-auth-cache`). |
 | `-xsts-cache <file>` | `data/xsts_cache.json` | Path used to persist Xbox Live XSTS device and session token cache. |
 | `-block-palette <file>` | Auto-detected | Path to custom block palette file (`.nbt` or `.json`). |
@@ -185,6 +185,9 @@ Commands can be typed directly into the bot's terminal console or sent via in-ga
 
 ### 7. Customization & Settings
 
+* **`skin`** *(Alias: `skin status`)*: Shows current skin status, texture path, and persistence file.
+* **`skin list`**: Lists all available PNG skin files found in `data/skins/` and `skin/`.
+* **`skin use <name> [slim|normal] [reload]`**: Quickly switches to a skin from `data/skins/` or `skin/` without typing the full path.
 * **`skin <slim|normal|wide> <path> [reload]`**: Changes the bot's skin to a classic PNG file.
 * **`skin pack <folder> <skin_id> [reload]`**: Applies a skin from a Bedrock skin pack folder.
 * **`skin pack <folder> list`**: Lists all available skins inside a skin pack folder.

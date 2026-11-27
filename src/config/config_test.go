@@ -155,3 +155,59 @@ render-distance = 2
 		t.Errorf("expected reloaded superuser Arie1906, got %s", reloaded.Superuser)
 	}
 }
+
+func TestResolveSkinConfig_DirectPNGAndJSON(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// 1. Test direct .png resolution
+	testPNG := filepath.Join(tmpDir, "custom.png")
+	if err := os.WriteFile(testPNG, []byte("fake-png-data"), 0644); err != nil {
+		t.Fatalf("failed to write test png: %v", err)
+	}
+
+	defaultSave := filepath.Join(tmpDir, "data", "skin.json")
+	scPNG, savePathPNG, err := ResolveSkinConfig(testPNG, defaultSave, SkinConfig{})
+	if err != nil {
+		t.Fatalf("unexpected error resolving direct PNG: %v", err)
+	}
+	if scPNG.Path != testPNG {
+		t.Errorf("expected skin path %s, got %s", testPNG, scPNG.Path)
+	}
+	if scPNG.Type != "slim" {
+		t.Errorf("expected default type slim, got %s", scPNG.Type)
+	}
+	if savePathPNG != defaultSave {
+		t.Errorf("expected save path %s, got %s", defaultSave, savePathPNG)
+	}
+
+	// 2. Test JSON config resolution
+	testJSON := filepath.Join(tmpDir, "skin_profile.json")
+	if err := SaveSkin(testJSON, SkinConfig{Type: "normal", Path: "steve.png"}); err != nil {
+		t.Fatalf("failed to save test json: %v", err)
+	}
+
+	scJSON, savePathJSON, err := ResolveSkinConfig(testJSON, defaultSave, SkinConfig{})
+	if err != nil {
+		t.Fatalf("unexpected error resolving JSON config: %v", err)
+	}
+	if scJSON.Type != "normal" || scJSON.Path != "steve.png" {
+		t.Errorf("unexpected skin config from JSON: %+v", scJSON)
+	}
+	if savePathJSON != testJSON {
+		t.Errorf("expected save path to match input json %s, got %s", testJSON, savePathJSON)
+	}
+
+	// 3. Test legacy fallback when target and defaultSave are missing
+	missingDefault := filepath.Join(tmpDir, "non_existent", "skin.json")
+	legacy := SkinConfig{Type: "wide", Path: "legacy.png"}
+	scLegacy, savePathLegacy, err := ResolveSkinConfig("", missingDefault, legacy)
+	if err != nil {
+		t.Fatalf("unexpected error with legacy fallback: %v", err)
+	}
+	if scLegacy.Path != "legacy.png" || scLegacy.Type != "wide" {
+		t.Errorf("expected legacy skin config, got %+v", scLegacy)
+	}
+	if savePathLegacy != missingDefault {
+		t.Errorf("expected save path %s, got %s", missingDefault, savePathLegacy)
+	}
+}

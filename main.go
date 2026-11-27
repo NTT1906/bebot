@@ -40,7 +40,7 @@ func main() {
 	authCacheFlag := flag.String("auth-cache", "", "alias for -token-cache")
 	xstsCacheFlag := flag.String("xsts-cache", "data/xsts_cache.json", "path to Xbox Live XSTS token cache")
 	debugFlag := flag.Bool("debug", false, "print packet-level handshake diagnostics")
-	skinFile := flag.String("skin", "data/skin.json", "bot skin configuration file")
+	skinFile := flag.String("skin", "", "bot skin configuration (.json) or direct skin image (.png)")
 	localFlag := flag.Bool("local", false, "connect to a local/LAN singleplayer world (127.0.0.1)")
 	hostFlag := flag.String("host", "", "override server host (e.g. 127.0.0.1)")
 	portFlag := flag.Int("port", 0, "override server port (e.g. 19132)")
@@ -128,14 +128,22 @@ func main() {
 		}
 	}
 
-	resolvedSkin := *skinFile
-	if !isFlagPassed("skin") {
-		if _, err := os.Stat("data/skin.json"); os.IsNotExist(err) {
-			if _, err := os.Stat("skin.json"); err == nil {
-				resolvedSkin = "skin.json"
-			}
+	rawSkinTarget := *skinFile
+	if !isFlagPassed("skin") || rawSkinTarget == "" {
+		if cfg.SkinFile != "" {
+			rawSkinTarget = cfg.SkinFile
+		} else {
+			rawSkinTarget = "data/skin.json"
 		}
 	}
+
+	skinCfg, resolvedSavePath, err := config.ResolveSkinConfig(rawSkinTarget, "data/skin.json", cfg.Skin)
+	if err != nil {
+		log.Printf("bebot: skin: %v (using fallback)\n", err)
+	}
+	cfg.Skin = skinCfg
+	log.Printf("bebot: skin config: type=%s path=%s skin=%s override=%v (save file: %s)\n",
+		cfg.Skin.Type, cfg.Skin.Path, cfg.Skin.Skin, config.OverrideAppearanceOn(cfg.Skin), resolvedSavePath)
 
 	resolvedOfflineUUID := *offlineUUIDFlag
 	if !isFlagPassed("offline-uuid-file") {
@@ -145,14 +153,6 @@ func main() {
 			}
 		}
 	}
-
-	skinCfg, err := config.LoadSkin(resolvedSkin)
-	if err != nil {
-		log.Println("bebot: skin:", err)
-		skinCfg = config.DefaultSkinConfig
-	}
-	cfg.Skin = skinCfg
-	log.Printf("bebot: skin config: type=%s path=%s skin=%s override=%v\n", cfg.Skin.Type, cfg.Skin.Path, cfg.Skin.Skin, config.OverrideAppearanceOn(cfg.Skin))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -176,7 +176,7 @@ func main() {
 	b := bot.New(bot.Options{
 		Config:           cfg,
 		ConfigPath:       *configPath,
-		SkinPath:         resolvedSkin,
+		SkinPath:         resolvedSavePath,
 		Source:           source,
 		XBLCache:         xblCache,
 		XSTSCachePath:    resolvedXSTSCache,

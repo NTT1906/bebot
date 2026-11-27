@@ -64,9 +64,10 @@ type Config struct {
 		RenderDistance       int32   `json:"renderDistance" toml:"render-distance"`
 		ServerStallThresholdMs int   `json:"serverStallThresholdMs" toml:"server-stall-threshold-ms"`
 	} `json:"behaviour" toml:"behaviour"`
-	CommandsViaChat *bool      `json:"commands_via_chat,omitempty" toml:"commands-via-chat,omitempty"`
-	Skin            SkinConfig `json:"skin" toml:"skin"`
-	Mine            MineConfig `json:"mine" toml:"mine"`
+	CommandsViaChat  *bool      `json:"commands_via_chat,omitempty" toml:"commands-via-chat,omitempty"`
+	SkinFile         string     `json:"skin_file,omitempty" toml:"skin-file,omitempty"`
+	Skin             SkinConfig `json:"skin,omitempty" toml:"skin,omitempty"`
+	Mine             MineConfig `json:"mine" toml:"mine"`
 }
 
 // FreeMemAfterJoinOn returns true unless explicitly set to false (defaults to true).
@@ -239,4 +240,76 @@ func SaveSkin(path string, sc SkinConfig) error {
 		_ = os.MkdirAll(dir, 0755)
 	}
 	return os.WriteFile(path, data, 0644)
+}
+
+// ResolveSkinConfig resolves a skin configuration from an input path, which can be:
+// 1. Direct .png file path (e.g. "skin/skin.png" or "my_skin.png"):
+//    Uses the PNG image directly as a classic skin, and directs future in-game skin saves
+//    to defaultSavePath (e.g. "data/skin.json").
+// 2. A .json skin configuration file:
+//    Loads the JSON configuration and saves future in-game updates back to that JSON file.
+// 3. Empty string:
+//    Falls back to defaultSavePath, then legacy embedded config if provided, then DefaultSkinConfig.
+func ResolveSkinConfig(rawTarget string, defaultSavePath string, legacyCfg SkinConfig) (SkinConfig, string, error) {
+	if defaultSavePath == "" {
+		defaultSavePath = "data/skin.json"
+	}
+
+	target := strings.TrimSpace(rawTarget)
+
+	// Case 1: Direct .png image file
+	if strings.EqualFold(filepath.Ext(target), ".png") {
+		resolvedPNG := target
+		if _, err := os.Stat(resolvedPNG); err != nil {
+			// Try looking in common skin directories
+			candidates := []string{
+				filepath.Join("skin", target),
+				filepath.Join("data", "skins", target),
+				filepath.Join("data", target),
+			}
+			found := false
+			for _, cand := range candidates {
+				if _, errStat := os.Stat(cand); errStat == nil {
+					resolvedPNG = cand
+					found = true
+					break
+				}
+			}
+			if !found {
+				return DefaultSkinConfig, defaultSavePath, fmt.Errorf("direct skin png %q not found", target)
+			}
+		}
+
+		sc := SkinConfig{
+			Type: "slim",
+			Path: resolvedPNG,
+		}
+		// When skin is changed in-game, save to default JSON file
+		return sc, defaultSavePath, nil
+	}
+
+	// Case 2: Explicit JSON file path
+	if target != "" && target != defaultSavePath {
+		sc, err := LoadSkin(target)
+		if err == nil {
+			return sc, target, nil
+		}
+		return DefaultSkinConfig, defaultSavePath, fmt.Errorf("failed to load skin config from %q: %w", target, err)
+	}
+
+	// Case 3: Default save path or fallback
+	sc, err := LoadSkin(defaultSavePath)
+	if err == nil {
+		return sc, defaultSavePath, nil
+	}
+
+	// Check if legacy config had an embedded skin
+	if legacyCfg.Path != "" {
+		if legacyCfg.Type == "" {
+			legacyCfg.Type = DefaultSkinConfig.Type
+		}
+		return legacyCfg, defaultSavePath, nil
+	}
+
+	return DefaultSkinConfig, defaultSavePath, nil
 }
