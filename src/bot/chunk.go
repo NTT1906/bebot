@@ -617,7 +617,9 @@ func (b *Bot) requestSubChunks(center protocol.SubChunkPos, offsets []protocol.S
 	if err := c.WritePacket(pk); err != nil {
 		log.Printf("bebot: failed to send SubChunkRequest: %v\n", err)
 	} else {
-		log.Printf("bebot: sent SubChunkRequest for %d sub-chunks around center %v\n", len(offsets), center)
+		if tracePackets {
+			log.Printf("bebot: sent SubChunkRequest for %d sub-chunks around center %v\n", len(offsets), center)
+		}
 	}
 }
 

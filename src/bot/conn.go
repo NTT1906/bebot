@@ -363,7 +363,9 @@ func (b *Bot) connect(ctx context.Context) error {
 		EnableClientCache:          false,
 		PacketFunc:                 TracePacket,
 		DownloadResourcePack: func(id uuid.UUID, version string, current, total int) bool {
-			log.Printf("bebot: skipping resource pack %s version %s (%d/%d)\n", id, version, current, total)
+			if tracePackets {
+				log.Printf("bebot: skipping resource pack %s version %s (%d/%d)\n", id, version, current, total)
+			}
 			return false
 		},
 	}
@@ -640,7 +642,7 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 				b.pos = p.Position
 				b.last = p.Position
 				b.velocityY = 0
-				if b.sentSneaking {
+				if b.sentSneaking && tracePackets {
 					log.Printf("bebot: own MovePlayer tick=%d -> (%.2f, %.2f, %.2f) mode=%d\n", p.Tick, p.Position.X(), p.Position.Y(), p.Position.Z(), p.Mode)
 				}
 			}
@@ -708,8 +710,10 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 					v.position = p.Position
 					v.hasLocation = true
 					b.players[matchedName] = v
-					log.Printf("bebot: PlayerLocation updated %s -> pos=(%.1f, %.1f, %.1f)\n",
-						matchedName, p.Position.X(), p.Position.Y(), p.Position.Z())
+					if tracePackets {
+						log.Printf("bebot: PlayerLocation updated %s -> pos=(%.1f, %.1f, %.1f)\n",
+							matchedName, p.Position.X(), p.Position.Y(), p.Position.Z())
+					}
 				}
 			}
 			b.mu.Unlock()
@@ -773,11 +777,15 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 					v.position = posInfo.Position
 					v.hasLocation = true
 					b.players[matchedName] = v
-					log.Printf("bebot: LocatorBar updated %s -> pos=(%.1f, %.1f, %.1f) action=%d group=%s\n",
-						matchedName, posInfo.Position.X(), posInfo.Position.Y(), posInfo.Position.Z(), wpEntry.Action, wpEntry.GroupHandle)
+					if tracePackets {
+						log.Printf("bebot: LocatorBar updated %s -> pos=(%.1f, %.1f, %.1f) action=%d group=%s\n",
+							matchedName, posInfo.Position.X(), posInfo.Position.Y(), posInfo.Position.Z(), wpEntry.Action, wpEntry.GroupHandle)
+					}
 				} else {
-					log.Printf("bebot: LocatorBar received action=%d group=%s uniqueID=%d pos=(%.1f, %.1f, %.1f) (no matched player)\n",
-						wpEntry.Action, wpEntry.GroupHandle, targetUniqueID, posInfo.Position.X(), posInfo.Position.Y(), posInfo.Position.Z())
+					if tracePackets {
+						log.Printf("bebot: LocatorBar received action=%d group=%s uniqueID=%d pos=(%.1f, %.1f, %.1f) (no matched player)\n",
+							wpEntry.Action, wpEntry.GroupHandle, targetUniqueID, posInfo.Position.X(), posInfo.Position.Y(), posInfo.Position.Z())
+					}
 				}
 			}
 			b.mu.Unlock()
@@ -1027,7 +1035,9 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 								} else {
 									b.inventory[slotIdx].Stack.Count = uint16(sInfo.Count)
 								}
-								log.Printf("bebot: inventory slot %d updated from ItemStackResponse: count=%d stackNetID=%d\n", slotIdx, sInfo.Count, sInfo.StackNetworkID)
+								if tracePackets {
+									log.Printf("bebot: inventory slot %d updated from ItemStackResponse: count=%d stackNetID=%d\n", slotIdx, sInfo.Count, sInfo.StackNetworkID)
+								}
 							}
 						}
 					}
@@ -1061,7 +1071,9 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 				}
 				b.dynamicContainerItems[dynID] = append([]protocol.ItemInstance(nil), p.Content...)
 				b.mu.Unlock()
-				log.Printf("bebot: received dynamic InventoryContent dynID=%d items=%d ContainerID=%d\n", dynID, len(p.Content), p.Container.ContainerID)
+				if tracePackets {
+					log.Printf("bebot: received dynamic InventoryContent dynID=%d items=%d ContainerID=%d\n", dynID, len(p.Content), p.Container.ContainerID)
+				}
 			}
 			if tracePackets {
 				log.Printf("bebot: trace: InventoryContent WindowID=%d ContainerID=%d DynamicID=%d items=%d\n", p.WindowID, p.Container.ContainerID, dynID, len(p.Content))
@@ -1134,7 +1146,9 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 							b.containerContainerID = container.ContainerID
 						}
 						if dyn, hasDyn := container.DynamicContainerID.Value(); hasDyn && dyn != 0 {
-							log.Printf("bebot: received dynamic InventorySlot dynID=%d slot=%d item=%v netID=%d\n", dyn, p.Slot, p.NewItem.Stack.ItemType.NetworkID, p.NewItem.StackNetworkID)
+							if tracePackets {
+								log.Printf("bebot: received dynamic InventorySlot dynID=%d slot=%d item=%v netID=%d\n", dyn, p.Slot, p.NewItem.Stack.ItemType.NetworkID, p.NewItem.StackNetworkID)
+							}
 						}
 					}
 				}

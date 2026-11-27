@@ -50,7 +50,9 @@ func (b *Bot) startBreaking(pos protocol.BlockPos, animate bool, repeat bool) {
 		b.breakTarget = &pos
 		b.breakTicks = 0
 		b.mu.Unlock()
-		log.Printf("bebot: creative break requested action=%d at %d %d %d\n", protocol.PlayerActionCreativePlayerDestroyBlock, pos.X(), pos.Y(), pos.Z())
+		if tracePackets {
+			log.Printf("bebot: creative break requested action=%d at %d %d %d\n", protocol.PlayerActionCreativePlayerDestroyBlock, pos.X(), pos.Y(), pos.Z())
+		}
 		return
 	}
 	b.mu.Lock()

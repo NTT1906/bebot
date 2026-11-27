@@ -697,7 +697,9 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 	if mineSwing || (bt != nil && b.mineActive && b.breakTicks%4 == 0) {
 		_ = c.WritePacket(&packet.Animate{ActionType: packet.AnimateActionSwingArm, EntityRuntimeID: b.entityID, SwingSource: packet.AnimateSwingSourceMine})
 		if mineSwing {
-			log.Printf("bebot: break input action=%d target=%d %d %d\n", protocol.PlayerActionStartBreak, bt.X(), bt.Y(), bt.Z())
+			if tracePackets {
+				log.Printf("bebot: break input action=%d target=%d %d %d\n", protocol.PlayerActionStartBreak, bt.X(), bt.Y(), bt.Z())
+			}
 		}
 	}
 	b.sentSneaking = desiredSneaking
