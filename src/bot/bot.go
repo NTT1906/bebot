@@ -16,6 +16,7 @@ import (
 
 	"bebot/src/config"
 	"bebot/src/waypoint"
+	bauth "bebot/src/auth"
 
 	"github.com/go-gl/mathgl/mgl32"
 	"github.com/google/uuid"
@@ -184,6 +185,7 @@ type Bot struct {
 	skinPath                     string
 	reconnectDelay               time.Duration
 	xblCache                     *mauth.XBLTokenCache
+	xstsCachePath                string
 	mineQueue                    []protocol.BlockPos
 	mineTotal                    int
 	mineCount                    int
@@ -199,6 +201,7 @@ type Bot struct {
 	offline                      bool
 	botName                      string
 	offlineUUID                  uuid.UUID
+	offlineUUIDPath              string
 	local                        bool
 	itemNamesByID                map[int32]string
 	mineAttempts                 map[protocol.BlockPos]int
@@ -267,14 +270,16 @@ func (b *Bot) markPacketReceived() {
 
 // Options contains the configuration and initial state needed to create a Bot.
 type Options struct {
-	Config      config.Config
-	ConfigPath  string
-	SkinPath    string
-	Source      oauth2.TokenSource
-	XBLCache    *mauth.XBLTokenCache
+	Config           config.Config
+	ConfigPath       string
+	SkinPath         string
+	Source           oauth2.TokenSource
+	XBLCache         *mauth.XBLTokenCache
+	XSTSCachePath    string
 	Offline          bool
 	BotName          string
 	OfflineUUID      uuid.UUID
+	OfflineUUIDPath  string
 	Local            bool
 	Debug            bool
 	BlockPalettePath string
@@ -301,12 +306,22 @@ func New(opts Options) *Bot {
 		palettePath = opts.Config.BlockPalettePath
 	}
 
+	xstsCache := opts.XSTSCachePath
+	if xstsCache == "" {
+		xstsCache = "data/xsts_cache.json"
+	}
+	offlineUUIDFile := opts.OfflineUUIDPath
+	if offlineUUIDFile == "" {
+		offlineUUIDFile = bauth.OfflineUUIDFile
+	}
+
 	return &Bot{
 		cfg:               opts.Config,
 		source:            opts.Source,
 		offline:           opts.Offline,
 		botName:           opts.BotName,
 		offlineUUID:       opts.OfflineUUID,
+		offlineUUIDPath:   offlineUUIDFile,
 		local:             opts.Local,
 		players:           make(map[string]player),
 		entities:          make(map[int64]string),
@@ -316,6 +331,7 @@ func New(opts Options) *Bot {
 		configPath:        opts.ConfigPath,
 		skinPath:          opts.SkinPath,
 		xblCache:          opts.XBLCache,
+		xstsCachePath:     xstsCache,
 		itemNamesByID:     make(map[int32]string),
 		isFocused:         true,
 		mineAttempts:      make(map[protocol.BlockPos]int),

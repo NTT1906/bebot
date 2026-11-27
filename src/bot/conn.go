@@ -124,7 +124,7 @@ DiscoveryLoop:
 
 	botUUID := b.offlineUUID
 	if botUUID == uuid.Nil {
-		botUUID = bauth.LoadOrGenerateOfflineUUID(bauth.OfflineUUIDFile, b.botName, false)
+		botUUID = bauth.LoadOrGenerateOfflineUUID(b.offlineUUIDPath, b.botName, false)
 		b.offlineUUID = botUUID
 	}
 	b.selfUUID = botUUID
@@ -339,7 +339,7 @@ func (b *Bot) connect(ctx context.Context) error {
 	if b.offline || b.source == nil {
 		botUUID := b.offlineUUID
 		if botUUID == uuid.Nil {
-			botUUID = bauth.LoadOrGenerateOfflineUUID(bauth.OfflineUUIDFile, b.botName, false)
+			botUUID = bauth.LoadOrGenerateOfflineUUID(b.offlineUUIDPath, b.botName, false)
 			b.offlineUUID = botUUID
 		}
 		b.selfUUID = botUUID
@@ -382,7 +382,7 @@ func (b *Bot) connect(ctx context.Context) error {
 		return fmt.Errorf("dial: %s", ExplainError(err))
 	}
 	if b.source != nil && b.xblCache != nil {
-		bauth.SaveXBLCache("xsts_cache.json", b.xblCache)
+		bauth.SaveXBLCache(b.xstsCachePath, b.xblCache)
 	}
 	log.Println("bebot: stage: login complete; finishing loading screen...")
 	b.mu.Lock()

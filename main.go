@@ -36,15 +36,18 @@ func isFlagPassed(name string) bool {
 
 func main() {
 	configPath := flag.String("config", "config.json", "bot configuration file")
-	authCachePath := flag.String("auth-cache", "token_cache.json", "path used to persist the Microsoft session")
+	tokenCacheFlag := flag.String("token-cache", "data/token_cache.json", "path to Microsoft OAuth token cache")
+	authCacheFlag := flag.String("auth-cache", "", "alias for -token-cache")
+	xstsCacheFlag := flag.String("xsts-cache", "data/xsts_cache.json", "path to Xbox Live XSTS token cache")
 	debugFlag := flag.Bool("debug", false, "print packet-level handshake diagnostics")
-	skinFile := flag.String("skin", "skin.json", "bot skin configuration file")
+	skinFile := flag.String("skin", "data/skin.json", "bot skin configuration file")
 	localFlag := flag.Bool("local", false, "connect to a local/LAN singleplayer world (127.0.0.1)")
 	hostFlag := flag.String("host", "", "override server host (e.g. 127.0.0.1)")
 	portFlag := flag.Int("port", 0, "override server port (e.g. 19132)")
 	offlineFlag := flag.Bool("offline", false, "connect without Microsoft authentication (LAN mode)")
 	botNameFlag := flag.String("name", "Bebot", "bot display name (used in offline/LAN mode)")
 	renewFlag := flag.Bool("renew", false, "generate a fresh identity/UUID for offline/LAN mode instead of reusing saved UUID")
+	offlineUUIDFlag := flag.String("offline-uuid-file", bauth.OfflineUUIDFile, "path to offline UUID cache file")
 	pprofFlag := flag.String("pprof", "", "bind address for net/http/pprof diagnostics (e.g. :6060 or localhost:6060)")
 	blockPaletteFlag := flag.String("block-palette", "", "path to custom block palette file (.nbt or .json)")
 	flag.Parse()
@@ -105,7 +108,45 @@ func main() {
 		t := false
 		cfg.CommandsViaChat = &t
 	}
-	skinCfg, err := config.LoadSkin(*skinFile)
+	resolvedTokenCache := *tokenCacheFlag
+	if isFlagPassed("auth-cache") && *authCacheFlag != "" {
+		resolvedTokenCache = *authCacheFlag
+	} else if !isFlagPassed("token-cache") {
+		if _, err := os.Stat("data/token_cache.json"); os.IsNotExist(err) {
+			if _, err := os.Stat("token_cache.json"); err == nil {
+				resolvedTokenCache = "token_cache.json"
+			}
+		}
+	}
+
+	resolvedXSTSCache := *xstsCacheFlag
+	if !isFlagPassed("xsts-cache") {
+		if _, err := os.Stat("data/xsts_cache.json"); os.IsNotExist(err) {
+			if _, err := os.Stat("xsts_cache.json"); err == nil {
+				resolvedXSTSCache = "xsts_cache.json"
+			}
+		}
+	}
+
+	resolvedSkin := *skinFile
+	if !isFlagPassed("skin") {
+		if _, err := os.Stat("data/skin.json"); os.IsNotExist(err) {
+			if _, err := os.Stat("skin.json"); err == nil {
+				resolvedSkin = "skin.json"
+			}
+		}
+	}
+
+	resolvedOfflineUUID := *offlineUUIDFlag
+	if !isFlagPassed("offline-uuid-file") {
+		if _, err := os.Stat(bauth.OfflineUUIDFile); os.IsNotExist(err) {
+			if _, err := os.Stat("offline_uuid.json"); err == nil {
+				resolvedOfflineUUID = "offline_uuid.json"
+			}
+		}
+	}
+
+	skinCfg, err := config.LoadSkin(resolvedSkin)
 	if err != nil {
 		log.Println("bebot: skin:", err)
 		skinCfg = config.DefaultSkinConfig
@@ -121,26 +162,28 @@ func main() {
 	var offlineUUID uuid.UUID
 	if !*offlineFlag {
 		var err error
-		source, err = bauth.LoadAuthSource(*authCachePath)
+		source, err = bauth.LoadAuthSource(resolvedTokenCache)
 		if err != nil {
 			log.Println("bebot: authentication failed:", err)
 			return
 		}
-		xblCache = bauth.LoadXBLCache("xsts_cache.json", source)
+		xblCache = bauth.LoadXBLCache(resolvedXSTSCache, source)
 	} else {
-		offlineUUID = bauth.LoadOrGenerateOfflineUUID(bauth.OfflineUUIDFile, *botNameFlag, *renewFlag)
+		offlineUUID = bauth.LoadOrGenerateOfflineUUID(resolvedOfflineUUID, *botNameFlag, *renewFlag)
 		log.Printf("bebot: running in offline/LAN mode as %q [UUID: %s] (no Microsoft authentication)\n", *botNameFlag, offlineUUID.String())
 	}
 
 	b := bot.New(bot.Options{
-		Config:      cfg,
-		ConfigPath:  *configPath,
-		SkinPath:    *skinFile,
-		Source:      source,
-		XBLCache:    xblCache,
-		Offline:     *offlineFlag,
-		BotName:     *botNameFlag,
-		OfflineUUID: offlineUUID,
+		Config:           cfg,
+		ConfigPath:       *configPath,
+		SkinPath:         resolvedSkin,
+		Source:           source,
+		XBLCache:         xblCache,
+		XSTSCachePath:    resolvedXSTSCache,
+		Offline:          *offlineFlag,
+		BotName:          *botNameFlag,
+		OfflineUUID:      offlineUUID,
+		OfflineUUIDPath:  resolvedOfflineUUID,
 		Local:            *localFlag,
 		Debug:            *debugFlag,
 		BlockPalettePath: *blockPaletteFlag,

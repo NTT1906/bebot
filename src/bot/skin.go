@@ -96,7 +96,7 @@ func (b *Bot) skinCmd(args []string) {
 	}
 	b.cfg.Skin = sc
 	if err := b.saveSkin(); err != nil {
-		b.reply("skin changed but skin.json write failed: " + err.Error())
+		b.reply("skin changed but skin save failed: " + err.Error())
 		return
 	}
 	reload := isReloadArg(args)

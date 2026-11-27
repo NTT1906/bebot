@@ -83,12 +83,15 @@ Bebot supports several flags when launched from the command line:
 | `-local` | `false` | Automatically discovers and connects to a local single-player Bedrock LAN world via NetherNet broadcast (UDP port 7551). Enables `-offline` mode automatically so it does not conflict with your Microsoft account. |
 | `-offline` | `false` | Connects in offline/LAN mode without requiring Microsoft Live or Xbox authentication. |
 | `-name <name>` | `Bebot` | Sets the bot's in-game display name (used in offline/LAN mode). |
-| `-renew` | `false` | Generates a fresh player UUID in offline/LAN mode instead of reusing the saved UUID from `offline_uuid.json`. |
+| `-renew` | `false` | Generates a fresh player UUID in offline/LAN mode instead of reusing the saved UUID from `data/offline_uuid.json`. |
+| `-offline-uuid-file <file>` | `data/offline_uuid.json` | Path used to persist the offline player UUID cache. |
 | `-host <host>` | Config | Overrides target server host IP or domain (e.g. `127.0.0.1` or LAN IP `192.168.1.5`). |
 | `-port <port>` | Config | Overrides target server port (e.g. `19132`). |
 | `-config <file>` | `config.json` | Path to custom bot configuration file. |
-| `-skin <file>` | `skin.json` | Path to custom skin configuration file. |
-| `-auth-cache <file>` | `token_cache.json` | Path used to persist the Microsoft OAuth session tokens. |
+| `-skin <file>` | `data/skin.json` | Path to custom skin configuration file. |
+| `-token-cache <file>` | `data/token_cache.json` | Path used to persist the Microsoft OAuth session tokens (alias: `-auth-cache`). |
+| `-xsts-cache <file>` | `data/xsts_cache.json` | Path used to persist Xbox Live XSTS device and session token cache. |
+| `-block-palette <file>` | Auto-detected | Path to custom block palette file (`.nbt` or `.json`). |
 | `-debug` | `false` | Prints detailed packet-level handshake and network diagnostics. |
 
 ### Joining a Local Single-Player World (LAN)
