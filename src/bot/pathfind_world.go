@@ -94,13 +94,13 @@ func (w *BotWorldView) GetBlockType(pos protocol.BlockPos) pathfind.BlockType {
 		return pathfind.BlockSolid
 	}
 
-	// 4. Check for Air by Runtime ID
-	airRID := w.b.ActualAirRID()
-	if rid == 0 || rid == airRID || (mineAir != nil && mineAir[rid]) {
+	// 4. Quick check for universally recognized 0 (unmapped / standard air)
+	if rid == 0 {
 		return pathfind.BlockAir
 	}
 
-	// 5. If blockRegistry is available, resolve block name and characteristics
+	// 5. If blockRegistry is available, resolve block name and characteristics (highest semantic truth).
+	// Prevents misconfigured or corrupted air runtime IDs from treating solid blocks (like oak logs) as air.
 	if w.b.blockRegistry != nil {
 		if name, ok := w.b.blockRegistry.ResolveName(rid); ok {
 			lower := strings.ToLower(name)
@@ -125,6 +125,12 @@ func (w *BotWorldView) GetBlockType(pos protocol.BlockPos) pathfind.BlockType {
 
 			return pathfind.BlockSolid
 		}
+	}
+
+	// 6. Check for Air by Runtime ID fallback (when palette is unloaded or RID is unknown to palette)
+	airRID := w.b.ActualAirRID()
+	if rid == airRID || (mineAir != nil && mineAir[rid]) {
+		return pathfind.BlockAir
 	}
 
 	// Default fallback: any non-air block is solid
