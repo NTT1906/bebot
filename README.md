@@ -18,6 +18,7 @@ Before running the bot, configure the `config.json` file in the project root. If
   "_comment_superuser": "Only this player can control the bot via chat commands.",
   "commands_via_chat": false,
   "free_mem_after_join": true,
+  "log_to_file": true,
   "server": {
     "host": "your.server.ip",
     "port": 19132
@@ -79,6 +80,8 @@ Bebot supports several flags when launched from the command line:
 | `-port <port>` | Config | Overrides target server port (e.g. `19132`). |
 | `-config <file>` | `config.json` | Path to custom bot configuration file. |
 | `-skin <file>` | `data/skin.json` | Path to skin configuration (`.json`) or directly to a skin image (`.png`). |
+| `-log-to-file` | `true` | Enables or disables writing log output to daily rotating files in `logs/` (e.g. `-log-to-file=false`). |
+| `-no-file-log` | `false` | Convenience flag to disable logging to files. |
 | `-token-cache <file>` | `data/token_cache.json` | Path used to persist the Microsoft OAuth session tokens (alias: `-auth-cache`). |
 | `-xsts-cache <file>` | `data/xsts_cache.json` | Path used to persist Xbox Live XSTS device and session token cache. |
 | `-block-palette <file>` | Auto-detected | Path to custom block palette file (`.nbt` or `.json`). |

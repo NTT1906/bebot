@@ -3,6 +3,7 @@
   "superuser": "YourUsername",
   "commands_via_chat": false,
   "free_mem_after_join": true,
+  "log_to_file": true,
   "server": {
     "host": "127.0.0.1",
     "port": 19132

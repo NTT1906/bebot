@@ -291,6 +291,28 @@ func TestLoadConfig_V2CamelCaseMigration(t *testing.T) {
 	}
 }
 
+func TestLogToFile_DefaultAndOverrides(t *testing.T) {
+	// 1. Default when nil should be true
+	var cfgDefault Config
+	if !LogToFileOn(cfgDefault) {
+		t.Errorf("expected default LogToFileOn to be true")
+	}
+
+	// 2. Explicitly false
+	f := false
+	cfgFalse := Config{LogToFile: &f}
+	if LogToFileOn(cfgFalse) {
+		t.Errorf("expected LogToFileOn to be false when explicitly false")
+	}
+
+	// 3. Explicitly true
+	tr := true
+	cfgTrue := Config{LogToFile: &tr}
+	if !LogToFileOn(cfgTrue) {
+		t.Errorf("expected LogToFileOn to be true when explicitly true")
+	}
+}
+
 func TestResolveSkinConfig_DirectPNGAndJSON(t *testing.T) {
 	tmpDir := t.TempDir()
 

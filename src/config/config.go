@@ -53,7 +53,8 @@ type Config struct {
 	Version          int        `json:"version" toml:"version"`
 	Superuser        string     `json:"superuser" toml:"superuser"`
 	CommandsViaChat  *bool      `json:"commands_via_chat,omitempty" toml:"commands-via-chat,omitempty"`
-	FreeMemAfterJoin *bool      `json:"free_mem_after_join,omitempty" toml:"free-mem-after-join,omitempty"`
+	FreeMemAfterJoin *bool        `json:"free_mem_after_join,omitempty" toml:"free-mem-after-join,omitempty"`
+	LogToFile        *bool        `json:"log_to_file,omitempty" toml:"log-to-file,omitempty"`
 	Server           struct {
 		Host string `json:"host" toml:"host"`
 		Port int    `json:"port" toml:"port"`
@@ -76,6 +77,14 @@ func FreeMemAfterJoinOn(cfg Config) bool {
 		return true
 	}
 	return *cfg.FreeMemAfterJoin
+}
+
+// LogToFileOn returns true unless explicitly set to false (defaults to true).
+func LogToFileOn(cfg Config) bool {
+	if cfg.LogToFile == nil {
+		return true
+	}
+	return *cfg.LogToFile
 }
 
 // ServerStallThreshold returns the configured duration without server packets before considering the server stalled.
