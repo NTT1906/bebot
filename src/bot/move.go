@@ -254,17 +254,23 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 	}
 	dx, dy, dz := target.X()-b.pos.X(), target.Y()-b.pos.Y(), target.Z()-b.pos.Z()
 	hDist := float32(math.Sqrt(float64(dx*dx + dz*dz)))
-	b.moving = hDist > .25
+	vDist := float32(math.Abs(float64(dy)))
+
+	// Reached target only when staying close in all 3 dimensions: X, Y, and Z
+	targetReached := hDist <= .25 && vDist <= .5
+	b.moving = !targetReached
 	if b.mode == modeIdle {
 		b.moving = false
 	}
 	if b.moving && !stalled {
-		step := b.cfg.Behaviour.WalkSpeed
-		if step > hDist {
-			step = hDist
+		if hDist > 0.001 {
+			step := b.cfg.Behaviour.WalkSpeed
+			if step > hDist {
+				step = hDist
+			}
+			b.pos = b.pos.Add(mgl32.Vec3{dx / hDist * step, 0, dz / hDist * step})
+			b.updateChunkCenterIfMoved()
 		}
-		b.pos = b.pos.Add(mgl32.Vec3{dx / hDist * step, 0, dz / hDist * step})
-		b.updateChunkCenterIfMoved()
 	}
 	b.mu.Lock()
 	if b.jumpIntervalTicks > 0 {
@@ -289,13 +295,13 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 		b.velocityY = .42
 	}
 	baseY := target.Y()
-	if b.mode == modeIdle || b.mode == modeCamic || b.mode == modeLookAt || !b.moving {
+	if b.mode == modeIdle || b.mode == modeCamic || b.mode == modeLookAt || !b.moving || target.Y() > b.jumpBaseY+1.25 {
 		baseY = b.jumpBaseY
 	}
 	if b.velocityY != 0 || b.pos.Y() > baseY+.6 {
 		b.velocityY -= .08
 		b.pos[1] += b.velocityY
-		if b.pos.Y() <= baseY {
+		if b.velocityY <= 0 && b.pos.Y() <= baseY {
 			b.pos[1] = baseY
 			b.velocityY = 0
 		}

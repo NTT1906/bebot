@@ -153,13 +153,14 @@ func (b *Bot) pathFollowTick(c *minecraft.Conn) (jump bool, replyMsg string) {
 		return false, ""
 	}
 
-	// Dynamic player tracking: replan if player moves > 3 blocks away
+	// Dynamic player tracking: replan if player moves > 3 blocks away or changes elevation in 3D
 	if b.pathTargetName != "" {
 		if targetPlayer, ok := b.players[strings.ToLower(b.pathTargetName)]; ok && (targetPlayer.id != 0 || targetPlayer.hasLocation) {
 			playerPos := vec3ToBlockPos(targetPlayer.position)
 			dx := playerPos.X() - b.pathTargetPos.X()
+			dy := playerPos.Y() - b.pathTargetPos.Y()
 			dz := playerPos.Z() - b.pathTargetPos.Z()
-			if dx*dx+dz*dz > 9 {
+			if dx*dx+dy*dy+dz*dz > 9 || math.Abs(float64(dy)) >= 2 {
 				target := playerPos
 				botPos := b.pos
 				planner := b.pathPlanner
@@ -209,6 +210,7 @@ func (b *Bot) pathFollowTick(c *minecraft.Conn) (jump bool, replyMsg string) {
 		dy = targetVec.Y() - b.pos.Y()
 		dz = targetVec.Z() - b.pos.Z()
 		hDist = float32(math.Sqrt(float64(dx*dx + dz*dz)))
+		vDist = float32(math.Abs(float64(dy)))
 	}
 
 	// Update movement destination and mode
@@ -274,7 +276,7 @@ func (b *Bot) pathFollowTick(c *minecraft.Conn) (jump bool, replyMsg string) {
 }
 
 // onSegmentCompleteLocked evaluates whether the final destination has been reached
-// or if a multi-chunk continuation segment should be planned. Must be called with b.mu held;
+// in X, Y, and Z, or if a multi-chunk continuation segment should be planned. Must be called with b.mu held;
 // releases b.mu before returning.
 func (b *Bot) onSegmentCompleteLocked() (jump bool, replyMsg string) {
 	if len(b.pathNodes) == 0 {
@@ -285,17 +287,19 @@ func (b *Bot) onSegmentCompleteLocked() (jump bool, replyMsg string) {
 		return false, ""
 	}
 
-	lastWP := b.pathNodes[len(b.pathNodes)-1]
 	target := b.pathTargetPos
+	curBlock := vec3ToBlockPos(b.pos)
 
-	// Distance from final waypoint of this segment to the destination
-	dx := float64(target.X() - lastWP.X())
-	dy := float64(target.Y() - lastWP.Y())
-	dz := float64(target.Z() - lastWP.Z())
-	distToFinal := math.Sqrt(dx*dx + dy*dy + dz*dz)
+	// Distance from bot's current standing position to the destination in 3D: X, Y, and Z
+	dx := float64(target.X() - curBlock.X())
+	dy := float64(target.Y() - curBlock.Y())
+	dz := float64(target.Z() - curBlock.Z())
+	hDistToFinal := math.Sqrt(dx*dx + dz*dz)
+	vDistToFinal := math.Abs(dy)
 
-	// If within 1.5 blocks of target, the destination is reached
-	if distToFinal <= 1.5 {
+	// Reached destination only when staying close to target in X, Y, and Z:
+	// horizontal distance <= 1.25 blocks and vertical elevation <= 1.0 block.
+	if hDistToFinal <= 1.25 && vDistToFinal <= 1.0 {
 		b.pathActive = false
 		b.mode = modeIdle
 		b.moving = false
@@ -303,8 +307,8 @@ func (b *Bot) onSegmentCompleteLocked() (jump bool, replyMsg string) {
 		return false, fmt.Sprintf("[Bebot] Destination reached! (<%d, %d, %d>)", target.X(), target.Y(), target.Z())
 	}
 
-	// Reached the edge of the previous chunk window; more chunks have loaded ahead as the bot walked.
-	// Automatically plan the next segment towards b.pathTargetPos.
+	// Reached the edge of the previous chunk window or need to ascend/descend;
+	// automatically plan the next segment towards b.pathTargetPos.
 	botPos := b.pos
 	planner := b.pathPlanner
 	playerName := b.pathTargetName
@@ -330,6 +334,7 @@ func (b *Bot) onSegmentCompleteLocked() (jump bool, replyMsg string) {
 			return false, fmt.Sprintf("[Bebot] Destination in sight! Navigating final %d nodes to <%d, %d, %d>...",
 				len(nextRes.Nodes), target.X(), target.Y(), target.Z())
 		}
+		distToFinal := math.Sqrt(dx*dx + dy*dy + dz*dz)
 		return false, fmt.Sprintf("[Bebot] Continuing towards <%d, %d, %d> (next segment: %d nodes, %.1fm remaining)...",
 			target.X(), target.Y(), target.Z(), len(nextRes.Nodes), distToFinal)
 	}
@@ -339,10 +344,11 @@ func (b *Bot) onSegmentCompleteLocked() (jump bool, replyMsg string) {
 	b.mode = modeIdle
 	b.moving = false
 	b.mu.Unlock()
+	distToFinal := math.Sqrt(dx*dx + dy*dy + dz*dz)
 	if playerName != "" {
 		return false, fmt.Sprintf("[Bebot] Stopped near %s at <%d, %d, %d> (dist: %.1fm).",
-			playerName, lastWP.X(), lastWP.Y(), lastWP.Z(), distToFinal)
+			playerName, curBlock.X(), curBlock.Y(), curBlock.Z(), distToFinal)
 	}
 	return false, fmt.Sprintf("[Bebot] Cannot progress further towards <%d, %d, %d> (reached <%d, %d, %d>, %.1fm away, blocked or unmapped terrain).",
-		target.X(), target.Y(), target.Z(), lastWP.X(), lastWP.Y(), lastWP.Z(), distToFinal)
+		target.X(), target.Y(), target.Z(), curBlock.X(), curBlock.Y(), curBlock.Z(), distToFinal)
 }

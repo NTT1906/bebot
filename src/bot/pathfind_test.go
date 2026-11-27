@@ -324,3 +324,126 @@ func TestMultiChunkSegmentProgression(t *testing.T) {
 
 	b.StopPath()
 }
+
+// TestPathArrivalRequires3DProximity verifies that arriving at a destination requires
+// proximity in all 3 axes (X, Y, and Z). A horizontal match with vertical elevation mismatch
+// must NOT falsely trigger "Destination reached".
+func TestPathArrivalRequires3DProximity(t *testing.T) {
+	cache := NewChunkCache()
+	cache.Enable(protocol.SubChunkPos{0, 4, 0})
+
+	var replied []string
+	b := &Bot{
+		pos:             mgl32.Vec3{0, 64, 0},
+		chunkCache:      cache,
+		blockRegistry:   NewBlockRegistry(),
+		blockRuntimeIDs: make(map[protocol.BlockPos]uint32),
+		players:         make(map[string]player),
+		testReplyHook: func(msg string) {
+			replied = append(replied, msg)
+		},
+	}
+	b.pathPlanner = pathfind.NewPlanner()
+
+	// Floor at Y=63
+	for x := int32(0); x <= 5; x++ {
+		cache.OnBlockUpdate(protocol.BlockPos{x, 63, 0}, 1)
+		cache.OnBlockUpdate(protocol.BlockPos{x, 64, 0}, 0)
+		cache.OnBlockUpdate(protocol.BlockPos{x, 65, 0}, 0)
+		cache.OnBlockUpdate(protocol.BlockPos{x, 66, 0}, 0)
+		cache.OnBlockUpdate(protocol.BlockPos{x, 67, 0}, 0)
+	}
+
+	// Target is 3 blocks higher in elevation: (3, 67, 0)
+	b.StartPath(protocol.BlockPos{3, 67, 0}, "")
+	if !b.IsPathActive() {
+		t.Fatal("expected path to be active")
+	}
+
+	// 1. Bot reaches X=3, Z=0 horizontally, but remains at Y=64 (vertical difference = 3 blocks)
+	b.mu.Lock()
+	b.pathIndex = len(b.pathNodes)
+	b.pos = mgl32.Vec3{3.5, 64.0, 0.5}
+	_, msg := b.onSegmentCompleteLocked()
+
+	if strings.Contains(msg, "Destination reached") {
+		t.Fatalf("did NOT expect 'Destination reached' when vertical distance is 3 blocks off! got: %q", msg)
+	}
+	if !strings.Contains(msg, "Cannot progress further") && !strings.Contains(msg, "blocked") {
+		t.Errorf("expected unreachable elevation message, got: %q", msg)
+	}
+
+	// 2. Start path where 3D target is reached in X, Y, and Z: (3, 64, 0)
+	b.mu.Lock()
+	b.pos = mgl32.Vec3{0.5, 64.0, 0.5}
+	b.mu.Unlock()
+	b.StartPath(protocol.BlockPos{3, 64, 0}, "")
+	b.mu.Lock()
+	b.pathIndex = len(b.pathNodes)
+	b.pos = mgl32.Vec3{3.5, 64.0, 0.5}
+	_, msg = b.onSegmentCompleteLocked()
+
+	if !strings.Contains(msg, "Destination reached") {
+		t.Errorf("expected 'Destination reached' when bot arrived in X, Y, and Z, got: %q", msg)
+	}
+}
+
+// TestDynamicPlayerTracking3D verifies that when a tracked target player changes elevation (Y),
+// dynamic tracking detects the 3D movement and replans.
+func TestDynamicPlayerTracking3D(t *testing.T) {
+	cache := NewChunkCache()
+	cache.Enable(protocol.SubChunkPos{0, 4, 0})
+
+	b := &Bot{
+		pos:             mgl32.Vec3{0, 64, 0},
+		chunkCache:      cache,
+		blockRegistry:   NewBlockRegistry(),
+		blockRuntimeIDs: make(map[protocol.BlockPos]uint32),
+		players:         make(map[string]player),
+	}
+	b.pathPlanner = pathfind.NewPlanner()
+
+	// Multi-level terrain
+	for x := int32(0); x <= 5; x++ {
+		cache.OnBlockUpdate(protocol.BlockPos{x, 63, 0}, 1)
+		cache.OnBlockUpdate(protocol.BlockPos{x, 64, 0}, 0)
+		cache.OnBlockUpdate(protocol.BlockPos{x, 65, 0}, 0)
+		cache.OnBlockUpdate(protocol.BlockPos{x, 66, 0}, 0)
+		cache.OnBlockUpdate(protocol.BlockPos{x, 67, 0}, 0)
+	}
+
+	b.players["steve"] = player{
+		name:        "Steve",
+		id:          12345,
+		online:      true,
+		hasLocation: true,
+		position:    mgl32.Vec3{3, 64, 0},
+	}
+
+	b.StartPath(protocol.BlockPos{3, 64, 0}, "Steve")
+	if !b.IsPathActive() {
+		t.Fatal("expected path to be active")
+	}
+
+	// Steve changes elevation in 3D: moves from Y=64 to Y=67 with zero horizontal movement
+	b.mu.Lock()
+	b.players["steve"] = player{
+		name:        "Steve",
+		id:          12345,
+		online:      true,
+		hasLocation: true,
+		position:    mgl32.Vec3{3, 67, 0},
+	}
+	b.mu.Unlock()
+
+	// Follow tick should detect vertical movement (dy >= 2) and replan targetPos to Y=67
+	b.pathFollowTick(nil)
+
+	b.mu.Lock()
+	targetY := b.pathTargetPos.Y()
+	b.mu.Unlock()
+
+	if targetY != 67 {
+		t.Errorf("expected pathTargetPos.Y to be updated to 67 after 3D player movement, got %d", targetY)
+	}
+}
