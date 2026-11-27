@@ -555,22 +555,7 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 			timeoutTicks = maxTicks + 4
 		}
 
-		if (b.mineActive || b.mineLearnActive) && ticks >= timeoutTicks && !stalled {
-			if b.mineLearnActive {
-				log.Printf("bebot: mine learn at (%d, %d, %d) timed out after %.1fs\n", bt.X(), bt.Y(), bt.Z(), timeoutSec)
-				b.mu.Lock()
-				b.abortBreakTarget = bt
-				b.mineLearnActive = false
-				b.mineLearnWasBroken = false
-				b.mineLearnStartedBreak = false
-				b.mineLearnInitialRuntimeID = 0
-				b.breakTarget = nil
-				b.breakTicks = 0
-				b.breakRepeat = false
-				b.mu.Unlock()
-				b.reply(fmt.Sprintf("Air calibration timed out after %.1fs (block did not break or unreachable).", timeoutSec))
-				return
-			}
+		if b.mineActive && ticks >= timeoutTicks && !stalled {
 			log.Printf("bebot: block at (%d, %d, %d) timed out after %.1fs (cannot be mined: air/water/bedrock), skipping\n", bt.X(), bt.Y(), bt.Z(), timeoutSec)
 			b.mu.Lock()
 			b.abortBreakTarget = bt
@@ -601,9 +586,6 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 			if ticks == 0 {
 				b.mu.Lock()
 				mineSwing = b.breakAnimation
-				if b.mineLearnActive {
-					b.mineLearnStartedBreak = true
-				}
 				b.mu.Unlock()
 				actions = append(actions,
 					protocol.PlayerBlockAction{Action: int32(protocol.PlayerActionStartBreak), BlockPos: *bt, Face: btFace},
@@ -640,9 +622,6 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 				b.mu.Lock()
 				if b.breakRepeat {
 					b.breakTicks = 0
-				} else if b.mineLearnActive {
-					b.mineLearnWasBroken = true
-					b.breakTicks = maxTicks
 				} else if b.mineActive {
 					if b.mineAttempts != nil {
 						b.mineAttempts[*bt] = 2

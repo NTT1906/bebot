@@ -32,6 +32,7 @@ func newLoadedPipelineTestBot() *Bot {
 		knownAirBlocks:    make(map[protocol.BlockPos]bool),
 		unmineableBlocks:  make(map[protocol.BlockPos]bool),
 		mineAttempts:      make(map[protocol.BlockPos]int),
+		blockRuntimeIDs:   make(map[protocol.BlockPos]uint32),
 		gameMode:          0, // Survival mode default
 	}
 	return b
@@ -184,5 +185,86 @@ func TestPickNextMineBlockDynamicFiltering(t *testing.T) {
 	}
 	if *target != (protocol.BlockPos{2, 64, 0}) {
 		t.Errorf("expected target stone at {2, 64, 0}, got %v", *target)
+	}
+}
+
+// TestRepeatingAreaMiningPrefilledAndRegeneratedBlocks tests that newly placed or regenerated blocks
+// (such as a cobblestone generator or chests) inside the mine box are queued and picked up for mining
+// without being learned as air or discarded by stale cache.
+func TestRepeatingAreaMiningPrefilledAndRegeneratedBlocks(t *testing.T) {
+	b := newLoadedPipelineTestBot()
+	b.gameMode = 0 // Survival
+	b.mineBoxMin = protocol.BlockPos{254, 63, -224}
+	b.mineBoxMax = protocol.BlockPos{258, 67, -220}
+	b.mineActive = true
+	b.mineRepeat = true
+	b.mineWaitingForBlocks = true
+	b.mineQueue = []protocol.BlockPos{}
+
+	chestPos := protocol.BlockPos{255, 64, -223}
+	chestRID := uint32(1741778478)
+	b.blockRegistry.Register(chestRID, "minecraft:chest")
+
+	// Simulate break finish followed by cobblestone / chest appearance at the same coordinate
+	b.mineLastFinishedPos = chestPos
+	b.mineLastFinishedTick = b.tick
+	b.mineLastWasBroken = true
+	b.mineBreakInitialKnown = true
+	b.mineBreakInitialRuntimeID = 1 // broke stone (RID 1)
+
+	b.handleUpdateBlock(chestPos, chestRID)
+
+	// Verify chest was NOT learned as air
+	if b.mineAirRuntimeIDs[chestRID] {
+		t.Fatalf("chest runtime ID %d was learned as air!", chestRID)
+	}
+
+	// Verify chest was NOT marked unmineable
+	if b.unmineableBlocks[chestPos] {
+		t.Fatalf("chest at %v was incorrectly marked as unmineable", chestPos)
+	}
+
+	// Verify chest was added to mineQueue
+	if len(b.mineQueue) != 1 || b.mineQueue[0] != chestPos {
+		t.Fatalf("expected chest %v to be added to mineQueue, got %v", chestPos, b.mineQueue)
+	}
+
+	// Verify pickNextMineBlock successfully picks up chest
+	target := b.pickNextMineBlock()
+	if target == nil || *target != chestPos {
+		t.Fatalf("expected pickNextMineBlock to return %v, got %v", chestPos, target)
+	}
+}
+
+// TestRestartMiningQueueWithRefilledBlocks tests that restartMiningQueue properly re-evaluates
+// refilled solid blocks in the mine box even if they were previously mined into air.
+func TestRestartMiningQueueWithRefilledBlocks(t *testing.T) {
+	b := newLoadedPipelineTestBot()
+	b.gameMode = 0
+	b.mineBoxMin = protocol.BlockPos{0, 64, 0}
+	b.mineBoxMax = protocol.BlockPos{1, 64, 0} // 2 blocks total
+	b.mineActive = true
+	b.mineRepeat = true
+
+	// Both blocks were previously mined and recorded as known air
+	b.knownAirBlocks[protocol.BlockPos{0, 64, 0}] = true
+	b.knownAirBlocks[protocol.BlockPos{1, 64, 0}] = true
+	b.mineAttempts[protocol.BlockPos{0, 64, 0}] = 2
+	b.mineAttempts[protocol.BlockPos{1, 64, 0}] = 2
+
+	// Now coordinate {0, 64, 0} refilled with stone (RID 1), while {1, 64, 0} remains air (RID 0)
+	b.blockRuntimeIDs[protocol.BlockPos{0, 64, 0}] = 1
+	b.blockRuntimeIDs[protocol.BlockPos{1, 64, 0}] = 0
+
+	b.mu.Lock()
+	b.restartMiningQueue()
+	b.mu.Unlock()
+
+	// Only {0, 64, 0} (refilled stone) should be queued; air {1, 64, 0} filtered
+	if len(b.mineQueue) != 1 {
+		t.Fatalf("expected 1 block queued after restart, got %d: %v", len(b.mineQueue), b.mineQueue)
+	}
+	if b.mineQueue[0] != (protocol.BlockPos{0, 64, 0}) {
+		t.Fatalf("expected queued block to be {0, 64, 0}, got %v", b.mineQueue[0])
 	}
 }

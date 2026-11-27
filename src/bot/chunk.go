@@ -204,11 +204,28 @@ func (c *ChunkCache) OnSubChunkBlocks(subChunkPos protocol.BlockPos, blocks []pr
 		return
 	}
 
+	isBlockCoords := false
+	if subChunkPos.X()%16 == 0 && subChunkPos.Z()%16 == 0 && (subChunkPos.X() != 0 || subChunkPos.Z() != 0) {
+		isBlockCoords = true
+	} else {
+		dx := (subChunkPos.X() >> 4) - c.center[0]
+		dz := (subChunkPos.Z() >> 4) - c.center[2]
+		if dx >= -1 && dx <= 1 && dz >= -1 && dz <= 1 {
+			isBlockCoords = true
+		}
+	}
+
 	for _, entry := range blocks {
-		// Calculate world block position
-		wx := (subChunkPos.X() << 4) + entry.BlockPos.X()
-		wy := (subChunkPos.Y() << 4) + entry.BlockPos.Y()
-		wz := (subChunkPos.Z() << 4) + entry.BlockPos.Z()
+		var wx, wy, wz int32
+		if isBlockCoords {
+			wx = subChunkPos.X() + entry.BlockPos.X()
+			wy = subChunkPos.Y() + entry.BlockPos.Y()
+			wz = subChunkPos.Z() + entry.BlockPos.Z()
+		} else {
+			wx = (subChunkPos.X() << 4) + entry.BlockPos.X()
+			wy = (subChunkPos.Y() << 4) + entry.BlockPos.Y()
+			wz = (subChunkPos.Z() << 4) + entry.BlockPos.Z()
+		}
 
 		sp := protocol.SubChunkPos{wx >> 4, wy >> 4, wz >> 4}
 		if inWindow(sp, c.center) {

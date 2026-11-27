@@ -164,11 +164,9 @@ func (r *BlockRegistry) InitFromGameData(useHashes bool, customBlocks []protocol
 	// Always register 0 as minecraft:air fallback
 	r.Register(0, "minecraft:air")
 
-	// If using hashes, register mathematically certain air states
+	// If using hashes, register mathematically certain air state
 	if useHashes {
-		for _, name := range []string{"minecraft:air", "minecraft:cave_air", "minecraft:void_air"} {
-			r.Register(HashBlockState(name, nil), name)
-		}
+		r.Register(HashBlockState("minecraft:air", nil), "minecraft:air")
 	}
 
 	// Register custom blocks sent by the server in StartGame

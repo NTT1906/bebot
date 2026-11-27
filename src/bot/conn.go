@@ -596,14 +596,16 @@ func (b *Bot) readPackets(c *minecraft.Conn) error {
 			for _, entry := range p.Blocks {
 				pos := b.resolveSubChunkBlockPos(p.Position, entry.BlockPos)
 				b.handleUpdateBlock(pos, entry.BlockRuntimeID)
+				if b.chunkCache != nil {
+					b.chunkCache.OnBlockUpdate(pos, entry.BlockRuntimeID)
+				}
 			}
 			for _, entry := range p.Extra {
 				pos := b.resolveSubChunkBlockPos(p.Position, entry.BlockPos)
 				b.handleUpdateBlock(pos, entry.BlockRuntimeID)
-			}
-			if b.chunkCache != nil {
-				b.chunkCache.OnSubChunkBlocks(p.Position, p.Blocks)
-				b.chunkCache.OnSubChunkBlocks(p.Position, p.Extra)
+				if b.chunkCache != nil {
+					b.chunkCache.OnBlockUpdate(pos, entry.BlockRuntimeID)
+				}
 			}
 		case *packet.BlockActorData:
 			if tracePackets {

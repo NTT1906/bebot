@@ -689,33 +689,11 @@ func (b *Bot) commandInternal(line string, bypassFocus bool) {
 		b.execTrimMemory()
 	case "inspect", "probe":
 		b.inspectCmd(p[1:])
-	case "break", "breakat", "breakcoord", "mine", "mineat", "minearea", "minespace", "breakarea", "breakspace", "mineloop", "minefarm", "minetimeout", "learn", "learnair", "calibrate", "minelearn", "minecalibrate":
-		if strings.EqualFold(p[0], "learn") || strings.EqualFold(p[0], "learnair") || strings.EqualFold(p[0], "calibrate") ||
-			strings.EqualFold(p[0], "minelearn") || strings.EqualFold(p[0], "minecalibrate") ||
-			(len(p) >= 2 && (strings.EqualFold(p[1], "learn") || strings.EqualFold(p[1], "calibrate"))) {
-			var target *protocol.BlockPos
-			startIdx := 2
-			if strings.EqualFold(p[0], "learn") || strings.EqualFold(p[0], "learnair") || strings.EqualFold(p[0], "calibrate") ||
-				strings.EqualFold(p[0], "minelearn") || strings.EqualFold(p[0], "minecalibrate") {
-				startIdx = 1
-				if len(p) >= 2 && strings.EqualFold(p[1], "air") {
-					startIdx = 2
-				}
-			}
-			if len(p) >= startIdx+3 {
-				var x, y, z int32
-				if _, err := fmt.Sscanf(strings.Join(p[startIdx:startIdx+3], " "), "%d %d %d", &x, &y, &z); err == nil {
-					target = &protocol.BlockPos{x, y, z}
-				}
-			}
-			b.startLearningAir(target)
-			return
-		}
+	case "break", "breakat", "breakcoord", "mine", "mineat", "minearea", "minespace", "breakarea", "breakspace", "mineloop", "minefarm", "minetimeout":
 		if len(p) >= 2 && strings.EqualFold(p[1], "air") {
 			if len(p) >= 3 && (strings.EqualFold(p[2], "clear") || strings.EqualFold(p[2], "reset")) {
 				b.mu.Lock()
 				b.mineAirRuntimeIDs = computeDefaultAirRuntimeIDs(b.serverUseHashes)
-				_ = b.saveAirRuntimeIDsCacheLocked(defaultAirRuntimeIDsCacheFile)
 				b.mu.Unlock()
 				b.reply(fmt.Sprintf("Reset air block runtime IDs to defaults (useNetworkHashes=%v).", b.serverUseHashes))
 				return
@@ -726,7 +704,6 @@ func (b *Bot) commandInternal(line string, bypassFocus bool) {
 						b.mu.Lock()
 						if b.mineAirRuntimeIDs != nil {
 							delete(b.mineAirRuntimeIDs, uint32(id))
-							_ = b.saveAirRuntimeIDsCacheLocked(defaultAirRuntimeIDsCacheFile)
 						}
 						b.mu.Unlock()
 						b.reply(fmt.Sprintf("Removed %d from known air runtime IDs.", id))
@@ -744,7 +721,6 @@ func (b *Bot) commandInternal(line string, bypassFocus bool) {
 							b.mineAirRuntimeIDs = make(map[uint32]bool)
 						}
 						b.mineAirRuntimeIDs[uint32(id)] = true
-						_ = b.saveAirRuntimeIDsCacheLocked(defaultAirRuntimeIDsCacheFile)
 						b.mu.Unlock()
 						b.reply(fmt.Sprintf("Added %d to known air runtime IDs.", id))
 						return
@@ -766,11 +742,11 @@ func (b *Bot) commandInternal(line string, bypassFocus bool) {
 						if isAir || rid == 0 {
 							statusStr = "air"
 						}
-						b.reply(fmt.Sprintf("Block at (%d, %d, %d) has cached runtime ID %d (%s). To break & calibrate air, use: mine learn %d %d %d",
-							x, y, z, rid, statusStr, x, y, z))
+						b.reply(fmt.Sprintf("Block at (%d, %d, %d) has cached runtime ID %d (%s).",
+							x, y, z, rid, statusStr))
 					} else {
-						b.reply(fmt.Sprintf("Block at (%d, %d, %d) has no cached runtime ID. To break & calibrate air, use: mine learn %d %d %d",
-							x, y, z, x, y, z))
+						b.reply(fmt.Sprintf("Block at (%d, %d, %d) has no cached runtime ID.",
+							x, y, z))
 					}
 					return
 				}
@@ -782,7 +758,7 @@ func (b *Bot) commandInternal(line string, bypassFocus bool) {
 			}
 			b.mu.Unlock()
 			sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-			b.reply(fmt.Sprintf("Known air runtime IDs: %v (Use 'mine learn <x y z>' to break a block & calibrate air)", ids))
+			b.reply(fmt.Sprintf("Known air runtime IDs: %v", ids))
 			return
 		}
 		if strings.EqualFold(p[0], "minetimeout") || (len(p) >= 2 && strings.EqualFold(p[1], "timeout")) {

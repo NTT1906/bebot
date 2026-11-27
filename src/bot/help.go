@@ -177,14 +177,6 @@ Examples:
   bebot mine timeout 3.0
   bebot minetimeout 1.5`,
 
-	"learn": `§6=== Help: mine learn ===§r
-Description: Calibrates and confirms the server's air block runtime ID by breaking a solid block.
-Aliases: mine learn, learnair, calibrate, minecalibrate
-Syntax: mine learn [x y z]
-Examples:
-  bebot mine learn 256 62 -219
-  bebot mine learn (breaks block in front of bot)`,
-
 	"air": `§6=== Help: mine air ===§r
 Description: Displays or manages the set of runtime IDs recognized as air by the miner.
 Syntax:
@@ -521,10 +513,6 @@ var aliasMapping = map[string]string{
 	"cancelmine":      "stopmine",
 	"cancelbreak":     "stopmine",
 	"timeout":         "minetimeout",
-	"learnair":        "learn",
-	"calibrate":       "learn",
-	"minecalibrate":   "learn",
-	"minelearn":       "learn",
 	"wake":            "wakeup",
 	"unsleep":         "wakeup",
 	"slot":            "hotbar",
@@ -597,7 +585,6 @@ func (b *Bot) helpCmd(p []string) {
 			"break <x y z> [animation] - break a single block",
 			"mine <pos1> <pos2> [repeat] [faceAccurate] - area mine top-down",
 			"mine timeout <seconds> - set per-block break timeout (default 3.0s)",
-			"mine learn [x y z] - calibrate air runtime ID from block",
 			"mine air [clear|add|remove] - view/manage known air IDs",
 			"stopmine / stopbreak - stop mining",
 			"sleep [x y z] - interact with bed to sleep & set spawn",
@@ -677,17 +664,11 @@ func (b *Bot) helpCmd(p []string) {
 				return
 			}
 
-			// If two words like "mine air" or "mine learn"
+			// If two words like "mine air" or "mine timeout"
 			if len(p) >= 3 {
 				combined := arg + " " + strings.ToLower(p[2])
 				if combined == "mine air" {
 					if doc, ok := getCommandHelp("air"); ok {
-						b.reply(doc)
-						return
-					}
-				}
-				if combined == "mine learn" {
-					if doc, ok := getCommandHelp("learn"); ok {
 						b.reply(doc)
 						return
 					}

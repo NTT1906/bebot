@@ -1,8 +1,6 @@
 package bot
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 )
 
@@ -16,16 +14,6 @@ func TestHashBlockState(t *testing.T) {
 			name:     "minecraft:air",
 			states:   nil,
 			expected: 3690217760,
-		},
-		{
-			name:     "minecraft:cave_air",
-			states:   nil,
-			expected: 3959618627,
-		},
-		{
-			name:     "minecraft:void_air",
-			states:   nil,
-			expected: 848705078,
 		},
 		{
 			name:     "minecraft:dirt",
@@ -52,11 +40,14 @@ func TestHashBlockState(t *testing.T) {
 func TestComputeDefaultAirRuntimeIDs(t *testing.T) {
 	t.Run("Hashed Server", func(t *testing.T) {
 		ids := computeDefaultAirRuntimeIDs(true)
-		expected := []uint32{0, 3690217760, 3959618627, 848705078}
+		expected := []uint32{0, 3690217760}
 		for _, exp := range expected {
 			if !ids[exp] {
 				t.Errorf("expected runtime ID %d to be in hashed air map", exp)
 			}
+		}
+		if len(ids) != len(expected) {
+			t.Errorf("expected %d entries, got %d: %v", len(expected), len(ids), ids)
 		}
 	})
 
@@ -69,43 +60,6 @@ func TestComputeDefaultAirRuntimeIDs(t *testing.T) {
 			t.Errorf("did not expect hash 3690217760 in pure index BDS air map")
 		}
 	})
-}
-
-func TestAirRuntimeIDsCacheLoadAndSave(t *testing.T) {
-	tmpDir := t.TempDir()
-	cachePath := filepath.Join(tmpDir, "test_cache", "air_ids.json")
-
-	b := &Bot{
-		serverUseHashes: true,
-		mineAirRuntimeIDs: map[uint32]bool{
-			0:          true,
-			3690217760: true,
-			12345678:   true, // learned custom ID
-		},
-	}
-
-	// 1. Save cache
-	if err := b.saveAirRuntimeIDsCacheLocked(cachePath); err != nil {
-		t.Fatalf("failed to save cache: %v", err)
-	}
-
-	// Verify file exists
-	if _, err := os.Stat(cachePath); os.IsNotExist(err) {
-		t.Fatalf("cache file was not created")
-	}
-
-	// 2. Load cache
-	loadedIDs, ok := b.loadAirRuntimeIDsCache(cachePath)
-	if !ok {
-		t.Fatalf("failed to load cache")
-	}
-
-	expectedMap := map[uint32]bool{0: true, 3690217760: true, 12345678: true}
-	for _, id := range loadedIDs {
-		if !expectedMap[id] {
-			t.Errorf("unexpected loaded ID: %d", id)
-		}
-	}
 }
 
 func TestBlockRuntimeIDByName(t *testing.T) {

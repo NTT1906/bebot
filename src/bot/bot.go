@@ -221,11 +221,6 @@ type Bot struct {
 	mineBreakInitialRuntimeID    uint32
 	mineBreakInitialKnown        bool
 	mineWaitingForBlocks         bool
-	mineLearnActive              bool
-	mineLearnPos                 protocol.BlockPos
-	mineLearnInitialRuntimeID    uint32
-	mineLearnWasBroken           bool
-	mineLearnStartedBreak        bool
 	lastPacketTime               atomic.Int64
 	stallTicks                   int
 	bundleTestActive             bool

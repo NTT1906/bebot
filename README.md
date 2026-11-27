@@ -141,7 +141,7 @@ Commands can be typed directly into the bot's terminal console or sent via in-ga
   * **Face Accurate** (`[faceAccurate: true|false]`, default: `false`): When `false`, uses standard Face 1 mining. When `true`, calculates the exact visible block face (`Face 0` for overhead/bottom face, side faces, top face) and points camera directly at the block.
 * **`mine timeout <seconds>`** *(Alias: `minetimeout`)*
   Gets or sets the per-block mining timeout in seconds (default: `3.0`s). When a block cannot be mined because it is air, water/lava liquid, bedrock, or protected, the bot halts breaking after this timeout, marks the block as unmineable, and skips immediately to the next block in the queue.
-  * Unmineable coordinates are kept in a separate in-memory blacklist for the current mine command and are skipped by repeated passes and queue selection. They are never written to `data/air_runtime_ids.json`, which stores air runtime IDs only. The blacklist is cleared when the command ends and reset whenever a new mine command starts.
+  * Unmineable coordinates are kept in a separate in-memory blacklist for the current mine command and are skipped by repeated passes and queue selection. The blacklist is cleared when the command ends and reset whenever a new mine command starts.
 * **`break <x> <y> <z> [animate: true|false] [repeat: true|false]`**
   *(Aliases: `breakat`, `breakcoord`, `mineat`)*
   Breaks a single block at the given coordinate. Optional arm animation and repeat flag.

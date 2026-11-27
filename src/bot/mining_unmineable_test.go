@@ -1,9 +1,6 @@
 package bot
 
 import (
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/sandertv/gophertunnel/minecraft/protocol"
@@ -74,8 +71,7 @@ func TestTimedOutBlockMarksUnmineable(t *testing.T) {
 	}
 }
 
-func TestRecentFinishChangedRuntimeIDLearnsAir(t *testing.T) {
-	t.Chdir(t.TempDir())
+func TestRecentFinishDoesNotLearnAirDuringNormalMining(t *testing.T) {
 	b := newUnmineableTestBot()
 	pos := protocol.BlockPos{4, 5, 6}
 
@@ -84,18 +80,13 @@ func TestRecentFinishChangedRuntimeIDLearnsAir(t *testing.T) {
 	b.mineBreakInitialKnown = true
 	b.mineBreakInitialRuntimeID = 99
 
-	// The runtime ID changed away from the pre-break solid state: this is the
-	// server's air runtime ID and may still be learned like before.
+	// The runtime ID changed away from the pre-break solid state, but dynamic learning
+	// during normal mining is disabled so that regenerated blocks or other states
+	// never pollute the air registry. Air runtime IDs are managed via defaults or explicit 'mine air add'.
 	b.handleUpdateBlock(pos, 123)
 
-	if !b.mineAirRuntimeIDs[123] {
-		t.Fatalf("expected changed runtime ID 123 to be learned as air")
-	}
-	if !b.knownAirBlocks[pos] {
-		t.Fatalf("expected %v to be marked as air", pos)
-	}
-	if b.unmineableBlocks[pos] {
-		t.Fatalf("did not expect %v to be marked unmineable", pos)
+	if b.mineAirRuntimeIDs[123] {
+		t.Fatalf("runtime ID 123 must not be dynamically learned as air during normal mining")
 	}
 }
 
@@ -195,28 +186,19 @@ func TestPickNextMineBlockSkipsUnmineable(t *testing.T) {
 	}
 }
 
-func TestAirCacheNeverStoresUnmineableBlacklist(t *testing.T) {
-	tmpDir := t.TempDir()
-	cachePath := filepath.Join(tmpDir, "air_runtime_ids.json")
-
+func TestUnmineableBlacklistSeparateFromAirRuntimeIDs(t *testing.T) {
 	b := &Bot{
 		serverUseHashes:   true,
-		mineAirRuntimeIDs: map[uint32]bool{0: true, 42: true},
+		mineAirRuntimeIDs: map[uint32]bool{0: true, 3690217760: true},
 		unmineableBlocks:  map[protocol.BlockPos]bool{{1, 2, 3}: true},
 	}
 
-	if err := b.saveAirRuntimeIDsCacheLocked(cachePath); err != nil {
-		t.Fatalf("failed to save air cache: %v", err)
+	pos := protocol.BlockPos{1, 2, 3}
+	if !b.unmineableBlocks[pos] {
+		t.Fatalf("expected position %v to be marked unmineable", pos)
 	}
-	data, err := os.ReadFile(cachePath)
-	if err != nil {
-		t.Fatalf("failed to read air cache: %v", err)
-	}
-	text := string(data)
-	if !strings.Contains(text, "runtime_ids") || !strings.Contains(text, "42") {
-		t.Fatalf("air cache is missing air runtime IDs: %s", text)
-	}
-	if strings.Contains(strings.ToLower(text), "unmineable") || strings.Contains(text, "1, 2, 3") {
-		t.Fatalf("air cache must not contain the unmineable blacklist: %s", text)
+	// Verify air map was unaffected by unmineable blacklist
+	if len(b.mineAirRuntimeIDs) != 2 || !b.mineAirRuntimeIDs[0] || !b.mineAirRuntimeIDs[3690217760] {
+		t.Fatalf("air runtime IDs corrupted: %v", b.mineAirRuntimeIDs)
 	}
 }
