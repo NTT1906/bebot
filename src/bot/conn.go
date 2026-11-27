@@ -8,7 +8,6 @@ import (
 	"math/rand/v2"
 	"net"
 	"runtime"
-	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -512,14 +511,7 @@ func (b *Bot) schedulePostJoinMemoryFree() {
 			if conn == nil {
 				return
 			}
-			var before, after runtime.MemStats
-			runtime.ReadMemStats(&before)
-			debug.FreeOSMemory()
-			runtime.ReadMemStats(&after)
-			log.Printf("bebot: post-join memory trim completed (Alloc: %.2f MB -> %.2f MB, Sys: %.2f MB -> %.2f MB)\n",
-				float64(before.Alloc)/(1024*1024), float64(after.Alloc)/(1024*1024),
-				float64(before.Sys)/(1024*1024), float64(after.Sys)/(1024*1024),
-			)
+			b.TrimMemory()
 		}()
 	}
 }

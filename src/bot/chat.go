@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -141,7 +140,7 @@ func isPublicCommand(line string) bool {
 		return false
 	}
 	switch strings.ToLower(p[0]) {
-	case "nether", "day", "radar", "focus", "unfocus", "chunk", "inspect", "probe", "palette", "block":
+	case "nether", "day", "radar", "focus", "unfocus", "chunk", "inspect", "probe", "palette", "block", "trim", "gc", "memtrim", "memory":
 		return true
 	case "run-as", "runas", "as":
 		if len(p) >= 3 {
@@ -686,6 +685,8 @@ func (b *Bot) commandInternal(line string, bypassFocus bool) {
 		b.paletteCmd(p[1:])
 	case "block":
 		b.blockCmd(p[1:])
+	case "trim", "gc", "memtrim":
+		b.execTrimMemory()
 	case "inspect", "probe":
 		b.inspectCmd(p[1:])
 	case "break", "breakat", "breakcoord", "mine", "mineat", "minearea", "minespace", "breakarea", "breakspace", "mineloop", "minefarm", "minetimeout", "learn", "learnair", "calibrate", "minelearn", "minecalibrate":
@@ -1007,22 +1008,7 @@ func (b *Bot) commandInternal(line string, bypassFocus bool) {
 	case "coords", "coord", "coordinates", "playercoords", "playerpos", "pos", "positions", "where":
 		b.coords()
 	case "mem", "memory":
-		var m runtime.MemStats
-		runtime.ReadMemStats(&m)
-
-		allocMB := float64(m.Alloc) / (1024 * 1024)
-		sysMB := float64(m.Sys) / (1024 * 1024)
-		inUseMB := float64(m.HeapInuse) / (1024 * 1024)
-		idleMB := float64(m.HeapIdle) / (1024 * 1024)
-		releasedMB := float64(m.HeapReleased) / (1024 * 1024)
-
-		lines := []string{
-			"§6--- Bebot Memory Stats ---§r",
-			fmt.Sprintf("Heap Alloc: %.2f MB | Sys: %.2f MB", allocMB, sysMB),
-			fmt.Sprintf("Heap InUse: %.2f MB | Idle: %.2f MB (Released: %.2f MB)", inUseMB, idleMB, releasedMB),
-			fmt.Sprintf("Goroutines: %d | GC Cycles: %d", runtime.NumGoroutine(), m.NumGC),
-		}
-		b.reply(strings.Join(lines, "\n"))
+		b.memCmd(p[1:])
 	case "idle", "stop":
 		b.stopMiningArea()
 		b.stopBreaking()

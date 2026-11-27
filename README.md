@@ -177,6 +177,11 @@ Commands can be typed directly into the bot's terminal console or sent via in-ga
 * **`online`** *(Aliases: `players`, `list`)*: Lists all players currently connected to the server.
 * **`count <beds|villagers|golems>`** *(Aliases: `beds`, `villagers`, `golems`)*: Counts nearby beds, villagers, or iron golems.
 * **`nether <x z> [y]`**: Calculates corresponding Nether portal coordinates (Overworld / 8).
+* **`chunk <load|unload|status>`**: Loads or unloads the local 3x3x3 sub-chunk window around the bot to inspect real-time block data without background memory overhead.
+* **`inspect <x> <y> <z>`** *(Alias: `probe`)*: Inspects the block state and runtime ID at target coordinates in the loaded chunk window.
+* **`palette <load|unload|status>`**: Loads or unloads the full block palette dictionary (23k+ block states) to/from memory. When unloaded, the actual `air` runtime ID is always retained.
+* **`block lookup <name|id>`**: Looks up block names by runtime ID or vice versa.
+* **`trim` / `gc` / `memory [trim|stats]`**: Manually triggers garbage collection and releases unneeded virtual memory back to the OS.
 
 ### 7. Customization & Settings
 
