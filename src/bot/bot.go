@@ -250,11 +250,12 @@ type Bot struct {
 	pathIndex      int
 	pathTargetPos  protocol.BlockPos
 	pathTargetName  string
-	pathStuckTicks  int
-	pathNodeTicks   int
-	pathReplanCount int
-	pathLastPos     mgl32.Vec3
-	pathPlanner     *pathfind.Planner
+	pathStuckTicks    int
+	pathNodeTicks     int
+	pathReplanCount   int
+	pathTargetMinDist float64
+	pathLastPos       mgl32.Vec3
+	pathPlanner       *pathfind.Planner
 }
 
 // ServerStallThreshold returns the configured duration without server packets before considering the server stalled.

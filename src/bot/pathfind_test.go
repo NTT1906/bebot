@@ -11,6 +11,20 @@ import (
 	"github.com/sandertv/gophertunnel/minecraft/protocol"
 )
 
+func newTestPathBot() *Bot {
+	reg := NewBlockRegistry()
+	reg.SetActualAirRID(0)
+	reg.Register(1, "minecraft:stone")
+	b := &Bot{
+		blockRegistry:   reg,
+		chunkCache:      NewChunkCache(),
+		blockRuntimeIDs: make(map[protocol.BlockPos]uint32),
+		players:         make(map[string]player),
+	}
+	b.pathPlanner = pathfind.NewPlanner()
+	return b
+}
+
 // TestBotWorldView tests the spatial block type classification in BotWorldView.
 func TestBotWorldView(t *testing.T) {
 	reg := NewBlockRegistry()
@@ -527,5 +541,94 @@ func TestReplanTimeoutAndGiveUp(t *testing.T) {
 	}
 	if b.IsPathActive() {
 		t.Errorf("expected path to be deactivated after giving up")
+	}
+}
+
+// TestReplanCountDoesNotResetOnRetreat verifies that retreating backward or failing to approach the target
+// does not wipe the consecutive replan counter, preventing oscillation loops.
+func TestReplanCountDoesNotResetOnRetreat(t *testing.T) {
+	b := newTestPathBot()
+	cache := b.chunkCache
+	cache.Enable(protocol.SubChunkPos{0, 4, 0})
+
+	// Flat platform Y=63
+	for x := int32(-10); x <= 15; x++ {
+		for z := int32(-5); z <= 5; z++ {
+			cache.OnBlockUpdate(protocol.BlockPos{x, 63, z}, 1)
+			cache.OnBlockUpdate(protocol.BlockPos{x, 64, z}, 0)
+			cache.OnBlockUpdate(protocol.BlockPos{x, 65, z}, 0)
+		}
+	}
+
+	b.mu.Lock()
+	b.pos = mgl32.Vec3{5.5, 64, 0.5}
+	b.pathActive = true
+	b.pathTargetPos = protocol.BlockPos{10, 64, 0}
+	b.pathTargetMinDist = 5.0 // Closest reached so far is 5.0m
+	b.pathReplanCount = 2   // Already had 2 failed attempts
+	// 3-node path: retreat node at x=4, then x=3, so reaching x=4 doesn't trigger segment complete
+	b.pathNodes = []protocol.BlockPos{{5, 64, 0}, {4, 64, 0}, {3, 64, 0}}
+	b.pathIndex = 1
+	b.mu.Unlock()
+
+	// Bot reaches retreat waypoint at x=4.5 (distance to 10 is ~5.5m >= 5.0m - 0.5m)
+	b.mu.Lock()
+	b.pos = mgl32.Vec3{4.5, 64, 0.5}
+	b.mu.Unlock()
+
+	b.pathFollowTick(nil)
+
+	b.mu.Lock()
+	count := b.pathReplanCount
+	b.mu.Unlock()
+
+	if count != 2 {
+		t.Errorf("expected replanCount to remain 2 when retreating away from target, got %d", count)
+	}
+
+	// Now bot advances to forward node at x=7.5 (distance to 10 is ~2.5m < 5.0m - 0.5m)
+	b.mu.Lock()
+	b.pathNodes = []protocol.BlockPos{{4, 64, 0}, {7, 64, 0}}
+	b.pathIndex = 1
+	b.pos = mgl32.Vec3{7.5, 64, 0.5}
+	b.mu.Unlock()
+
+	b.pathFollowTick(nil)
+
+	b.mu.Lock()
+	count = b.pathReplanCount
+	b.mu.Unlock()
+
+	if count != 0 {
+		t.Errorf("expected replanCount to reset to 0 upon genuine forward progress towards target, got %d", count)
+	}
+}
+
+// TestStepUpJumpDetection verifies that approaching a +1 Y elevation transition triggers jump=true.
+func TestStepUpJumpDetection(t *testing.T) {
+	b := newTestPathBot()
+	cache := b.chunkCache
+	cache.Enable(protocol.SubChunkPos{0, 4, 0})
+
+	// Floor at Y=63, step up at Y=64
+	for x := int32(0); x <= 5; x++ {
+		cache.OnBlockUpdate(protocol.BlockPos{x, 63, 0}, 1)
+	}
+	cache.OnBlockUpdate(protocol.BlockPos{3, 64, 0}, 1) // step block
+
+	b.mu.Lock()
+	b.pos = mgl32.Vec3{2.5, 64, 0.5} // Standing at feet Y=64, floor Y=63
+	b.pathActive = true
+	b.pathTargetPos = protocol.BlockPos{3, 65, 0} // Target is on top of step
+	b.pathNodes = []protocol.BlockPos{{2, 64, 0}, {3, 65, 0}}
+	b.pathMoves = []pathfind.Move{
+		{From: protocol.BlockPos{2, 64, 0}, To: protocol.BlockPos{3, 65, 0}, Type: pathfind.MoveStepUp, Cost: 2.0},
+	}
+	b.pathIndex = 1
+	b.mu.Unlock()
+
+	jump, _ := b.pathFollowTick(nil)
+	if !jump {
+		t.Errorf("expected jump to be true when approaching a step up waypoint")
 	}
 }

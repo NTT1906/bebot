@@ -268,8 +268,14 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 			if step > hDist {
 				step = hDist
 			}
-			b.pos = b.pos.Add(mgl32.Vec3{dx / hDist * step, 0, dz / hDist * step})
-			b.updateChunkCenterIfMoved()
+			// When stepping up to an elevated ledge, hold horizontal push if within 0.45m of the ledge
+			// until the bot's elevation reaches near the top of the block, preventing horizontal wall friction / server pushbacks.
+			if dy > 0.4 && b.pos.Y() < target.Y()-0.25 && hDist <= 0.45 {
+				// Wait for vertical jump to reach ledge clearance
+			} else {
+				b.pos = b.pos.Add(mgl32.Vec3{dx / hDist * step, 0, dz / hDist * step})
+				b.updateChunkCenterIfMoved()
+			}
 		}
 	}
 	b.mu.Lock()

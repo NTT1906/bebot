@@ -99,6 +99,11 @@ func (b *Bot) startPath(target protocol.BlockPos, playerName string) {
 	b.pathStuckTicks = 0
 	b.pathNodeTicks = 0
 	b.pathReplanCount = 0
+	eyeOff := botEyeOffset(b.pos)
+	tDx := float64(target.X()) + 0.5 - float64(b.pos.X())
+	tDy := float64(target.Y()) + float64(eyeOff) - float64(b.pos.Y())
+	tDz := float64(target.Z()) + 0.5 - float64(b.pos.Z())
+	b.pathTargetMinDist = math.Sqrt(tDx*tDx + tDy*tDy + tDz*tDz)
 	b.pathLastPos = b.pos
 	b.mode = modeMoving
 	b.followTarget = ""
@@ -113,9 +118,11 @@ func (b *Bot) startPath(target protocol.BlockPos, playerName string) {
 	}
 	b.pathIndex = wpIdx
 	curWP := res.Nodes[wpIdx]
-	eyeOff := botEyeOffset(b.pos)
 	b.moveTarget = mgl32.Vec3{float32(curWP.X()) + 0.5, float32(curWP.Y()) + eyeOff, float32(curWP.Z()) + 0.5}
 	b.mu.Unlock()
+
+	log.Printf("bebot: path planned to <%d, %d, %d> (%d nodes, cost %.1f): %v\n",
+		target.X(), target.Y(), target.Z(), len(res.Nodes), res.Cost, res.Nodes)
 
 	if res.ReachedGoal {
 		b.reply(fmt.Sprintf("[Bebot] Path found: %d nodes (length: %.1fm). Navigating...", len(res.Nodes), res.Cost))
@@ -220,9 +227,19 @@ func (b *Bot) pathFollowTick(c *minecraft.Conn) (jump bool, replyMsg string) {
 	if hDist < 0.45 && vDist < 0.8 {
 		b.pathIndex++
 		b.pathNodeTicks = 0
-		b.pathReplanCount = 0
 		b.pathStuckTicks = 0
 		b.pathLastPos = b.pos
+
+		// Only reset replan failure counter when genuine forward progress is made towards the destination
+		tDx := float64(b.pathTargetPos.X()) + 0.5 - float64(b.pos.X())
+		tDy := float64(b.pathTargetPos.Y()) + float64(eyeOff) - float64(b.pos.Y())
+		tDz := float64(b.pathTargetPos.Z()) + 0.5 - float64(b.pos.Z())
+		curDistToTarget := math.Sqrt(tDx*tDx + tDy*tDy + tDz*tDz)
+		if curDistToTarget < b.pathTargetMinDist-0.5 {
+			b.pathTargetMinDist = curDistToTarget
+			b.pathReplanCount = 0
+		}
+
 		if b.pathIndex >= len(b.pathNodes) {
 			return b.onSegmentCompleteLocked()
 		}
@@ -240,13 +257,14 @@ func (b *Bot) pathFollowTick(c *minecraft.Conn) (jump bool, replyMsg string) {
 	b.mode = modeMoving
 
 	// Step-up jump check: trigger jump when approaching a +1 Y elevation transition
-	if b.pathIndex < len(b.pathMoves) {
-		move := b.pathMoves[b.pathIndex]
-		if move.Type == pathfind.MoveStepUp {
-			if hDist <= 0.8 && b.pos.Y() < float32(curWP.Y())+eyeOff {
-				jump = true
-			}
-		}
+	// The move leading to curWP is at index b.pathIndex - 1
+	isStepUpMove := false
+	if b.pathIndex > 0 && b.pathIndex-1 < len(b.pathMoves) {
+		isStepUpMove = b.pathMoves[b.pathIndex-1].Type == pathfind.MoveStepUp
+	}
+	isHigherWP := float32(curWP.Y())+eyeOff > b.pos.Y()+0.3
+	if (isStepUpMove || isHigherWP) && hDist <= 1.25 {
+		jump = true
 	}
 
 	// Anti-stuck and node progress timeout detection
@@ -371,6 +389,10 @@ func (b *Bot) onSegmentCompleteLocked() (jump bool, replyMsg string) {
 		b.pathReplanCount = 0
 		nextWP := nextRes.Nodes[1]
 		eyeOff := botEyeOffset(b.pos)
+		tDx := float64(target.X()) + 0.5 - float64(b.pos.X())
+		tDy := float64(target.Y()) + float64(eyeOff) - float64(b.pos.Y())
+		tDz := float64(target.Z()) + 0.5 - float64(b.pos.Z())
+		b.pathTargetMinDist = math.Sqrt(tDx*tDx + tDy*tDy + tDz*tDz)
 		b.moveTarget = mgl32.Vec3{float32(nextWP.X()) + 0.5, float32(nextWP.Y()) + eyeOff, float32(nextWP.Z()) + 0.5}
 		b.mu.Unlock()
 
