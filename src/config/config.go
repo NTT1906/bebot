@@ -13,7 +13,7 @@ import (
 )
 
 // CurrentConfigVersion defines the latest schema version of config.json / config.toml.
-const CurrentConfigVersion = 1
+const CurrentConfigVersion = 2
 
 // SkinConfig holds the bot's skin in a dedicated skin.json file.
 type SkinConfig struct {
@@ -56,7 +56,6 @@ type Config struct {
 		Port    int    `json:"port" toml:"port"`
 		Version string `json:"version,omitempty" toml:"version,omitempty"`
 	} `json:"server" toml:"server"`
-	Target    struct{ X, Y, Z float32 } `json:"target" toml:"target"`
 	Behaviour struct {
 		ReconnectBaseDelayMs int     `json:"reconnectBaseDelayMs" toml:"reconnect-base-delay-ms"`
 		AfkJumpIntervalMs    int     `json:"afkJumpIntervalMs,omitempty" toml:"afk-jump-interval-ms,omitempty"` // deprecated
@@ -127,6 +126,12 @@ func migrateConfig(cfg Config, fromVer, toVer int) Config {
 				cfg.Mine.TimeoutSec = 3.0
 			}
 			cfg.Behaviour.AfkJumpIntervalMs = 0
+		case 1:
+			// Migration from v1 to v2: remove legacy target coordinates, unify skin_file
+			cfg.Version = 2
+			if cfg.SkinFile == "" && cfg.Skin.Path != "" {
+				cfg.SkinFile = "data/skin.json"
+			}
 		}
 	}
 	return cfg

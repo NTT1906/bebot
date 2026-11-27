@@ -1039,16 +1039,20 @@ func (b *Bot) commandInternal(line string, bypassFocus bool) {
 			b.reply("Usage: move <x> <y> <z>")
 			return
 		}
-		if _, err := fmt.Sscanf(strings.Join(p[1:4], " "), "%f %f %f", &b.cfg.Target.X, &b.cfg.Target.Y, &b.cfg.Target.Z); err != nil {
+		var tx, ty, tz float32
+		if _, err := fmt.Sscanf(strings.Join(p[1:4], " "), "%f %f %f", &tx, &ty, &tz); err != nil {
 			b.reply("Usage: move <x> <y> <z>")
 			return
 		}
+		b.mu.Lock()
+		b.moveTarget = mgl32.Vec3{tx, ty, tz}
 		b.mode = modeMoving
 		b.followTarget = ""
 		b.mimicTarget = ""
 		b.lookAtTarget = ""
 		b.lookAtPos = nil
-		b.reply(fmt.Sprintf("Moving to (%.1f, %.1f, %.1f)…", b.cfg.Target.X, b.cfg.Target.Y, b.cfg.Target.Z))
+		b.mu.Unlock()
+		b.reply(fmt.Sprintf("Moving to (%.1f, %.1f, %.1f)…", tx, ty, tz))
 	case "spin":
 		b.spinCmd(p[1:])
 	case "rejoin", "reconnect":

@@ -141,9 +141,7 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 			}
 
 			if dist > reachLimit {
-				b.cfg.Target.X = float32(cur.X()) + 0.5
-				b.cfg.Target.Y = float32(cur.Y())
-				b.cfg.Target.Z = float32(cur.Z()) + 0.5
+				b.moveTarget = mgl32.Vec3{float32(cur.X()) + 0.5, float32(cur.Y()), float32(cur.Z()) + 0.5}
 				b.mode = modeMoving
 				b.mineStuckTicks++
 				if b.mineStuckTicks > 100 {
@@ -180,7 +178,9 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 	}
 	b.mu.Unlock()
 
-	target := mgl32.Vec3{b.cfg.Target.X, b.cfg.Target.Y, b.cfg.Target.Z}
+	b.mu.Lock()
+	target := b.moveTarget
+	b.mu.Unlock()
 	var targetPlayer player
 	targetMoved := true
 	if b.mode == modeFollowing || b.mode == modeMimic || b.mode == modeCamic || b.mode == modeLookAt {

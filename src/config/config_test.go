@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -74,8 +75,8 @@ func TestLoadConfig_Version1(t *testing.T) {
 		t.Fatalf("LoadConfig failed: %v", err)
 	}
 
-	if cfg.Version != 1 {
-		t.Errorf("expected version 1, got %d", cfg.Version)
+	if cfg.Version != CurrentConfigVersion {
+		t.Errorf("expected version %d, got %d", CurrentConfigVersion, cfg.Version)
 	}
 	if cfg.Superuser != "Admin" {
 		t.Errorf("expected superuser Admin, got %s", cfg.Superuser)
@@ -127,8 +128,8 @@ render-distance = 2
 		t.Fatalf("LoadConfig for TOML failed: %v", err)
 	}
 
-	if cfg.Version != 1 {
-		t.Errorf("expected version 1, got %d", cfg.Version)
+	if cfg.Version != CurrentConfigVersion {
+		t.Errorf("expected version %d, got %d", CurrentConfigVersion, cfg.Version)
 	}
 	if cfg.Superuser != "Arie1906" {
 		t.Errorf("expected superuser Arie1906, got %s", cfg.Superuser)
@@ -153,6 +154,54 @@ render-distance = 2
 	}
 	if reloaded.Superuser != "Arie1906" {
 		t.Errorf("expected reloaded superuser Arie1906, got %s", reloaded.Superuser)
+	}
+}
+
+func TestLoadConfig_V1toV2Migration(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config_v1.json")
+
+	// Legacy v1 config with "target" and legacy embedded "skin"
+	rawV1 := `{
+  "version": 1,
+  "superuser": "TesterV1",
+  "server": {
+    "host": "127.0.0.1",
+    "port": 19132
+  },
+  "target": {
+    "X": 100,
+    "Y": 64,
+    "Z": -200
+  },
+  "skin": {
+    "type": "slim",
+    "path": "skin/steve.png"
+  }
+}`
+	if err := os.WriteFile(configPath, []byte(rawV1), 0644); err != nil {
+		t.Fatalf("failed to write v1 config: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig failed for v1 config: %v", err)
+	}
+
+	if cfg.Version != 2 {
+		t.Errorf("expected migrated version 2, got %d", cfg.Version)
+	}
+	if cfg.SkinFile != "data/skin.json" {
+		t.Errorf("expected skin_file to be data/skin.json, got %s", cfg.SkinFile)
+	}
+
+	// Verify migrated file content on disk has version 2
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("failed to read migrated file: %v", err)
+	}
+	if !strings.Contains(string(data), `"version": 2`) {
+		t.Errorf("expected file on disk to be updated to version 2, got: %s", string(data))
 	}
 }
 

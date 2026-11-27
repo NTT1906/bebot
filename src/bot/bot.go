@@ -117,6 +117,7 @@ type Bot struct {
 	followTarget, mimicTarget    string
 	lookAtTarget                 string
 	lookAtPos                    *mgl32.Vec3
+	moveTarget                   mgl32.Vec3
 	spawnPos                     protocol.BlockPos
 	isSleeping                   bool
 	entityID                     uint64

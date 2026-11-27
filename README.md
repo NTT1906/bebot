@@ -13,7 +13,7 @@ Before running the bot, configure the `config.json` file in the project root. If
 ```json
 {
   "_comment": "Edit this file to configure the bot.",
-  "version": 1,
+  "version": 2,
   "superuser": "YourUsername",
   "_comment_superuser": "Only this player can control the bot via chat commands.",
   "server": {
@@ -21,17 +21,7 @@ Before running the bot, configure the `config.json` file in the project root. If
     "port": 19132,
     "version": "1.20.0"
   },
-  "skin": {
-    "type": "slim",
-    "path": "skin/skin.png",
-    "skin": "0",
-    "override": false
-  },
-  "target": {
-    "x": 0,
-    "y": 64,
-    "z": 0
-  },
+  "skin_file": "data/skin.json",
   "behaviour": {
     "reconnectBaseDelayMs": 5000,
     "afkJumpIntervalMs": 60000,
