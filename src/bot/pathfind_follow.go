@@ -42,6 +42,8 @@ func (b *Bot) startPath(target protocol.BlockPos, playerName string) {
 	if b.chunkCache != nil {
 		if !b.chunkCache.IsEnabled() {
 			b.chunkCache.Enable(subPos)
+		} else if b.chunkCache.Center() != subPos {
+			b.chunkCache.ShiftCenter(subPos)
 		}
 		missing := b.chunkCache.MissingOffsets()
 		if len(missing) > 0 {

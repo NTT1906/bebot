@@ -452,19 +452,14 @@ func decodeSubChunkStorages(r *bytes.Reader, storageCount int, sub *SubChunkData
 		targetLayer := s
 
 		if bitsPerBlock == 0 {
-			// Single-block palette: entire 4096 blocks share index 0
-			paletteSize, err := readVarint32(r)
+			// Single-block palette: entire 4096 blocks share a single runtime ID.
+			// In Bedrock network format, bitsPerBlock == 0 has no palette size varint;
+			// only the single runtime ID varint follows the header.
+			rid, err := readVarint32(r)
 			if err != nil {
 				return err
 			}
-			singleRID := uint32(0)
-			if paletteSize > 0 {
-				rid, err := readVarint32(r)
-				if err != nil {
-					return err
-				}
-				singleRID = uint32(rid)
-			}
+			singleRID := uint32(rid)
 			for i := 0; i < SubChunkBlockCount; i++ {
 				if targetLayer == 1 {
 					sub.Waterlogged[i] = singleRID
@@ -550,14 +545,8 @@ func skipSubChunkStorages(r *bytes.Reader, storageCount int) error {
 		}
 		bitsPerBlock := int(header >> 1)
 		if bitsPerBlock == 0 {
-			paletteSize, err := readVarint32(r)
-			if err != nil {
+			if _, err := readVarint32(r); err != nil {
 				return err
-			}
-			for i := 0; i < int(paletteSize); i++ {
-				if _, err := readVarint32(r); err != nil {
-					return err
-				}
 			}
 			continue
 		}

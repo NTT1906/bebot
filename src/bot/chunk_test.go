@@ -186,8 +186,8 @@ func TestDecodeSingleBlockSubChunk(t *testing.T) {
 	buf.WriteByte(1) // 1 storage layer
 	buf.WriteByte(0) // header: bitsPerBlock = 0, isRuntime = 0
 
-	// Palette size = 1 (zigzag varint: 1 -> 2)
-	buf.WriteByte(2)
+	// In Bedrock network format, bitsPerBlock=0 has no palette size varint,
+	// only the single RuntimeID follows directly.
 	// RuntimeID = 101 (zigzag varint: 101 -> 202)
 	// 202 in varint: 202 = 0xCA -> [0xCA, 0x01]
 	buf.Write([]byte{0xCA, 0x01})
