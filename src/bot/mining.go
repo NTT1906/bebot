@@ -323,6 +323,87 @@ func (b *Bot) BlockRuntimeIDByName(name string, states map[string]any) (uint32, 
 	return 0, false
 }
 
+// isSkippableFluidOrAir returns true for air, water, lava, flowing water, and flowing lava.
+func isSkippableFluidOrAir(name string) bool {
+	base := strings.TrimPrefix(strings.ToLower(name), "minecraft:")
+	switch base {
+	case "air", "cave_air", "void_air",
+		"water", "flowing_water",
+		"lava", "flowing_lava":
+		return true
+	}
+	return false
+}
+
+// isUnbreakableBlock returns true for blocks that cannot be mined in Survival mode.
+func isUnbreakableBlock(name string) bool {
+	base := strings.TrimPrefix(strings.ToLower(name), "minecraft:")
+	switch base {
+	case "bedrock",
+		"barrier",
+		"structure_void",
+		"structure_block",
+		"command_block",
+		"repeating_command_block",
+		"chain_command_block",
+		"jigsaw",
+		"end_portal",
+		"end_portal_frame",
+		"end_gateway",
+		"portal",
+		"allow",
+		"deny",
+		"border_block",
+		"reinforced_deepslate",
+		"light_block":
+		return true
+	}
+	return false
+}
+
+// shouldFilterAreaBlockLocked determines whether a block at pos should be excluded from mining.
+// b.mu must be held by caller.
+func (b *Bot) shouldFilterAreaBlockLocked(pos protocol.BlockPos, loadedPipeline bool, isCreative bool) bool {
+	if b.unmineableBlocks != nil && b.unmineableBlocks[pos] {
+		return true
+	}
+
+	if loadedPipeline {
+		if rid, ok := b.chunkCache.BlockAt(pos); ok {
+			if rid == 0 {
+				return true
+			}
+			if name, nameOk := b.blockRegistry.ResolveName(rid); nameOk {
+				if isSkippableFluidOrAir(name) {
+					return true
+				}
+				if !isCreative && isUnbreakableBlock(name) {
+					return true
+				}
+			} else if b.isAirRuntimeIDLocked(rid) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Fallback pipeline: If either chunk data or block palette data is UNLOADED, use existing mining pipeline unchanged.
+	if b.chunkCache != nil && b.chunkCache.IsEnabled() {
+		if rid, ok := b.chunkCache.BlockAt(pos); ok {
+			if b.isAirRuntimeIDLocked(rid) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (b *Bot) shouldFilterAreaBlock(pos protocol.BlockPos, loadedPipeline bool, isCreative bool) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.shouldFilterAreaBlockLocked(pos, loadedPipeline, isCreative)
+}
+
 func (b *Bot) startMiningArea(ax, ay, az, bx, by, bz int32, ticksReq int, repeat bool, faceAccurate bool) {
 	minX, maxX := ax, bx
 	if minX > maxX {
@@ -343,6 +424,14 @@ func (b *Bot) startMiningArea(ax, ay, az, bx, by, bz int32, ticksReq int, repeat
 		return
 	}
 
+	chunkLoaded := b.chunkCache != nil && b.chunkCache.IsEnabled()
+	b.mu.Lock()
+	b.unmineableBlocks = make(map[protocol.BlockPos]bool)
+	paletteLoaded := b.blockRegistry != nil && b.blockRegistry.IsLoaded()
+	isCreative := b.gameMode == 1 || b.gameMode == 4
+	b.mu.Unlock()
+	loadedPipeline := chunkLoaded && paletteLoaded
+
 	queue := make([]protocol.BlockPos, 0, total)
 	airFiltered := 0
 	for y := maxY; y >= minY; y-- {
@@ -351,32 +440,18 @@ func (b *Bot) startMiningArea(ax, ay, az, bx, by, bz int32, ticksReq int, repeat
 			if forward {
 				for z := minZ; z <= maxZ; z++ {
 					pos := protocol.BlockPos{x, y, z}
-					if b.chunkCache != nil && b.chunkCache.IsEnabled() {
-						if rid, ok := b.chunkCache.BlockAt(pos); ok {
-							b.mu.Lock()
-							isAir := b.isAirRuntimeIDLocked(rid)
-							b.mu.Unlock()
-							if isAir {
-								airFiltered++
-								continue
-							}
-						}
+					if b.shouldFilterAreaBlock(pos, loadedPipeline, isCreative) {
+						airFiltered++
+						continue
 					}
 					queue = append(queue, pos)
 				}
 			} else {
 				for z := maxZ; z >= minZ; z-- {
 					pos := protocol.BlockPos{x, y, z}
-					if b.chunkCache != nil && b.chunkCache.IsEnabled() {
-						if rid, ok := b.chunkCache.BlockAt(pos); ok {
-							b.mu.Lock()
-							isAir := b.isAirRuntimeIDLocked(rid)
-							b.mu.Unlock()
-							if isAir {
-								airFiltered++
-								continue
-							}
-						}
+					if b.shouldFilterAreaBlock(pos, loadedPipeline, isCreative) {
+						airFiltered++
+						continue
 					}
 					queue = append(queue, pos)
 				}
@@ -423,8 +498,12 @@ func (b *Bot) startMiningArea(ax, ay, az, bx, by, bz int32, ticksReq int, repeat
 		faceStr = "face-accurate"
 	}
 	if airFiltered > 0 {
-		b.reply(fmt.Sprintf("Mining space (%d, %d, %d) to (%d, %d, %d): %d solid blocks queued (%d air pre-filtered, %s, %s).",
-			minX, minY, minZ, maxX, maxY, maxZ, len(queue), airFiltered, modeStr, faceStr))
+		filterLabel := "air pre-filtered"
+		if loadedPipeline {
+			filterLabel = "pre-filtered"
+		}
+		b.reply(fmt.Sprintf("Mining space (%d, %d, %d) to (%d, %d, %d): %d solid blocks queued (%d %s, %s, %s).",
+			minX, minY, minZ, maxX, maxY, maxZ, len(queue), airFiltered, filterLabel, modeStr, faceStr))
 	} else {
 		b.reply(fmt.Sprintf("Mining space (%d, %d, %d) to (%d, %d, %d): %d blocks queued (%s, %s).",
 			minX, minY, minZ, maxX, maxY, maxZ, total, modeStr, faceStr))
@@ -465,6 +544,12 @@ func (b *Bot) restartMiningQueue() {
 	minZ, maxZ := b.mineBoxMin.Z(), b.mineBoxMax.Z()
 	total := int((maxX - minX + 1) * (maxY - minY + 1) * (maxZ - minZ + 1))
 	queue := make([]protocol.BlockPos, 0, total)
+
+	chunkLoaded := b.chunkCache != nil && b.chunkCache.IsEnabled()
+	paletteLoaded := b.blockRegistry != nil && b.blockRegistry.IsLoaded()
+	loadedPipeline := chunkLoaded && paletteLoaded
+	isCreative := b.gameMode == 1 || b.gameMode == 4
+
 	for y := maxY; y >= minY; y-- {
 		forward := true
 		for x := minX; x <= maxX; x++ {
@@ -474,7 +559,7 @@ func (b *Bot) restartMiningQueue() {
 					if b.knownAirBlocks != nil && b.knownAirBlocks[pos] {
 						continue
 					}
-					if b.unmineableBlocks != nil && b.unmineableBlocks[pos] {
+					if b.shouldFilterAreaBlockLocked(pos, loadedPipeline, isCreative) {
 						continue
 					}
 					queue = append(queue, pos)
@@ -485,7 +570,7 @@ func (b *Bot) restartMiningQueue() {
 					if b.knownAirBlocks != nil && b.knownAirBlocks[pos] {
 						continue
 					}
-					if b.unmineableBlocks != nil && b.unmineableBlocks[pos] {
+					if b.shouldFilterAreaBlockLocked(pos, loadedPipeline, isCreative) {
 						continue
 					}
 					queue = append(queue, pos)
@@ -815,6 +900,11 @@ func faceClickPosition(face int32) mgl32.Vec3 {
 }
 
 func (b *Bot) pickNextMineBlock() *protocol.BlockPos {
+	chunkLoaded := b.chunkCache != nil && b.chunkCache.IsEnabled()
+	paletteLoaded := b.blockRegistry != nil && b.blockRegistry.IsLoaded()
+	loadedPipeline := chunkLoaded && paletteLoaded
+	isCreative := b.gameMode == 1 || b.gameMode == 4
+
 	for len(b.mineQueue) > 0 {
 		pos := b.mineQueue[0]
 		if (b.knownAirBlocks != nil && b.knownAirBlocks[pos]) ||
@@ -823,6 +913,26 @@ func (b *Bot) pickNextMineBlock() *protocol.BlockPos {
 			b.mineQueue = b.mineQueue[1:]
 			continue
 		}
+
+		if loadedPipeline {
+			if rid, ok := b.chunkCache.BlockAt(pos); ok {
+				if rid == 0 {
+					b.mineQueue = b.mineQueue[1:]
+					continue
+				}
+				if name, nameOk := b.blockRegistry.ResolveName(rid); nameOk {
+					if isSkippableFluidOrAir(name) {
+						b.mineQueue = b.mineQueue[1:]
+						continue
+					}
+					if !isCreative && isUnbreakableBlock(name) {
+						b.mineQueue = b.mineQueue[1:]
+						continue
+					}
+				}
+			}
+		}
+
 		break
 	}
 
