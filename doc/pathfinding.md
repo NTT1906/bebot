@@ -277,29 +277,29 @@ If unreachable:
 ┌────────────────────────────────────────────────────────────────────────┐
 │                        IMPLEMENTATION PHASES                           │
 ├─────────┬──────────────────────────────────────────────────────────────┤
-│ Phase 1 │ Voxel WorldView Abstraction & Move Generator                 │
-│         │ - Create `src/bot/pathfind/` package                         │
+│ Phase 1 │ Voxel WorldView Abstraction & Move Generator  [COMPLETED]    │
+│         │ - Create `src/pathfind/` package                             │
 │         │ - Implement `WorldView` reading from `chunkCache`            │
 │         │ - Implement 16 neighbor moves with diagonal corner clearance │
 │         │ - Unit tests: 100% test coverage of clearance & drop limits  │
 ├─────────┼──────────────────────────────────────────────────────────────┤
-│ Phase 2 │ Zero-Allocation A* Solver                                    │
+│ Phase 2 │ Zero-Allocation A* Solver                     [COMPLETED]    │
 │         │ - Implement binary min-heap with container/heap              │
 │         │ - Admissible 3D Octile heuristic                             │
 │         │ - Search budget (max nodes / timeout) + best-effort fallback │
 │         │ - Unit tests: maze navigation, elevation climb, drop routes  │
 ├─────────┼──────────────────────────────────────────────────────────────┤
-│ Phase 3 │ Path Follower Controller                                     │
+│ Phase 3 │ Path Follower Controller                      [COMPLETED]    │
 │         │ - Integrate into `b.moveTick` (20 TPS)                       │
 │         │ - Waypoint steering, look-ahead vector, jump-at-edge trigger │
 │         │ - Anti-stuck detection and dynamic replanning                │
 ├─────────┼──────────────────────────────────────────────────────────────┤
-│ Phase 4 │ Command Integration & In-Game UX                             │
+│ Phase 4 │ Command Integration & In-Game UX              [COMPLETED]    │
 │         │ - Add `goto <x y z>`, `goto <player>`, `stoppath` commands   │
 │         │ - Chat / Console status reporting                            │
 │         │ - Documentation updates in README.md                         │
 ├─────────┼──────────────────────────────────────────────────────────────┤
-│ Phase 5 │ Advanced Movement & Parkour                                  │
+│ Phase 5 │ Advanced Movement & Parkour                   [UPCOMING]     │
 │         │ - Gap leaps (sprint jumping across 1-2 block voids)          │
 │         │ - Sneak edge traversal on narrow bridges                     │
 │         │ - Door, gate, and ladder navigation                          │

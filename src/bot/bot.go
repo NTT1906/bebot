@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"bebot/src/config"
+	"bebot/src/pathfind"
 	"bebot/src/waypoint"
 	bauth "bebot/src/auth"
 
@@ -241,6 +242,17 @@ type Bot struct {
 	blockRegistry                *BlockRegistry
 	blockPalettePath             string
 	testReplyHook                func(string)
+
+	// Pathfinding state
+	pathActive     bool
+	pathMoves      []pathfind.Move
+	pathNodes      []protocol.BlockPos
+	pathIndex      int
+	pathTargetPos  protocol.BlockPos
+	pathTargetName string
+	pathStuckTicks int
+	pathLastPos    mgl32.Vec3
+	pathPlanner    *pathfind.Planner
 }
 
 // ServerStallThreshold returns the configured duration without server packets before considering the server stalled.
@@ -318,7 +330,7 @@ func New(opts Options) *Bot {
 		offlineUUIDFile = bauth.OfflineUUIDFile
 	}
 
-	return &Bot{
+	b := &Bot{
 		cfg:               opts.Config,
 		source:            opts.Source,
 		offline:           opts.Offline,
@@ -351,6 +363,8 @@ func New(opts Options) *Bot {
 		blockRegistry:             NewBlockRegistry(),
 		blockPalettePath:          palettePath,
 	}
+	b.pathPlanner = pathfind.NewPlanner()
+	return b
 }
 
 // ActualAirRID returns the active runtime ID representing minecraft:air.

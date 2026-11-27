@@ -1010,6 +1010,7 @@ func (b *Bot) commandInternal(line string, bypassFocus bool) {
 	case "mem", "memory":
 		b.memCmd(p[1:])
 	case "idle", "stop":
+		b.stopPath()
 		b.stopMiningArea()
 		b.stopBreaking()
 		b.mode = modeIdle
@@ -1034,6 +1035,10 @@ func (b *Bot) commandInternal(line string, bypassFocus bool) {
 		}
 	case "waypoint", "waypoints", "wp":
 		b.waypointCmd(p[1:])
+	case "goto", "pathfind":
+		b.gotoCmd(p[1:])
+	case "stoppath", "cancelpath":
+		b.stopPathCmd()
 	case "move":
 		if len(p) < 4 {
 			b.reply("Usage: move <x> <y> <z>")

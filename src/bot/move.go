@@ -178,9 +178,19 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 	}
 	b.mu.Unlock()
 
+	var pathReply string
+	if b.IsPathActive() {
+		var pJump bool
+		pJump, pathReply = b.pathFollowTick(c)
+		jump = jump || pJump
+	}
 	b.mu.Lock()
 	target := b.moveTarget
 	b.mu.Unlock()
+
+	if pathReply != "" {
+		b.reply(pathReply)
+	}
 	var targetPlayer player
 	targetMoved := true
 	if b.mode == modeFollowing || b.mode == modeMimic || b.mode == modeCamic || b.mode == modeLookAt {

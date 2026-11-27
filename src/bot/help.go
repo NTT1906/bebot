@@ -8,8 +8,24 @@ import (
 )
 
 var commandHelpDocs = map[string]string{
+	"goto": `§6=== Help: goto / pathfind ===§r
+Description: Autonomous 3D pathfinding to coordinates or a player, navigating around obstacles, climbing steps, and avoiding hazards.
+Aliases: pathfind
+Syntax: goto <x y z> | goto <player> | goto stop
+Examples:
+  bebot goto 250 64 -220
+  bebot goto Steve
+  bebot goto stop (or bebot stoppath)`,
+
+	"stoppath": `§6=== Help: stoppath ===§r
+Description: Immediately stops active 3D pathfinding navigation.
+Aliases: cancelpath, goto stop
+Syntax: stoppath
+Example:
+  bebot stoppath`,
+
 	"move": `§6=== Help: move ===§r
-Description: Pathfinds and walks to the specified coordinates.
+Description: Direct straight-line movement to the specified coordinates without obstacle avoidance.
 Syntax: move <x y z>
 Examples:
   bebot move 250 64 -220
@@ -555,7 +571,9 @@ func (b *Bot) helpCmd(p []string) {
 		{
 			"§6--- Bebot Help [1/4: Movement & Camera] ---§r",
 			"§7Prefix: 'bebot <cmd>' or '!b <cmd>' (e.g. '!b say hi')§r",
-			"move <x y z> - move to coordinates",
+			"goto <x y z|player> - 3D pathfind around obstacles",
+			"stoppath - stop active 3D pathfinding",
+			"move <x y z> - straight-line move to coordinates",
 			"follow <player> - follow a player",
 			"mimic <player> - mimic movement and actions",
 			"camic <player> - mimic camera rotation only",

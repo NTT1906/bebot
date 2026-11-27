@@ -127,7 +127,10 @@ Commands can be typed directly into the bot's terminal console or sent via in-ga
 
 ### 2. Movement & Player Interaction
 
-* **`move <x> <y> <z>`**: Walks the bot to the specified target coordinates.
+* **`goto <x y z>`** *(Alias: `pathfind`)*: Autonomous 3D voxel pathfinding to target coordinates, navigating around obstacles, stepping up elevation, descending safe ledges, and avoiding hazards.
+* **`goto <player>`**: Finds designated player on the server and pathfinds to their position with dynamic tracking.
+* **`stoppath`** *(Aliases: `cancelpath`, `goto stop`)*: Aborts active 3D pathfinding navigation.
+* **`move <x> <y> <z>`**: Straight-line vector movement to the specified target coordinates (without obstacle avoidance).
 * **`follow <player>`**: Follows the specified player wherever they walk.
 * **`mimic <player>`**: Follows the player and mirrors their movements and actions (`mimic clear` to stop).
 * **`camic <player>`**: Mirrors the player's camera pitch and yaw (`camic clear` to stop).
