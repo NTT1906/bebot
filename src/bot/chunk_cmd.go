@@ -97,7 +97,7 @@ func (b *Bot) inspectCmd(args []string) {
 	b.mu.Unlock()
 
 	var blockDesc string
-	if b.blockRegistry != nil {
+	if b.blockRegistry != nil && b.blockRegistry.IsLoaded() {
 		if name, ok := b.blockRegistry.ResolveName(rid); ok {
 			blockDesc = fmt.Sprintf("%s (RuntimeID: %d)", name, rid)
 		}
@@ -105,6 +105,8 @@ func (b *Bot) inspectCmd(args []string) {
 	if blockDesc == "" {
 		if isAir {
 			blockDesc = fmt.Sprintf("minecraft:air (RuntimeID: %d)", rid)
+		} else if b.blockRegistry != nil && !b.blockRegistry.IsLoaded() {
+			blockDesc = fmt.Sprintf("RuntimeID: %d (palette unloaded; run 'bebot palette load')", rid)
 		} else {
 			blockDesc = fmt.Sprintf("RuntimeID: %d", rid)
 		}

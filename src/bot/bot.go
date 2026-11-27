@@ -234,6 +234,8 @@ type Bot struct {
 	spinSpeed                    float32
 	waypointGroups               map[uuid.UUID]int64
 	serverUseHashes              bool
+	serverCustomBlocks           []protocol.BlockEntry
+	actualAirRID                 uint32
 	chunkCache                   *ChunkCache
 	blockRegistry                *BlockRegistry
 	blockPalettePath             string
@@ -348,6 +350,68 @@ func New(opts Options) *Bot {
 		blockRegistry:             NewBlockRegistry(),
 		blockPalettePath:          palettePath,
 	}
+}
+
+// ActualAirRID returns the active runtime ID representing minecraft:air.
+func (b *Bot) ActualAirRID() uint32 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.actualAirRID != 0 {
+		return b.actualAirRID
+	}
+	if b.blockRegistry != nil {
+		if airRID := b.blockRegistry.ActualAirRID(); airRID != 0 {
+			return airRID
+		}
+	}
+	if b.serverUseHashes {
+		return HashBlockState("minecraft:air", nil)
+	}
+	return 0
+}
+
+// SetActualAirRID updates the active air runtime ID across the bot and block registry.
+func (b *Bot) SetActualAirRID(rid uint32) {
+	b.mu.Lock()
+	b.actualAirRID = rid
+	if b.mineAirRuntimeIDs == nil {
+		b.mineAirRuntimeIDs = make(map[uint32]bool)
+	}
+	b.mineAirRuntimeIDs[rid] = true
+	b.mu.Unlock()
+
+	if b.blockRegistry != nil {
+		b.blockRegistry.SetActualAirRID(rid)
+	}
+}
+
+// LoadPalette loads the block palette into the block registry.
+func (b *Bot) LoadPalette() (int, string, error) {
+	b.mu.Lock()
+	palettePath := b.blockPalettePath
+	useHashes := b.serverUseHashes
+	customBlocks := b.serverCustomBlocks
+	b.mu.Unlock()
+
+	if b.blockRegistry == nil {
+		b.blockRegistry = NewBlockRegistry()
+	}
+	b.blockRegistry.SetActualAirRID(b.ActualAirRID())
+	b.blockRegistry.InitFromGameData(useHashes, customBlocks, palettePath)
+
+	if !b.blockRegistry.IsLoaded() || b.blockRegistry.Count() == 0 {
+		return 0, "", fmt.Errorf("could not find or load valid palette from %q or fallback paths", palettePath)
+	}
+	return b.blockRegistry.Count(), b.blockRegistry.Version(), nil
+}
+
+// UnloadPalette unloads the block palette from memory, freeing memory while retaining air runtime ID.
+func (b *Bot) UnloadPalette() {
+	if b.blockRegistry != nil {
+		b.blockRegistry.Unload()
+	}
+	runtime.GC()
+	debug.FreeOSMemory()
 }
 
 func (b *Bot) markPacketSent(desc string) {

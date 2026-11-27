@@ -141,7 +141,7 @@ func isPublicCommand(line string) bool {
 		return false
 	}
 	switch strings.ToLower(p[0]) {
-	case "nether", "day", "radar", "focus", "unfocus", "chunk", "inspect", "probe":
+	case "nether", "day", "radar", "focus", "unfocus", "chunk", "inspect", "probe", "palette", "block":
 		return true
 	case "run-as", "runas", "as":
 		if len(p) >= 3 {
@@ -682,6 +682,8 @@ func (b *Bot) commandInternal(line string, bypassFocus bool) {
 		b.placeCmd(p)
 	case "chunk":
 		b.chunkCmd(p[1:])
+	case "palette":
+		b.paletteCmd(p[1:])
 	case "block":
 		b.blockCmd(p[1:])
 	case "inspect", "probe":

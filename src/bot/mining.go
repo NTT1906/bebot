@@ -225,6 +225,14 @@ func (b *Bot) initAirRuntimeIDs(useHashes bool) {
 	defer b.mu.Unlock()
 
 	b.serverUseHashes = useHashes
+	if useHashes {
+		b.actualAirRID = HashBlockState("minecraft:air", nil)
+	} else {
+		b.actualAirRID = 0
+	}
+	if b.blockRegistry != nil {
+		b.blockRegistry.SetActualAirRID(b.actualAirRID)
+	}
 	b.mineAirRuntimeIDs = computeDefaultAirRuntimeIDs(useHashes)
 
 	// Load and merge cached IDs from disk
@@ -248,15 +256,23 @@ func (b *Bot) initAirRuntimeIDs(useHashes bool) {
 // BlockRuntimeIDByName resolves a block namespaced identifier (with optional state properties)
 // to its Bedrock runtime network ID.
 func (b *Bot) BlockRuntimeIDByName(name string, states map[string]any) (uint32, bool) {
+	if name == "minecraft:air" || name == "air" {
+		return b.ActualAirRID(), true
+	}
+
 	b.mu.Lock()
+	reg := b.blockRegistry
 	useHashes := b.serverUseHashes
 	b.mu.Unlock()
 
+	if reg != nil && reg.IsLoaded() {
+		if rid, ok := reg.ResolveRID(name); ok {
+			return rid, true
+		}
+	}
+
 	if useHashes {
 		return HashBlockState(name, states), true
-	}
-	if name == "minecraft:air" {
-		return 0, true
 	}
 	return 0, false
 }
@@ -574,6 +590,10 @@ func (b *Bot) handleUpdateBlock(pos protocol.BlockPos, runtimeID uint32) {
 		}
 		if !b.mineAirRuntimeIDs[runtimeID] {
 			b.mineAirRuntimeIDs[runtimeID] = true
+			b.actualAirRID = runtimeID
+			if b.blockRegistry != nil {
+				b.blockRegistry.SetActualAirRID(runtimeID)
+			}
 			_ = b.saveAirRuntimeIDsCacheLocked(defaultAirRuntimeIDsCacheFile)
 			log.Printf("bebot: learned air block runtime ID %d\n", runtimeID)
 		}

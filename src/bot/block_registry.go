@@ -19,11 +19,13 @@ import (
 // BlockRegistry provides bidirectional mapping between block names (with optional states)
 // and their Bedrock network runtime IDs.
 type BlockRegistry struct {
-	mu         sync.RWMutex
-	useHashes  bool
-	version    string
-	namesByRID map[uint32]string
-	ridsByName map[string]uint32
+	mu           sync.RWMutex
+	useHashes    bool
+	loaded       bool
+	actualAirRID uint32
+	version      string
+	namesByRID   map[uint32]string
+	ridsByName   map[string]uint32
 }
 
 // NewBlockRegistry initializes a new BlockRegistry.
@@ -32,9 +34,53 @@ func NewBlockRegistry() *BlockRegistry {
 		namesByRID: make(map[uint32]string),
 		ridsByName: make(map[string]uint32),
 	}
-	// Always register 0 as minecraft:air fallback
-	reg.Register(0, "minecraft:air")
+	reg.SetActualAirRID(0)
 	return reg
+}
+
+// IsLoaded returns whether the full block palette dictionary is currently loaded in memory.
+func (r *BlockRegistry) IsLoaded() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.loaded
+}
+
+// ActualAirRID returns the active network runtime ID used for minecraft:air.
+func (r *BlockRegistry) ActualAirRID() uint32 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.actualAirRID
+}
+
+// SetActualAirRID updates and preserves the actual air runtime ID.
+func (r *BlockRegistry) SetActualAirRID(rid uint32) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.actualAirRID = rid
+	r.namesByRID[rid] = "minecraft:air"
+	r.ridsByName["minecraft:air"] = rid
+	r.ridsByName["air"] = rid
+	if rid != 0 {
+		r.namesByRID[0] = "minecraft:air"
+	}
+}
+
+// Unload unloads the full block palette dictionary from memory, retaining only the actual air runtime ID.
+func (r *BlockRegistry) Unload() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.loaded = false
+	airRID := r.actualAirRID
+
+	r.namesByRID = make(map[uint32]string, 2)
+	r.ridsByName = make(map[string]uint32, 2)
+
+	r.namesByRID[airRID] = "minecraft:air"
+	r.ridsByName["minecraft:air"] = airRID
+	r.ridsByName["air"] = airRID
+	if airRID != 0 {
+		r.namesByRID[0] = "minecraft:air"
+	}
 }
 
 // Version returns the detected Bedrock version of the loaded palette data.
@@ -84,8 +130,8 @@ func (r *BlockRegistry) ResolveRID(name string) (uint32, bool) {
 		return rid, true
 	}
 
-	// If server uses hashes, compute on the fly
-	if r.useHashes {
+	// If server uses hashes and registry is loaded, compute on the fly
+	if r.loaded && r.useHashes {
 		rid := HashBlockState(cleanWithPrefix, nil)
 		return rid, true
 	}
@@ -97,6 +143,9 @@ func (r *BlockRegistry) ResolveRID(name string) (uint32, bool) {
 func (r *BlockRegistry) Count() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	if !r.loaded {
+		return 0
+	}
 	return len(r.namesByRID)
 }
 
@@ -104,6 +153,12 @@ func (r *BlockRegistry) Count() int {
 func (r *BlockRegistry) InitFromGameData(useHashes bool, customBlocks []protocol.BlockEntry, customPaths ...string) {
 	r.mu.Lock()
 	r.useHashes = useHashes
+	if useHashes {
+		r.actualAirRID = HashBlockState("minecraft:air", nil)
+	} else {
+		r.actualAirRID = 0
+	}
+	r.loaded = true
 	r.mu.Unlock()
 
 	// Always register 0 as minecraft:air fallback
@@ -223,6 +278,9 @@ func (r *BlockRegistry) LoadPaletteFile(filePath string, useHashes bool) bool {
 					r.Register(rid, name)
 				}
 				log.Printf("bebot: loaded %d block states from NBT %s\n", len(blocksList), filePath)
+				r.mu.Lock()
+				r.loaded = true
+				r.mu.Unlock()
 				return true
 			}
 		}
@@ -239,6 +297,9 @@ func (r *BlockRegistry) LoadPaletteFile(filePath string, useHashes bool) bool {
 			r.Register(uint32(e.BlockStateHash), e.Name)
 		}
 		log.Printf("bebot: loaded %d block states from Allay JSON %s\n", len(allayFormat), filePath)
+		r.mu.Lock()
+		r.loaded = true
+		r.mu.Unlock()
 		return true
 	}
 
@@ -258,6 +319,9 @@ func (r *BlockRegistry) LoadPaletteFile(filePath string, useHashes bool) bool {
 		}
 		if count > 0 {
 			log.Printf("bebot: loaded %d block states from block_hashes JSON %s\n", count, filePath)
+			r.mu.Lock()
+			r.loaded = true
+			r.mu.Unlock()
 			return true
 		}
 	}
@@ -274,6 +338,9 @@ func (r *BlockRegistry) LoadPaletteFile(filePath string, useHashes bool) bool {
 		}
 		if count > 0 {
 			log.Printf("bebot: loaded %d block states from map JSON %s\n", count, filePath)
+			r.mu.Lock()
+			r.loaded = true
+			r.mu.Unlock()
 			return true
 		}
 	}
@@ -289,6 +356,9 @@ func (r *BlockRegistry) LoadPaletteFile(filePath string, useHashes bool) bool {
 			r.Register(e.ID, e.Name)
 		}
 		log.Printf("bebot: loaded %d block states from list JSON %s\n", len(listFormat), filePath)
+		r.mu.Lock()
+		r.loaded = true
+		r.mu.Unlock()
 		return true
 	}
 

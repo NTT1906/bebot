@@ -108,3 +108,70 @@ func TestBlockRegistryMemoryImpact(t *testing.T) {
 		t.Errorf("expected 973836165 to resolve to minecraft:cyan_terracotta, got %s (ok=%v)", name, ok)
 	}
 }
+
+func TestPaletteLoadAndUnload(t *testing.T) {
+	reg := NewBlockRegistry()
+	reg.InitFromGameData(true, nil, "../../data/block_palette.nbt")
+
+	b := &Bot{
+		blockRegistry:    reg,
+		blockPalettePath: "../../data/block_palette.nbt",
+		serverUseHashes:  true,
+	}
+
+	replies := make([]string, 0)
+	b.testReplyHook = func(msg string) {
+		replies = append(replies, msg)
+	}
+
+	if !b.blockRegistry.IsLoaded() {
+		t.Fatal("expected block registry to be loaded after InitFromGameData")
+	}
+
+	// Unload palette
+	b.paletteCmd([]string{"unload"})
+	if b.blockRegistry.IsLoaded() {
+		t.Error("expected block registry to be unloaded")
+	}
+
+	// Air lookup should still succeed even when palette is unloaded
+	airRID := b.ActualAirRID()
+	name, ok := b.blockRegistry.ResolveName(airRID)
+	if !ok || name != "minecraft:air" {
+		t.Errorf("expected air RID %d to resolve to minecraft:air when unloaded, got %q (ok=%v)", airRID, name, ok)
+	}
+	name0, ok0 := b.blockRegistry.ResolveName(0)
+	if !ok0 || name0 != "minecraft:air" {
+		t.Errorf("expected RID 0 to resolve to minecraft:air when unloaded, got %q (ok=%v)", name0, ok0)
+	}
+
+	// Lookup air via command should succeed
+	b.blockCmd([]string{"lookup", "air"})
+	lastReply := replies[len(replies)-1]
+	if !strings.Contains(lastReply, "minecraft:air") {
+		t.Errorf("expected air lookup reply, got: %s", lastReply)
+	}
+
+	// Lookup non-air block should prompt to load palette
+	b.blockCmd([]string{"lookup", "stone"})
+	lastReply = replies[len(replies)-1]
+	if !strings.Contains(lastReply, "Palette data is not loaded") {
+		t.Errorf("expected warning to load palette, got: %s", lastReply)
+	}
+
+	// Reload palette
+	b.paletteCmd([]string{"load"})
+	if !b.blockRegistry.IsLoaded() {
+		t.Fatal("expected block registry to be loaded after palette load")
+	}
+	if b.blockRegistry.Count() < 1000 {
+		t.Errorf("expected >1000 block states after reload, got %d", b.blockRegistry.Count())
+	}
+
+	// Lookup stone should now succeed
+	b.blockCmd([]string{"lookup", "stone"})
+	lastReply = replies[len(replies)-1]
+	if !strings.Contains(lastReply, "RuntimeID") {
+		t.Errorf("expected successful stone lookup, got: %s", lastReply)
+	}
+}
