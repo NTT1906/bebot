@@ -5,6 +5,7 @@ import (
 	"log"
 	"math"
 	"strings"
+	"time"
 
 	"bebot/src/pathfind"
 
@@ -32,16 +33,31 @@ func (b *Bot) IsPathActive() bool {
 
 // startPath plans and starts following a 3D path toward target.
 func (b *Bot) startPath(target protocol.BlockPos, playerName string) {
+	b.mu.Lock()
+	curPos := b.pos
+	b.mu.Unlock()
+	subPos := protocol.SubChunkPos{int32(curPos.X()) >> 4, int32(curPos.Y()) >> 4, int32(curPos.Z()) >> 4}
+
 	// Auto-enable chunk cache if not already active to provide authentic voxel queries
-	if b.chunkCache != nil && !b.chunkCache.IsEnabled() {
-		b.mu.Lock()
-		curPos := b.pos
-		b.mu.Unlock()
-		subPos := protocol.SubChunkPos{int32(curPos.X()) >> 4, int32(curPos.Y()) >> 4, int32(curPos.Z()) >> 4}
-		b.chunkCache.Enable(subPos)
+	if b.chunkCache != nil {
+		if !b.chunkCache.IsEnabled() {
+			b.chunkCache.Enable(subPos)
+		}
 		missing := b.chunkCache.MissingOffsets()
 		if len(missing) > 0 {
 			b.requestSubChunks(subPos, missing)
+		}
+	}
+
+	// If the subchunk around the bot's current standing position is not loaded yet, wait briefly for incoming packets
+	if b.chunkCache != nil && !b.chunkCache.HasSubChunk(subPos) {
+		b.reply("[Bebot] Loading terrain chunks around bot...")
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			time.Sleep(50 * time.Millisecond)
+			if b.chunkCache.HasSubChunk(subPos) {
+				break
+			}
 		}
 	}
 
@@ -56,6 +72,11 @@ func (b *Bot) startPath(target protocol.BlockPos, playerName string) {
 	startNode := wv.FindStandingNode(vec3ToBlockPos(startVec))
 	goalNode := wv.FindGoalNode(target)
 
+	if startNode == goalNode {
+		b.reply(fmt.Sprintf("[Bebot] Already at destination! (<%d, %d, %d>)", target.X(), target.Y(), target.Z()))
+		return
+	}
+
 	if playerName != "" {
 		b.reply(fmt.Sprintf("[Bebot] Planning path to %s at <%d, %d, %d>...", playerName, target.X(), target.Y(), target.Z()))
 	} else {
@@ -63,8 +84,8 @@ func (b *Bot) startPath(target protocol.BlockPos, playerName string) {
 	}
 
 	res, _ := b.pathPlanner.Plan(wv, startNode, goalNode, pathfind.DefaultSearchOptions())
-	if len(res.Nodes) == 0 {
-		b.reply(fmt.Sprintf("[Bebot] No path found to <%d, %d, %d>.", target.X(), target.Y(), target.Z()))
+	if len(res.Nodes) <= 1 {
+		b.reply(fmt.Sprintf("[Bebot] Cannot find a path to <%d, %d, %d> (blocked or terrain not loaded).", target.X(), target.Y(), target.Z()))
 		return
 	}
 
@@ -89,7 +110,7 @@ func (b *Bot) startPath(target protocol.BlockPos, playerName string) {
 	b.mu.Unlock()
 
 	if res.ReachedGoal {
-		b.reply(fmt.Sprintf("[Bebot] Path found: %d nodes (length: %.1fm). Following...", len(res.Nodes), res.Cost))
+		b.reply(fmt.Sprintf("[Bebot] Path found: %d nodes (length: %.1fm). Navigating...", len(res.Nodes), res.Cost))
 	} else {
 		lastNode := res.Nodes[len(res.Nodes)-1]
 		dist := math.Sqrt(float64(
@@ -97,8 +118,8 @@ func (b *Bot) startPath(target protocol.BlockPos, playerName string) {
 				(lastNode.Y()-target.Y())*(lastNode.Y()-target.Y()) +
 				(lastNode.Z()-target.Z())*(lastNode.Z()-target.Z()),
 		))
-		b.reply(fmt.Sprintf("[Bebot] Exact target unreachable. Following best-effort path to <%d, %d, %d> (dist: %.1fm, %d nodes).",
-			lastNode.X(), lastNode.Y(), lastNode.Z(), dist, len(res.Nodes)))
+		b.reply(fmt.Sprintf("[Bebot] Planning segment 1 towards <%d, %d, %d> (%d nodes to chunk edge, %.1fm remaining). Navigating...",
+			target.X(), target.Y(), target.Z(), len(res.Nodes), dist))
 	}
 }
 
@@ -160,14 +181,9 @@ func (b *Bot) pathFollowTick(c *minecraft.Conn) (jump bool, replyMsg string) {
 		}
 	}
 
-	// Completion check
+	// Completion check for current path segment
 	if b.pathIndex >= len(b.pathNodes) {
-		b.pathActive = false
-		b.mode = modeIdle
-		b.moving = false
-		target := b.pathTargetPos
-		b.mu.Unlock()
-		return false, fmt.Sprintf("[Bebot] Destination reached! (<%d, %d, %d>)", target.X(), target.Y(), target.Z())
+		return b.onSegmentCompleteLocked()
 	}
 
 	curWP := b.pathNodes[b.pathIndex]
@@ -183,11 +199,7 @@ func (b *Bot) pathFollowTick(c *minecraft.Conn) (jump bool, replyMsg string) {
 	if hDist < 0.35 && vDist < 0.8 {
 		b.pathIndex++
 		if b.pathIndex >= len(b.pathNodes) {
-			b.pathActive = false
-			b.mode = modeIdle
-			b.moving = false
-			b.mu.Unlock()
-			return false, fmt.Sprintf("[Bebot] Destination reached! (<%d, %d, %d>)", curWP.X(), curWP.Y(), curWP.Z())
+			return b.onSegmentCompleteLocked()
 		}
 		curWP = b.pathNodes[b.pathIndex]
 		targetVec = mgl32.Vec3{float32(curWP.X()) + 0.5, float32(curWP.Y()), float32(curWP.Z()) + 0.5}
@@ -256,4 +268,77 @@ func (b *Bot) pathFollowTick(c *minecraft.Conn) (jump bool, replyMsg string) {
 
 	b.mu.Unlock()
 	return jump, ""
+}
+
+// onSegmentCompleteLocked evaluates whether the final destination has been reached
+// or if a multi-chunk continuation segment should be planned. Must be called with b.mu held;
+// releases b.mu before returning.
+func (b *Bot) onSegmentCompleteLocked() (jump bool, replyMsg string) {
+	if len(b.pathNodes) == 0 {
+		b.pathActive = false
+		b.mode = modeIdle
+		b.moving = false
+		b.mu.Unlock()
+		return false, ""
+	}
+
+	lastWP := b.pathNodes[len(b.pathNodes)-1]
+	target := b.pathTargetPos
+
+	// Distance from final waypoint of this segment to the destination
+	dx := float64(target.X() - lastWP.X())
+	dy := float64(target.Y() - lastWP.Y())
+	dz := float64(target.Z() - lastWP.Z())
+	distToFinal := math.Sqrt(dx*dx + dy*dy + dz*dz)
+
+	// If within 1.5 blocks of target, the destination is reached
+	if distToFinal <= 1.5 {
+		b.pathActive = false
+		b.mode = modeIdle
+		b.moving = false
+		b.mu.Unlock()
+		return false, fmt.Sprintf("[Bebot] Destination reached! (<%d, %d, %d>)", target.X(), target.Y(), target.Z())
+	}
+
+	// Reached the edge of the previous chunk window; more chunks have loaded ahead as the bot walked.
+	// Automatically plan the next segment towards b.pathTargetPos.
+	botPos := b.pos
+	planner := b.pathPlanner
+	playerName := b.pathTargetName
+	b.mu.Unlock()
+
+	wv := NewBotWorldView(b)
+	startNode := wv.FindStandingNode(vec3ToBlockPos(botPos))
+	goalNode := wv.FindGoalNode(target)
+	nextRes, _ := planner.Plan(wv, startNode, goalNode, pathfind.DefaultSearchOptions())
+
+	b.mu.Lock()
+	if len(nextRes.Nodes) > 1 && b.pathActive {
+		b.pathNodes = nextRes.Nodes
+		b.pathMoves = nextRes.Moves
+		b.pathIndex = 0
+		b.pathStuckTicks = 0
+		firstWP := nextRes.Nodes[0]
+		b.moveTarget = mgl32.Vec3{float32(firstWP.X()) + 0.5, float32(firstWP.Y()), float32(firstWP.Z()) + 0.5}
+		b.mu.Unlock()
+
+		if nextRes.ReachedGoal {
+			return false, fmt.Sprintf("[Bebot] Destination in sight! Navigating final %d nodes to <%d, %d, %d>...",
+				len(nextRes.Nodes), target.X(), target.Y(), target.Z())
+		}
+		return false, fmt.Sprintf("[Bebot] Continuing towards <%d, %d, %d> (next segment: %d nodes, %.1fm remaining)...",
+			target.X(), target.Y(), target.Z(), len(nextRes.Nodes), distToFinal)
+	}
+
+	// No further progress could be made
+	b.pathActive = false
+	b.mode = modeIdle
+	b.moving = false
+	b.mu.Unlock()
+	if playerName != "" {
+		return false, fmt.Sprintf("[Bebot] Stopped near %s at <%d, %d, %d> (dist: %.1fm).",
+			playerName, lastWP.X(), lastWP.Y(), lastWP.Z(), distToFinal)
+	}
+	return false, fmt.Sprintf("[Bebot] Cannot progress further towards <%d, %d, %d> (reached <%d, %d, %d>, %.1fm away, blocked or unmapped terrain).",
+		target.X(), target.Y(), target.Z(), lastWP.X(), lastWP.Y(), lastWP.Z(), distToFinal)
 }

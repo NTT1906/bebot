@@ -262,6 +262,14 @@ DiscoveryLoop:
 
 	log.Printf("bebot: joined local world %q at %.1f %.1f %.1f entity=%d gamemode=%d\n",
 		game.WorldName, b.pos.X(), b.pos.Y(), b.pos.Z(), b.entityID, game.PlayerGameMode)
+	if b.chunkCache != nil {
+		subPos := protocol.SubChunkPos{int32(b.pos.X()) >> 4, int32(b.pos.Y()) >> 4, int32(b.pos.Z()) >> 4}
+		b.chunkCache.Enable(subPos)
+		missing := b.chunkCache.MissingOffsets()
+		if len(missing) > 0 {
+			b.requestSubChunks(subPos, missing)
+		}
+	}
 	b.schedulePostJoinMemoryFree()
 
 	done := make(chan error, 1)
@@ -480,6 +488,14 @@ func (b *Bot) connect(ctx context.Context) error {
 	}
 	log.Printf("bebot: world time: startGameTime=%d dayCycleLockTime=%d doDaylightCycle=%v\n", game.Time, game.DayCycleLockTime, daylightCycle)
 	log.Printf("bebot: joined %s at %.1f %.1f %.1f entity=%d gamemode=%d dimension=%d seed=%d\n", address, b.pos.X(), b.pos.Y(), b.pos.Z(), b.entityID, game.PlayerGameMode, game.Dimension, game.WorldSeed)
+	if b.chunkCache != nil {
+		subPos := protocol.SubChunkPos{int32(b.pos.X()) >> 4, int32(b.pos.Y()) >> 4, int32(b.pos.Z()) >> 4}
+		b.chunkCache.Enable(subPos)
+		missing := b.chunkCache.MissingOffsets()
+		if len(missing) > 0 {
+			b.requestSubChunks(subPos, missing)
+		}
+	}
 	b.schedulePostJoinMemoryFree()
 	log.Printf("bebot: movement settings rewind=%d server-authoritative-block-breaking=%v server-authoritative-inventory=%v interactions-disabled=%v chunk-radius=%d\n", game.PlayerMovementSettings.RewindHistorySize, game.PlayerMovementSettings.ServerAuthoritativeBlockBreaking, game.ServerAuthoritativeInventory, game.DisablePlayerInteractions, game.ChunkRadius)
 	done := make(chan error, 1)

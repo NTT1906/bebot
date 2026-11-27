@@ -94,6 +94,17 @@ func (c *ChunkCache) Count() int {
 	return len(c.subchunks)
 }
 
+// HasSubChunk returns true if the specified sub-chunk position is currently loaded in memory.
+func (c *ChunkCache) HasSubChunk(pos protocol.SubChunkPos) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if !c.enabled {
+		return false
+	}
+	_, ok := c.subchunks[pos]
+	return ok
+}
+
 // Enable activates chunk decoding centered around centerPos.
 func (c *ChunkCache) Enable(centerPos protocol.SubChunkPos) {
 	c.mu.Lock()

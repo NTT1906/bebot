@@ -52,7 +52,7 @@ func (b *Bot) gotoCmd(args []string) {
 			int32(math.Floor(y)),
 			int32(math.Floor(z)),
 		}
-		b.startPath(targetPos, "")
+		go b.startPath(targetPos, "")
 		return
 	}
 
@@ -90,7 +90,7 @@ func (b *Bot) gotoPlayer(targetName string) {
 		displayName = cleanName
 	}
 
-	b.startPath(targetPos, displayName)
+	go b.startPath(targetPos, displayName)
 }
 
 // stopPathCmd stops pathfinding and replies to user.

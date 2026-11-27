@@ -3,6 +3,7 @@ package bot
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"bebot/src/pathfind"
 
@@ -173,8 +174,8 @@ func TestPathFollowerLifecycle(t *testing.T) {
 		t.Errorf("expected path to be inactive after completion")
 	}
 
-	// Test stopPath
-	b.StartPath(protocol.BlockPos{3, 64, 0}, "")
+	// Test stopPath (navigate back to 0, 64, 0)
+	b.StartPath(protocol.BlockPos{0, 64, 0}, "")
 	if !b.IsPathActive() {
 		t.Fatal("expected path to be active after restart")
 	}
@@ -186,10 +187,13 @@ func TestPathFollowerLifecycle(t *testing.T) {
 
 // TestGotoCommands tests command parsing for goto and stoppath.
 func TestGotoCommands(t *testing.T) {
+	cache := NewChunkCache()
+	cache.Enable(protocol.SubChunkPos{0, 4, 0})
+
 	var replied []string
 	b := &Bot{
 		pos:             mgl32.Vec3{0, 64, 0},
-		chunkCache:      NewChunkCache(),
+		chunkCache:      cache,
 		blockRegistry:   NewBlockRegistry(),
 		blockRuntimeIDs: make(map[protocol.BlockPos]uint32),
 		players:         make(map[string]player),
@@ -216,6 +220,7 @@ func TestGotoCommands(t *testing.T) {
 	// 2. Coordinate navigation
 	replied = nil
 	b.gotoCmd([]string{"2", "64", "0"})
+	time.Sleep(30 * time.Millisecond)
 	if !b.IsPathActive() {
 		t.Errorf("expected path to be active after goto 2 64 0")
 	}
@@ -254,8 +259,68 @@ func TestGotoCommands(t *testing.T) {
 	}
 	replied = nil
 	b.gotoCmd([]string{"Steve"})
+	time.Sleep(30 * time.Millisecond)
 	if !b.IsPathActive() {
 		t.Errorf("expected path to Steve to be active")
 	}
+	b.StopPath()
+}
+
+// TestMultiChunkSegmentProgression verifies that when a partial path reaches
+// the edge of loaded chunks, the follower automatically plans the next segment.
+func TestMultiChunkSegmentProgression(t *testing.T) {
+	cache := NewChunkCache()
+	cache.Enable(protocol.SubChunkPos{0, 4, 0})
+
+	var replied []string
+	b := &Bot{
+		pos:             mgl32.Vec3{0, 64, 0},
+		chunkCache:      cache,
+		blockRegistry:   NewBlockRegistry(),
+		blockRuntimeIDs: make(map[protocol.BlockPos]uint32),
+		players:         make(map[string]player),
+		testReplyHook: func(msg string) {
+			replied = append(replied, msg)
+		},
+	}
+	b.pathPlanner = pathfind.NewPlanner()
+
+	// Only populate up to X=3 (X=4 is unloaded/solid)
+	for x := int32(0); x <= 3; x++ {
+		cache.OnBlockUpdate(protocol.BlockPos{x, 63, 0}, 1)
+		cache.OnBlockUpdate(protocol.BlockPos{x, 64, 0}, 0)
+		cache.OnBlockUpdate(protocol.BlockPos{x, 65, 0}, 0)
+	}
+
+	// Final destination is far away at X=10
+	b.StartPath(protocol.BlockPos{10, 64, 0}, "")
+	if !b.IsPathActive() {
+		t.Fatal("expected path to be active for segment 1")
+	}
+
+	// Bot walks to node at X=3 (edge of currently loaded terrain)
+	b.mu.Lock()
+	b.pathIndex = len(b.pathNodes) - 1
+	lastWP := b.pathNodes[b.pathIndex]
+	b.pos = mgl32.Vec3{float32(lastWP.X()) + 0.5, float32(lastWP.Y()), float32(lastWP.Z()) + 0.5}
+	b.mu.Unlock()
+
+	// Now simulate new chunks loading ahead: populate X=4..X=6
+	for x := int32(4); x <= 6; x++ {
+		cache.OnBlockUpdate(protocol.BlockPos{x, 63, 0}, 1)
+		cache.OnBlockUpdate(protocol.BlockPos{x, 64, 0}, 0)
+		cache.OnBlockUpdate(protocol.BlockPos{x, 65, 0}, 0)
+	}
+
+	// Tick follower: should detect end of segment 1 and plan segment 2 towards X=10!
+	_, msg := b.pathFollowTick(nil)
+
+	if !strings.Contains(msg, "Continuing towards") {
+		t.Errorf("expected 'Continuing towards' multi-segment message, got %q", msg)
+	}
+	if !b.IsPathActive() {
+		t.Errorf("expected path to stay active for segment 2")
+	}
+
 	b.StopPath()
 }
