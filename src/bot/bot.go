@@ -14,10 +14,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	bauth "bebot/src/auth"
 	"bebot/src/config"
 	"bebot/src/pathfind"
 	"bebot/src/waypoint"
-	bauth "bebot/src/auth"
 
 	"github.com/go-gl/mathgl/mgl32"
 	"github.com/google/uuid"
@@ -209,6 +209,7 @@ type Bot struct {
 	mineAttempts                 map[protocol.BlockPos]int
 	mineAirRuntimeIDs            map[uint32]bool
 	knownAirBlocks               map[protocol.BlockPos]bool
+	unmineableBlocks             map[protocol.BlockPos]bool
 	mineFastBreak                bool
 	hasteLevel                   int32
 	mineTimeoutSec               float64
@@ -217,6 +218,8 @@ type Bot struct {
 	mineLastFinishedPos          protocol.BlockPos
 	mineLastFinishedTick         uint64
 	mineLastWasBroken            bool
+	mineBreakInitialRuntimeID    uint32
+	mineBreakInitialKnown        bool
 	mineWaitingForBlocks         bool
 	mineLearnActive              bool
 	mineLearnPos                 protocol.BlockPos
@@ -244,12 +247,12 @@ type Bot struct {
 	testReplyHook                func(string)
 
 	// Pathfinding state
-	pathActive     bool
-	pathMoves      []pathfind.Move
-	pathNodes      []protocol.BlockPos
-	pathIndex      int
-	pathTargetPos  protocol.BlockPos
-	pathTargetName  string
+	pathActive        bool
+	pathMoves         []pathfind.Move
+	pathNodes         []protocol.BlockPos
+	pathIndex         int
+	pathTargetPos     protocol.BlockPos
+	pathTargetName    string
 	pathStuckTicks    int
 	pathNodeTicks     int
 	pathReplanCount   int
@@ -334,27 +337,28 @@ func New(opts Options) *Bot {
 	}
 
 	b := &Bot{
-		cfg:               opts.Config,
-		source:            opts.Source,
-		offline:           opts.Offline,
-		botName:           opts.BotName,
-		offlineUUID:       opts.OfflineUUID,
-		offlineUUIDPath:   offlineUUIDFile,
-		local:             opts.Local,
-		players:           make(map[string]player),
-		entities:          make(map[int64]string),
-		mode:              modeIdle,
-		waypoints:         waypoint.LoadWaypoints(waypoint.DefaultWaypointsFile),
-		emotes:            loadEmotes(DefaultEmotesFile),
-		configPath:        opts.ConfigPath,
-		skinPath:          opts.SkinPath,
-		xblCache:          opts.XBLCache,
-		xstsCachePath:     xstsCache,
-		itemNamesByID:     make(map[int32]string),
-		isFocused:         true,
-		mineAttempts:      make(map[protocol.BlockPos]int),
-		mineAirRuntimeIDs: computeDefaultAirRuntimeIDs(true),
-		knownAirBlocks:    make(map[protocol.BlockPos]bool),
+		cfg:                       opts.Config,
+		source:                    opts.Source,
+		offline:                   opts.Offline,
+		botName:                   opts.BotName,
+		offlineUUID:               opts.OfflineUUID,
+		offlineUUIDPath:           offlineUUIDFile,
+		local:                     opts.Local,
+		players:                   make(map[string]player),
+		entities:                  make(map[int64]string),
+		mode:                      modeIdle,
+		waypoints:                 waypoint.LoadWaypoints(waypoint.DefaultWaypointsFile),
+		emotes:                    loadEmotes(DefaultEmotesFile),
+		configPath:                opts.ConfigPath,
+		skinPath:                  opts.SkinPath,
+		xblCache:                  opts.XBLCache,
+		xstsCachePath:             xstsCache,
+		itemNamesByID:             make(map[int32]string),
+		isFocused:                 true,
+		mineAttempts:              make(map[protocol.BlockPos]int),
+		mineAirRuntimeIDs:         computeDefaultAirRuntimeIDs(true),
+		knownAirBlocks:            make(map[protocol.BlockPos]bool),
+		unmineableBlocks:          make(map[protocol.BlockPos]bool),
 		mineTimeoutSec:            mineTimeout,
 		blockRuntimeIDs:           make(map[protocol.BlockPos]uint32),
 		blockRuntimeIDUpdated:     make(chan protocol.BlockPos, 16),

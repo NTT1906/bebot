@@ -111,6 +111,7 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 					b.mineCurrent = nil
 					b.mineStuckTicks = 0
 					b.mineAttempts = nil
+					b.unmineableBlocks = nil
 					b.mu.Unlock()
 					b.reply(fmt.Sprintf("Area mining complete! Mined %d blocks.", count))
 					b.mu.Lock()
@@ -168,8 +169,7 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 				b.facingPitch = pitch
 
 				if b.breakTarget == nil {
-					b.breakTarget = b.mineCurrent
-					b.breakTicks = 0
+					b.beginBreakTrackingLocked(*b.mineCurrent)
 					b.breakAnimation = true
 					b.breakRepeat = false
 				}
@@ -577,13 +577,18 @@ func (b *Bot) moveTick(c *minecraft.Conn, jump bool) {
 			if b.mineAttempts != nil {
 				b.mineAttempts[*bt] = 2
 			}
-			if b.knownAirBlocks == nil {
-				b.knownAirBlocks = make(map[protocol.BlockPos]bool)
+			if b.unmineableBlocks == nil {
+				b.unmineableBlocks = make(map[protocol.BlockPos]bool)
 			}
-			b.knownAirBlocks[*bt] = true
+			b.unmineableBlocks[*bt] = true
+			if b.knownAirBlocks != nil {
+				delete(b.knownAirBlocks, *bt)
+			}
 			b.mineLastFinishedPos = *bt
 			b.mineLastFinishedTick = b.tick
 			b.mineLastWasBroken = false
+			b.mineBreakInitialRuntimeID = 0
+			b.mineBreakInitialKnown = false
 			b.mineCurrent = nil
 			b.breakTarget = nil
 			b.breakTicks = 0

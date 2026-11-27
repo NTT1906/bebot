@@ -47,8 +47,7 @@ func (b *Bot) startBreaking(pos protocol.BlockPos, animate bool, repeat bool) {
 			log.Println("bebot: creative break flush failed:", ExplainError(err))
 		}
 		b.mu.Lock()
-		b.breakTarget = &pos
-		b.breakTicks = 0
+		b.beginBreakTrackingLocked(pos)
 		b.mu.Unlock()
 		if tracePackets {
 			log.Printf("bebot: creative break requested action=%d at %d %d %d\n", protocol.PlayerActionCreativePlayerDestroyBlock, pos.X(), pos.Y(), pos.Z())
@@ -56,8 +55,7 @@ func (b *Bot) startBreaking(pos protocol.BlockPos, animate bool, repeat bool) {
 		return
 	}
 	b.mu.Lock()
-	b.breakTarget = &pos
-	b.breakTicks = 0
+	b.beginBreakTrackingLocked(pos)
 	b.mu.Unlock()
 	log.Printf("bebot: breaking block at %d %d %d\n", pos.X(), pos.Y(), pos.Z())
 }
@@ -185,6 +183,52 @@ func computeDefaultAirRuntimeIDs(useHashes bool) map[uint32]bool {
 	return res
 }
 
+// isAirRuntimeIDLocked reports whether rid is a known air runtime ID.
+// b.mu must be held by the caller.
+func (b *Bot) isAirRuntimeIDLocked(rid uint32) bool {
+	return rid == 0 || (b.mineAirRuntimeIDs != nil && b.mineAirRuntimeIDs[rid])
+}
+
+// learnAirRuntimeIDLocked records a newly observed air runtime ID and persists only
+// the air ID registry. Unmineable block coordinates are never written to this cache.
+// b.mu must be held by the caller.
+func (b *Bot) learnAirRuntimeIDLocked(rid uint32) bool {
+	if rid == 0 {
+		return false
+	}
+	if b.mineAirRuntimeIDs == nil {
+		b.mineAirRuntimeIDs = make(map[uint32]bool)
+	}
+	if b.mineAirRuntimeIDs[rid] {
+		return false
+	}
+	b.mineAirRuntimeIDs[rid] = true
+	b.actualAirRID = rid
+	if b.blockRegistry != nil {
+		b.blockRegistry.SetActualAirRID(rid)
+	}
+	_ = b.saveAirRuntimeIDsCacheLocked(defaultAirRuntimeIDsCacheFile)
+	return true
+}
+
+// beginBreakTrackingLocked starts tracking a new break target and captures its
+// pre-break runtime ID when it is already known. This lets the bot distinguish a
+// successful break (the runtime ID changed to air) from a rejected break
+// (the runtime ID stayed solid) without depending on the block palette or chunk data.
+// b.mu must be held by the caller.
+func (b *Bot) beginBreakTrackingLocked(pos protocol.BlockPos) {
+	b.breakTarget = &pos
+	b.breakTicks = 0
+	b.mineBreakInitialRuntimeID = 0
+	b.mineBreakInitialKnown = false
+	if b.blockRuntimeIDs != nil {
+		if rid, ok := b.blockRuntimeIDs[pos]; ok && !b.isAirRuntimeIDLocked(rid) {
+			b.mineBreakInitialRuntimeID = rid
+			b.mineBreakInitialKnown = true
+		}
+	}
+}
+
 func (b *Bot) loadAirRuntimeIDsCache(filePath string) ([]uint32, bool) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
@@ -310,7 +354,7 @@ func (b *Bot) startMiningArea(ax, ay, az, bx, by, bz int32, ticksReq int, repeat
 					if b.chunkCache != nil && b.chunkCache.IsEnabled() {
 						if rid, ok := b.chunkCache.BlockAt(pos); ok {
 							b.mu.Lock()
-							isAir := rid == 0 || (b.mineAirRuntimeIDs != nil && b.mineAirRuntimeIDs[rid])
+							isAir := b.isAirRuntimeIDLocked(rid)
 							b.mu.Unlock()
 							if isAir {
 								airFiltered++
@@ -326,7 +370,7 @@ func (b *Bot) startMiningArea(ax, ay, az, bx, by, bz int32, ticksReq int, repeat
 					if b.chunkCache != nil && b.chunkCache.IsEnabled() {
 						if rid, ok := b.chunkCache.BlockAt(pos); ok {
 							b.mu.Lock()
-							isAir := rid == 0 || (b.mineAirRuntimeIDs != nil && b.mineAirRuntimeIDs[rid])
+							isAir := b.isAirRuntimeIDLocked(rid)
 							b.mu.Unlock()
 							if isAir {
 								airFiltered++
@@ -357,6 +401,7 @@ func (b *Bot) startMiningArea(ax, ay, az, bx, by, bz int32, ticksReq int, repeat
 	b.mineFaceAccurate = faceAccurate
 	b.mineAttempts = make(map[protocol.BlockPos]int)
 	b.knownAirBlocks = make(map[protocol.BlockPos]bool)
+	b.unmineableBlocks = make(map[protocol.BlockPos]bool)
 	if b.mineAirRuntimeIDs == nil {
 		b.mineAirRuntimeIDs = computeDefaultAirRuntimeIDs(b.serverUseHashes)
 	}
@@ -365,6 +410,8 @@ func (b *Bot) startMiningArea(ax, ay, az, bx, by, bz int32, ticksReq int, repeat
 	b.mineLastWasBroken = false
 	b.mineLastFinishedPos = protocol.BlockPos{}
 	b.mineLastFinishedTick = 0
+	b.mineBreakInitialRuntimeID = 0
+	b.mineBreakInitialKnown = false
 	b.mu.Unlock()
 
 	modeStr := "once"
@@ -386,6 +433,7 @@ func (b *Bot) startMiningArea(ax, ay, az, bx, by, bz int32, ticksReq int, repeat
 
 func (b *Bot) stopMiningArea() {
 	b.mu.Lock()
+	b.unmineableBlocks = nil
 	if !b.mineActive && len(b.mineQueue) == 0 {
 		b.mu.Unlock()
 		return
@@ -405,6 +453,8 @@ func (b *Bot) stopMiningArea() {
 	b.mineLastWasBroken = false
 	b.mineLastFinishedPos = protocol.BlockPos{}
 	b.mineLastFinishedTick = 0
+	b.mineBreakInitialRuntimeID = 0
+	b.mineBreakInitialKnown = false
 	b.mu.Unlock()
 	b.reply("Stopped area mining.")
 }
@@ -424,12 +474,18 @@ func (b *Bot) restartMiningQueue() {
 					if b.knownAirBlocks != nil && b.knownAirBlocks[pos] {
 						continue
 					}
+					if b.unmineableBlocks != nil && b.unmineableBlocks[pos] {
+						continue
+					}
 					queue = append(queue, pos)
 				}
 			} else {
 				for z := maxZ; z >= minZ; z-- {
 					pos := protocol.BlockPos{x, y, z}
 					if b.knownAirBlocks != nil && b.knownAirBlocks[pos] {
+						continue
+					}
+					if b.unmineableBlocks != nil && b.unmineableBlocks[pos] {
 						continue
 					}
 					queue = append(queue, pos)
@@ -448,6 +504,8 @@ func (b *Bot) restartMiningQueue() {
 	b.mineInitialDone = false
 	b.mineWaitingForBlocks = len(queue) == 0
 	b.mineLastWasBroken = false
+	b.mineBreakInitialRuntimeID = 0
+	b.mineBreakInitialKnown = false
 	b.mineAttempts = make(map[protocol.BlockPos]int)
 	if len(queue) > 0 {
 		log.Printf("bebot: repeating area mining (%d blocks re-queued)\n", len(queue))
@@ -494,6 +552,7 @@ func (b *Bot) handleUpdateBlock(pos protocol.BlockPos, runtimeID uint32) {
 	if b.blockRuntimeIDs == nil {
 		b.blockRuntimeIDs = make(map[protocol.BlockPos]uint32)
 	}
+	prevRuntimeID, prevKnown := b.blockRuntimeIDs[pos]
 	b.blockRuntimeIDs[pos] = runtimeID
 	isContainerTarget := b.containerOpening && pos == b.containerPos
 	ch := b.containerRuntimeIDUpdated
@@ -555,6 +614,9 @@ func (b *Bot) handleUpdateBlock(pos protocol.BlockPos, runtimeID uint32) {
 		}
 		b.knownAirBlocks[pos] = true
 
+		if b.unmineableBlocks != nil {
+			delete(b.unmineableBlocks, pos)
+		}
 		solidID := b.mineLearnInitialRuntimeID
 		b.mineLearnActive = false
 		b.mineLearnWasBroken = false
@@ -580,30 +642,48 @@ func (b *Bot) handleUpdateBlock(pos protocol.BlockPos, runtimeID uint32) {
 	defer b.mu.Unlock()
 
 	if !b.mineActive {
+		// The world changed at this coordinate while idle. Clear a stale
+		// unmineable entry only when the block actually changed (or is now air),
+		// not when the server merely re-syncs the same solid block.
+		if b.unmineableBlocks != nil && b.unmineableBlocks[pos] &&
+			(b.isAirRuntimeIDLocked(runtimeID) || (prevKnown && prevRuntimeID != runtimeID)) {
+			delete(b.unmineableBlocks, pos)
+		}
 		return
 	}
 
 	isCurrentBreak := b.breakTarget != nil && pos == *b.breakTarget
 	isRecentFinish := pos == b.mineLastFinishedPos && (b.tick-b.mineLastFinishedTick <= 5)
 
-	if isRecentFinish && b.mineLastWasBroken {
-		if b.mineAirRuntimeIDs == nil {
-			b.mineAirRuntimeIDs = computeDefaultAirRuntimeIDs(b.serverUseHashes)
-		}
-		if !b.mineAirRuntimeIDs[runtimeID] {
-			b.mineAirRuntimeIDs[runtimeID] = true
-			b.actualAirRID = runtimeID
-			if b.blockRegistry != nil {
-				b.blockRegistry.SetActualAirRID(runtimeID)
-			}
-			_ = b.saveAirRuntimeIDsCacheLocked(defaultAirRuntimeIDsCacheFile)
-			log.Printf("bebot: learned air block runtime ID %d\n", runtimeID)
-		}
+	isAir := b.isAirRuntimeIDLocked(runtimeID)
+
+	// Capture the target's solid runtime ID while the break is still in progress.
+	// The server may send an UpdateBlock with its current state before the result.
+	if isCurrentBreak && !isAir && !b.mineBreakInitialKnown {
+		b.mineBreakInitialRuntimeID = runtimeID
+		b.mineBreakInitialKnown = true
 	}
 
-	isAir := runtimeID == 0 || (b.mineAirRuntimeIDs != nil && b.mineAirRuntimeIDs[runtimeID])
+	// A predicted break is only considered air when the server actually changed the
+	// block away from its pre-break runtime ID. Otherwise it is treated as unmineable
+	// below, so rejected breaks never pollute the air runtime ID registry.
+	preBreakRID := b.mineBreakInitialRuntimeID
+	preBreakKnown := b.mineBreakInitialKnown
+	if !preBreakKnown && prevKnown && !b.isAirRuntimeIDLocked(prevRuntimeID) {
+		preBreakRID = prevRuntimeID
+		preBreakKnown = true
+	}
+	if !isAir && isRecentFinish && b.mineLastWasBroken && preBreakKnown && runtimeID != preBreakRID {
+		if b.learnAirRuntimeIDLocked(runtimeID) {
+			log.Printf("bebot: learned air block runtime ID %d\n", runtimeID)
+		}
+		isAir = true
+	}
 
 	if isAir {
+		if b.unmineableBlocks != nil {
+			delete(b.unmineableBlocks, pos)
+		}
 		if b.knownAirBlocks == nil {
 			b.knownAirBlocks = make(map[protocol.BlockPos]bool)
 		}
@@ -627,7 +707,26 @@ func (b *Bot) handleUpdateBlock(pos protocol.BlockPos, runtimeID uint32) {
 		if b.mineAttempts != nil {
 			b.mineAttempts[pos] = 2
 		}
+	} else if isRecentFinish {
+		// The bot attempted to break this block, but it did NOT turn into air!
+		// It is unmineable (bedrock, protected area, server rejected break, oak log, etc.).
+		// We NEVER pollute mineAirRuntimeIDs. We record this coordinate in the in-memory unmineable blacklist.
+		if b.unmineableBlocks == nil {
+			b.unmineableBlocks = make(map[protocol.BlockPos]bool)
+		}
+		b.unmineableBlocks[pos] = true
+		if b.knownAirBlocks != nil {
+			delete(b.knownAirBlocks, pos)
+		}
+		if b.mineAttempts != nil {
+			b.mineAttempts[pos] = 2
+		}
+		log.Printf("bebot: block at (%d, %d, %d) did not break into air (runtimeID %d), marked as unmineable\n",
+			pos.X(), pos.Y(), pos.Z(), runtimeID)
 	} else if b.isInMineBox(pos) && !isRecentFinish && !isCurrentBreak {
+		if b.unmineableBlocks != nil {
+			delete(b.unmineableBlocks, pos)
+		}
 		if b.knownAirBlocks != nil {
 			delete(b.knownAirBlocks, pos)
 		}
@@ -657,6 +756,15 @@ func (b *Bot) handleUpdateBlock(pos protocol.BlockPos, runtimeID uint32) {
 			sortMineQueue(b.mineQueue)
 			log.Printf("bebot: new block detected at (%d, %d, %d), added to mine queue (queue len=%d)\n", pos.X(), pos.Y(), pos.Z(), len(b.mineQueue))
 		}
+	}
+
+	if isRecentFinish {
+		// Consume the finish result once. Later updates at this coordinate are either
+		// a genuine newly placed block or a late air confirmation.
+		b.mineLastFinishedPos = protocol.BlockPos{}
+		b.mineLastFinishedTick = 0
+		b.mineBreakInitialRuntimeID = 0
+		b.mineBreakInitialKnown = false
 	}
 }
 
@@ -709,7 +817,9 @@ func faceClickPosition(face int32) mgl32.Vec3 {
 func (b *Bot) pickNextMineBlock() *protocol.BlockPos {
 	for len(b.mineQueue) > 0 {
 		pos := b.mineQueue[0]
-		if (b.knownAirBlocks != nil && b.knownAirBlocks[pos]) || (b.mineAttempts != nil && b.mineAttempts[pos] >= 2) {
+		if (b.knownAirBlocks != nil && b.knownAirBlocks[pos]) ||
+			(b.unmineableBlocks != nil && b.unmineableBlocks[pos]) ||
+			(b.mineAttempts != nil && b.mineAttempts[pos] >= 2) {
 			b.mineQueue = b.mineQueue[1:]
 			continue
 		}
@@ -749,6 +859,7 @@ func (b *Bot) startLearningAir(pos *protocol.BlockPos) {
 		b.mineContinuous = false
 		b.mineQueue = nil
 		b.mineCurrent = nil
+		b.unmineableBlocks = nil
 	}
 	var target protocol.BlockPos
 	if pos != nil {
@@ -781,8 +892,7 @@ func (b *Bot) startLearningAir(pos *protocol.BlockPos) {
 	b.mineLearnInitialRuntimeID = initialRuntimeID
 	b.mineLearnWasBroken = false
 	b.mineLearnStartedBreak = false
-	b.breakTarget = &target
-	b.breakTicks = 0
+	b.beginBreakTrackingLocked(target)
 	b.breakAnimation = true
 	b.breakRepeat = false
 	b.mu.Unlock()
