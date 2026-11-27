@@ -52,16 +52,14 @@ type Config struct {
 	BlockPalettePath string     `json:"block_palette_path,omitempty" toml:"block-palette-path,omitempty"`
 	FreeMemAfterJoin *bool      `json:"free_mem_after_join,omitempty" toml:"free-mem-after-join,omitempty"`
 	Server           struct {
-		Host    string `json:"host" toml:"host"`
-		Port    int    `json:"port" toml:"port"`
-		Version string `json:"version,omitempty" toml:"version,omitempty"`
+		Host string `json:"host" toml:"host"`
+		Port int    `json:"port" toml:"port"`
 	} `json:"server" toml:"server"`
 	Behaviour struct {
-		ReconnectBaseDelayMs int     `json:"reconnectBaseDelayMs" toml:"reconnect-base-delay-ms"`
-		AfkJumpIntervalMs    int     `json:"afkJumpIntervalMs,omitempty" toml:"afk-jump-interval-ms,omitempty"` // deprecated
-		WalkSpeed            float32 `json:"walkSpeed" toml:"walk-speed"`
-		RenderDistance       int32   `json:"renderDistance" toml:"render-distance"`
-		ServerStallThresholdMs int   `json:"serverStallThresholdMs" toml:"server-stall-threshold-ms"`
+		ReconnectBaseDelayMs   int     `json:"reconnectBaseDelayMs" toml:"reconnect-base-delay-ms"`
+		WalkSpeed              float32 `json:"walkSpeed" toml:"walk-speed"`
+		RenderDistance         int32   `json:"renderDistance" toml:"render-distance"`
+		ServerStallThresholdMs int     `json:"serverStallThresholdMs" toml:"server-stall-threshold-ms"`
 	} `json:"behaviour" toml:"behaviour"`
 	CommandsViaChat  *bool      `json:"commands_via_chat,omitempty" toml:"commands-via-chat,omitempty"`
 	SkinFile         string     `json:"skin_file,omitempty" toml:"skin-file,omitempty"`
@@ -125,7 +123,6 @@ func migrateConfig(cfg Config, fromVer, toVer int) Config {
 			if cfg.Mine.TimeoutSec <= 0 {
 				cfg.Mine.TimeoutSec = 3.0
 			}
-			cfg.Behaviour.AfkJumpIntervalMs = 0
 		case 1:
 			// Migration from v1 to v2: remove legacy target coordinates, unify skin_file
 			cfg.Version = 2

@@ -292,9 +292,6 @@ func (b *Bot) connect(ctx context.Context) error {
 		return err
 	}
 	version := pong.Version
-	if b.cfg.Server.Version != "" && b.cfg.Server.Version != pong.Version {
-		log.Printf("bebot: warning: config version %s differs from server %s; using server version\n", b.cfg.Server.Version, pong.Version)
-	}
 	log.Printf("bebot: server=%s motd=%q protocol=%d version=%s transport=%s players=%d/%d\n", pong.Edition, pong.MOTD, pong.ProtocolID, pong.Version, transport, pong.Players, pong.MaxPlayers)
 
 	offline := strings.EqualFold(strings.TrimSpace(pong.MOTD), "offline") || strings.Contains(strings.ToLower(pong.MOTD), "lobby")

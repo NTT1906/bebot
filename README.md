@@ -18,13 +18,11 @@ Before running the bot, configure the `config.json` file in the project root. If
   "_comment_superuser": "Only this player can control the bot via chat commands.",
   "server": {
     "host": "your.server.ip",
-    "port": 19132,
-    "version": "1.20.0"
+    "port": 19132
   },
   "skin_file": "data/skin.json",
   "behaviour": {
     "reconnectBaseDelayMs": 5000,
-    "afkJumpIntervalMs": 60000,
     "walkSpeed": 0.15,
     "renderDistance": 5
   },
