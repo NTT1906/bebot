@@ -161,6 +161,35 @@ func (b *Bot) stopPath() bool {
 	return wasActive
 }
 
+// formatFeetDebugMap constructs a 9x9 top-down ASCII map at bot feet level.
+// Legend: bot '=', target '+', air 'o', else 'x'.
+func formatFeetDebugMap(wv pathfind.WorldView, botFeet protocol.BlockPos, target protocol.BlockPos) string {
+	var sb strings.Builder
+	bx := botFeet.X()
+	by := botFeet.Y()
+	bz := botFeet.Z()
+
+	sb.WriteString(fmt.Sprintf("[Bebot] Feet debug map (Y=%d, center <%d,%d>):\n", by, bx, bz))
+	for dz := int32(-4); dz <= 4; dz++ {
+		for dx := int32(-4); dx <= 4; dx++ {
+			pos := protocol.BlockPos{bx + dx, by, bz + dz}
+			if dx == 0 && dz == 0 {
+				sb.WriteByte('=')
+			} else if pos.X() == target.X() && pos.Z() == target.Z() {
+				sb.WriteByte('+')
+			} else if wv != nil && wv.GetBlockType(pos) == pathfind.BlockAir {
+				sb.WriteByte('o')
+			} else {
+				sb.WriteByte('x')
+			}
+		}
+		if dz < 4 {
+			sb.WriteByte('\n')
+		}
+	}
+	return sb.String()
+}
+
 // pathFollowTick updates path waypoint tracking and kinematic jumps.
 // Manages internal synchronization safely without holding locks during A* planner searches.
 // Returns whether jump input should be triggered, and an optional status message to reply.
@@ -293,9 +322,13 @@ func (b *Bot) pathFollowTick(c *minecraft.Conn) (jump bool, replyMsg string) {
 			b.mode = modeIdle
 			b.moving = false
 			b.pathReplanCount = 0
+			botPos := b.pos
 			b.mu.Unlock()
-			return false, fmt.Sprintf("[Bebot] Cannot reach destination <%d, %d, %d>! Failed to make progress after multiple replan attempts, giving up.",
-				target.X(), target.Y(), target.Z())
+
+			wv := NewBotWorldView(b)
+			feetMap := formatFeetDebugMap(wv, vec3ToBlockPos(botPos), target)
+			return false, fmt.Sprintf("[Bebot] Cannot reach destination <%d, %d, %d>! Failed to make progress after multiple replan attempts, giving up.\n%s",
+				target.X(), target.Y(), target.Z(), feetMap)
 		}
 
 		log.Printf("bebot: stuck or node timeout at (%.2f, %.2f, %.2f) following path, replan attempt %d/3 to %v\n",
@@ -328,8 +361,10 @@ func (b *Bot) pathFollowTick(c *minecraft.Conn) (jump bool, replyMsg string) {
 			b.moving = false
 			b.pathReplanCount = 0
 			b.mu.Unlock()
-			return false, fmt.Sprintf("[Bebot] Path blocked! Could not find detour to destination <%d, %d, %d>.",
-				target.X(), target.Y(), target.Z())
+
+			feetMap := formatFeetDebugMap(wv, vec3ToBlockPos(botPos), target)
+			return false, fmt.Sprintf("[Bebot] Path blocked! Could not find detour to destination <%d, %d, %d>.\n%s",
+				target.X(), target.Y(), target.Z(), feetMap)
 		}
 	}
 
@@ -411,12 +446,14 @@ func (b *Bot) onSegmentCompleteLocked() (jump bool, replyMsg string) {
 	b.pathActive = false
 	b.mode = modeIdle
 	b.moving = false
+	botPos = b.pos
 	b.mu.Unlock()
 	distToFinal := math.Sqrt(dx*dx + dy*dy + dz*dz)
+	feetMap := formatFeetDebugMap(wv, vec3ToBlockPos(botPos), target)
 	if playerName != "" {
-		return false, fmt.Sprintf("[Bebot] Stopped near %s at <%d, %d, %d> (dist: %.1fm).",
-			playerName, curBlock.X(), curBlock.Y(), curBlock.Z(), distToFinal)
+		return false, fmt.Sprintf("[Bebot] Stopped near %s at <%d, %d, %d> (dist: %.1fm).\n%s",
+			playerName, curBlock.X(), curBlock.Y(), curBlock.Z(), distToFinal, feetMap)
 	}
-	return false, fmt.Sprintf("[Bebot] Cannot progress further towards <%d, %d, %d> (reached <%d, %d, %d>, %.1fm away, blocked or unmapped terrain).",
-		target.X(), target.Y(), target.Z(), curBlock.X(), curBlock.Y(), curBlock.Z(), distToFinal)
+	return false, fmt.Sprintf("[Bebot] Cannot progress further towards <%d, %d, %d> (reached <%d, %d, %d>, %.1fm away, blocked or unmapped terrain).\n%s",
+		target.X(), target.Y(), target.Z(), curBlock.X(), curBlock.Y(), curBlock.Z(), distToFinal, feetMap)
 }

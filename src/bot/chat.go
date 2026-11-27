@@ -1039,6 +1039,14 @@ func (b *Bot) commandInternal(line string, bypassFocus bool) {
 		b.gotoCmd(p[1:])
 	case "stoppath", "cancelpath":
 		b.stopPathCmd()
+	case "map", "feetmap":
+		b.mu.Lock()
+		botPos := b.pos
+		target := b.pathTargetPos
+		b.mu.Unlock()
+		wv := NewBotWorldView(b)
+		feetMap := formatFeetDebugMap(wv, vec3ToBlockPos(botPos), target)
+		b.reply(feetMap)
 	case "move":
 		if len(p) < 4 {
 			b.reply("Usage: move <x> <y> <z>")

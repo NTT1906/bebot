@@ -539,6 +539,12 @@ func TestReplanTimeoutAndGiveUp(t *testing.T) {
 	if !strings.Contains(finalMsg, "giving up") && !strings.Contains(finalMsg, "multiple replan attempts") {
 		t.Errorf("expected give up broadcast message, got %q", finalMsg)
 	}
+	if !strings.Contains(finalMsg, "Feet debug map") {
+		t.Errorf("expected debug map in final give up message, got %q", finalMsg)
+	}
+	if !strings.Contains(finalMsg, "=") {
+		t.Errorf("expected debug map to contain bot '=', got %q", finalMsg)
+	}
 	if b.IsPathActive() {
 		t.Errorf("expected path to be deactivated after giving up")
 	}
@@ -630,5 +636,59 @@ func TestStepUpJumpDetection(t *testing.T) {
 	jump, _ := b.pathFollowTick(nil)
 	if !jump {
 		t.Errorf("expected jump to be true when approaching a step up waypoint")
+	}
+}
+
+// TestFormatFeetDebugMap verifies the 9x9 ASCII grid generated for feet-level diagnostics.
+func TestFormatFeetDebugMap(t *testing.T) {
+	b := newTestPathBot()
+	cache := b.chunkCache
+	cache.Enable(protocol.SubChunkPos{0, 4, 0})
+
+	// Setup: bot at (5, 64, 5), target at (7, 64, 5)
+	// Floor at Y=63
+	// Surrounding blocks at Y=64: air everywhere except a solid wall at (5, 64, 6)
+	cache.OnBlockUpdate(protocol.BlockPos{5, 64, 6}, 1) // solid wall
+	cache.OnBlockUpdate(protocol.BlockPos{7, 64, 5}, 0) // air at target
+
+	botFeet := protocol.BlockPos{5, 64, 5}
+	target := protocol.BlockPos{7, 64, 5}
+	wv := NewBotWorldView(b)
+
+	out := formatFeetDebugMap(wv, botFeet, target)
+
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 10 { // 1 header line + 9 grid rows
+		t.Fatalf("expected 10 lines (header + 9 rows), got %d: %q", len(lines), out)
+	}
+
+	header := lines[0]
+	if !strings.Contains(header, "Y=64") || !strings.Contains(header, "<5,5>") {
+		t.Errorf("expected header to contain Y=64 and center <5,5>, got %q", header)
+	}
+
+	// Verify grid rows (lines 1 to 9)
+	for i := 1; i <= 9; i++ {
+		row := lines[i]
+		if len(row) != 9 {
+			t.Errorf("row %d length: got %d, want 9 (%q)", i, len(row), row)
+		}
+	}
+
+	// Center row (dz = 0) is line 5 (index 5, since index 0 is header, 1 is dz=-4, 2 is dz=-3, 3 is dz=-2, 4 is dz=-1, 5 is dz=0)
+	centerRow := lines[5]
+	// Center character (dx = 0) is col 4 (index 4)
+	if centerRow[4] != '=' {
+		t.Errorf("expected center character at dz=0, dx=0 to be '=', got %c in row %q", centerRow[4], centerRow)
+	}
+	// Target at dx = +2 (col index 4 + 2 = 6)
+	if centerRow[6] != '+' {
+		t.Errorf("expected target character at dz=0, dx=2 to be '+', got %c in row %q", centerRow[6], centerRow)
+	}
+
+	// Wall at (5, 64, 6) -> dx = 0, dz = +1. Row dz = +1 is index 6. Col dx = 0 is index 4.
+	wallRow := lines[6]
+	if wallRow[4] != 'x' {
+		t.Errorf("expected wall block at dz=+1, dx=0 to be 'x', got %c in row %q", wallRow[4], wallRow)
 	}
 }
