@@ -29,7 +29,7 @@ Before running the bot, configure the `config.json` file in the project root. If
     "reconnect_base_delay_ms": 5000,
     "server_stall_threshold_ms": 250
   },
-  "mine": {
+  "mining": {
     "timeout_sec": 3.0
   }
 }

@@ -235,6 +235,9 @@ func TestLoadConfig_V2CamelCaseMigration(t *testing.T) {
     "walkSpeed": 0.25,
     "renderDistance": 6,
     "serverStallThresholdMs": 300
+  },
+  "mine": {
+    "timeout_sec": 7.5
   }
 }`
 	if err := os.WriteFile(configPath, []byte(rawV2Legacy), 0644); err != nil {
@@ -258,6 +261,9 @@ func TestLoadConfig_V2CamelCaseMigration(t *testing.T) {
 	if cfg.Behaviour.ServerStallThresholdMs != 300 {
 		t.Errorf("expected server_stall_threshold_ms 300, got %d", cfg.Behaviour.ServerStallThresholdMs)
 	}
+	if cfg.Mining.TimeoutSec != 7.5 {
+		t.Errorf("expected mining.timeout_sec 7.5, got %f", cfg.Mining.TimeoutSec)
+	}
 
 	// Verify the disk file was migrated to snake_case layout
 	migratedBytes, err := os.ReadFile(configPath)
@@ -267,6 +273,15 @@ func TestLoadConfig_V2CamelCaseMigration(t *testing.T) {
 	s := string(migratedBytes)
 	if strings.Contains(s, "walkSpeed") || strings.Contains(s, "reconnectBaseDelayMs") {
 		t.Errorf("expected camelCase keys to be migrated away, got: %s", s)
+	}
+	if strings.Contains(s, `"mine":`) {
+		t.Errorf("expected legacy 'mine' key to be migrated away, got: %s", s)
+	}
+	if !strings.Contains(s, `"mining": {`) && !strings.Contains(s, `"mining":`) {
+		t.Errorf("expected 'mining' section in migrated file, got: %s", s)
+	}
+	if !strings.Contains(s, `"timeout_sec": 7.5`) {
+		t.Errorf("expected timeout_sec: 7.5 in migrated file, got: %s", s)
 	}
 	if !strings.Contains(s, `"walk_speed": 0.25`) {
 		t.Errorf("expected walk_speed in migrated file, got: %s", s)

@@ -34,10 +34,13 @@ func OverrideAppearanceOn(sc SkinConfig) bool {
 	return *sc.OverrideAppearance
 }
 
-// MineConfig holds parameters for the mining controller.
-type MineConfig struct {
+// MiningConfig holds parameters for the mining controller.
+type MiningConfig struct {
 	TimeoutSec float64 `json:"timeout_sec" toml:"timeout_sec"`
 }
+
+// MineConfig is an alias for MiningConfig for backward compatibility.
+type MineConfig = MiningConfig
 
 // DefaultRenderDistance is the fallback chunk radius if unspecified or <= 0.
 const DefaultRenderDistance = 4
@@ -64,7 +67,7 @@ type Config struct {
 		ReconnectBaseDelayMs   int     `json:"reconnect_base_delay_ms" toml:"reconnect-base-delay-ms"`
 		ServerStallThresholdMs int     `json:"server_stall_threshold_ms" toml:"server-stall-threshold-ms"`
 	} `json:"behaviour" toml:"behaviour"`
-	Mine             MineConfig `json:"mine" toml:"mine"`
+	Mining           MiningConfig `json:"mining" toml:"mining"`
 }
 
 // FreeMemAfterJoinOn returns true unless explicitly set to false (defaults to true).
@@ -120,8 +123,8 @@ func migrateConfig(cfg Config, fromVer, toVer int) Config {
 			if cfg.Behaviour.ReconnectBaseDelayMs <= 0 {
 				cfg.Behaviour.ReconnectBaseDelayMs = 5000
 			}
-			if cfg.Mine.TimeoutSec <= 0 {
-				cfg.Mine.TimeoutSec = 3.0
+			if cfg.Mining.TimeoutSec <= 0 {
+				cfg.Mining.TimeoutSec = 3.0
 			}
 		case 1:
 			// Migration from v1 to v2: remove legacy target coordinates, unify skin_file
@@ -144,6 +147,7 @@ type legacyBehaviour struct {
 
 type legacyConfig struct {
 	Behaviour legacyBehaviour `json:"behaviour"`
+	Mine      MiningConfig    `json:"mine" toml:"mine"`
 }
 
 // LoadConfig reads config from a JSON or TOML file, validating schema and performing version migrations if needed.
@@ -190,10 +194,14 @@ func LoadConfig(path string) (Config, error) {
 		cfg.Behaviour.ServerStallThresholdMs = leg.Behaviour.ServerStallThresholdMs
 		migrated = true
 	}
+	if leg.Mine.TimeoutSec != 0 && cfg.Mining.TimeoutSec == 0 {
+		cfg.Mining.TimeoutSec = leg.Mine.TimeoutSec
+		migrated = true
+	}
 
 	// Detect presence of legacy keys in JSON to trigger migration even when default values match
 	if !isTOML {
-		legacyKeys := []string{`"walkSpeed"`, `"renderDistance"`, `"reconnectBaseDelayMs"`, `"serverStallThresholdMs"`, `"target"`}
+		legacyKeys := []string{`"walkSpeed"`, `"renderDistance"`, `"reconnectBaseDelayMs"`, `"serverStallThresholdMs"`, `"target"`, `"mine":`, `"mine" :`}
 		for _, k := range legacyKeys {
 			if strings.Contains(string(b), k) {
 				migrated = true
@@ -224,8 +232,8 @@ func LoadConfig(path string) (Config, error) {
 	if cfg.Behaviour.ReconnectBaseDelayMs <= 0 {
 		cfg.Behaviour.ReconnectBaseDelayMs = 5000
 	}
-	if cfg.Mine.TimeoutSec <= 0 {
-		cfg.Mine.TimeoutSec = 3.0
+	if cfg.Mining.TimeoutSec <= 0 {
+		cfg.Mining.TimeoutSec = 3.0
 	}
 
 	if migrated {

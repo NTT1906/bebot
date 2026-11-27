@@ -299,7 +299,7 @@ func SetTracePackets(enabled bool) {
 // New creates and initializes a Bot instance.
 func New(opts Options) *Bot {
 	tracePackets = opts.Debug
-	mineTimeout := opts.Config.Mine.TimeoutSec
+	mineTimeout := opts.Config.Mining.TimeoutSec
 	if mineTimeout <= 0 {
 		mineTimeout = 3.0
 	}

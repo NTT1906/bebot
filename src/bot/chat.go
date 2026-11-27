@@ -807,7 +807,7 @@ func (b *Bot) commandInternal(line string, bypassFocus bool) {
 			}
 			b.mu.Lock()
 			b.mineTimeoutSec = sec
-			b.cfg.Mine.TimeoutSec = sec
+			b.cfg.Mining.TimeoutSec = sec
 			b.mu.Unlock()
 			_ = b.saveConfig()
 			b.reply(fmt.Sprintf("Mine timeout set to %.1fs", sec))
