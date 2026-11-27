@@ -12,7 +12,7 @@ const (
 	CostDrop1        = 1.20  // Falling 1 block
 	CostDrop2        = 1.80  // Falling 2 blocks
 	CostDrop3        = 2.50  // Falling 3 blocks
-	CostWaterPenalty = 3.00  // Swimming drag penalty
+	CostWaterPenalty = 1.00  // Swimming drag penalty (total water walk cost = 2.00)
 )
 
 // cardinalOffsets define the 4 horizontal cardinal directions.

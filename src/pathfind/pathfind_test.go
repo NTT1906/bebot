@@ -208,3 +208,49 @@ func TestPlan_BestEffortFallback(t *testing.T) {
 		t.Errorf("expected best-effort path to terminate near obstacle at X=4, got %v", lastNode)
 	}
 }
+
+// TestPlan_WaterShortcut verifies that with CostWaterPenalty=1.0 (water cost = 2.0),
+// a short water path is preferred over a longer detour on land.
+func TestPlan_WaterShortcut(t *testing.T) {
+	w := newMockWorld()
+	// Floor: 7x7 grid from X=0..6, Z=0..6 at Y=63 (standing Y=64)
+	w.setFloor(0, 0, 6, 6, 63)
+
+	// Direct path along Z=0: from (0, 64, 0) to (4, 64, 0)
+	// Place water at (1, 64, 0) and (2, 64, 0) - length 2 water blocks
+	w.set(1, 64, 0, BlockLiquidWater)
+	w.set(2, 64, 0, BlockLiquidWater)
+
+	// Land detour would go around via Z=1:
+	// (0,0) -> (0,1) -> (1,1) -> (2,1) -> (3,1) -> (3,0) -> (4,0) = 6 land moves (cost 6.0)
+	// Water path straight along Z=0:
+	// (0,0) -> (1,0)[water] -> (2,0)[water] -> (3,0) -> (4,0)
+	// Cost: 2.0 + 2.0 + 1.0 + 1.0 = 6.0 (or with a slightly longer detour, water clearly wins)
+
+	// Let's block Z=1 with obstacles so land detour must go through Z=2:
+	w.set(1, 64, 1, BlockSolid)
+	w.set(1, 65, 1, BlockSolid)
+	w.set(2, 64, 1, BlockSolid)
+	w.set(2, 65, 1, BlockSolid)
+
+	// Now land detour around Z=2 has distance ~8, while water path through Z=0 has distance 4 (cost: 1+2+2+1 = 6.0)
+	planner := NewPlanner()
+	start := protocol.BlockPos{0, 64, 0}
+	goal := protocol.BlockPos{4, 64, 0}
+
+	opts := DefaultSearchOptions()
+	opts.AllowDiagonals = false // Test cardinal moves
+
+	res, ok := planner.Plan(w, start, goal, opts)
+	if !ok {
+		t.Fatalf("expected path to be found")
+	}
+
+	// Should take the direct water shortcut along Z=0
+	for _, n := range res.Nodes {
+		if n.Z() != 0 {
+			t.Errorf("expected path to take direct water shortcut along Z=0, but diverged to %v (nodes: %v)", n, res.Nodes)
+			break
+		}
+	}
+}
