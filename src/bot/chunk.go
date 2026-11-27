@@ -25,15 +25,15 @@ type SubChunkData struct {
 }
 
 // BlockAt returns the runtime ID at local sub-chunk coordinates (0..15).
-// In Minecraft Bedrock Edition, subchunks are stored in XZY format: Index = x | (z << 4) | (y << 8).
+// In Minecraft Bedrock Edition, subchunks are stored in (X << 8) | (Z << 4) | Y format.
 func (s *SubChunkData) BlockAt(x, y, z int32) uint32 {
-	idx := (x & 15) | ((z & 15) << 4) | ((y & 15) << 8)
+	idx := (x&15)<<8 | (z&15)<<4 | (y&15)
 	return s.Blocks[idx]
 }
 
 // SetBlock sets the runtime ID at local sub-chunk coordinates (0..15).
 func (s *SubChunkData) SetBlock(x, y, z int32, runtimeID uint32, layer uint32) {
-	idx := (x & 15) | ((z & 15) << 4) | ((y & 15) << 8)
+	idx := (x&15)<<8 | (z&15)<<4 | (y&15)
 	if layer == 1 {
 		s.Waterlogged[idx] = runtimeID
 		s.HasLayer1 = true
