@@ -173,7 +173,7 @@ func TestSubChunkDataIndexing(t *testing.T) {
 		t.Errorf("expected 500 at (7,8,9), got %d", val)
 	}
 
-	idx := (7 << 8) | (9 << 4) | 8
+	idx := 7 | (9 << 4) | (8 << 8)
 	if sub.Waterlogged[idx] != 999 || !sub.HasLayer1 {
 		t.Errorf("expected layer 1 waterlogged 999 at (7,8,9), got %d", sub.Waterlogged[idx])
 	}
@@ -246,7 +246,7 @@ func TestDecodePalettedSubChunk(t *testing.T) {
 		t.Fatalf("decode failed: %v", err)
 	}
 
-	// Verify the first 4 blocks along Y (blockIndex 0..3)
+	// Verify the first 4 blocks along X (blockIndex 0..3 in Bedrock XZY order)
 	// block 0: (word0 >> 0)&3 = 0 -> palette[0] = 10
 	// block 1: (word0 >> 2)&3 = 1 -> palette[1] = 20
 	// block 2: (word0 >> 4)&3 = 2 -> palette[2] = 30
@@ -254,13 +254,13 @@ func TestDecodePalettedSubChunk(t *testing.T) {
 	if val := sub.BlockAt(0, 0, 0); val != 10 {
 		t.Errorf("block 0: expected 10, got %d", val)
 	}
-	if val := sub.BlockAt(0, 1, 0); val != 20 {
+	if val := sub.BlockAt(1, 0, 0); val != 20 {
 		t.Errorf("block 1: expected 20, got %d", val)
 	}
-	if val := sub.BlockAt(0, 2, 0); val != 30 {
+	if val := sub.BlockAt(2, 0, 0); val != 30 {
 		t.Errorf("block 2: expected 30, got %d", val)
 	}
-	if val := sub.BlockAt(0, 3, 0); val != 40 {
+	if val := sub.BlockAt(3, 0, 0); val != 40 {
 		t.Errorf("block 3: expected 40, got %d", val)
 	}
 }

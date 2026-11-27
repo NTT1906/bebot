@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"math"
 	"math/rand/v2"
 	"net"
 	"runtime"
@@ -263,7 +264,11 @@ DiscoveryLoop:
 	log.Printf("bebot: joined local world %q at %.1f %.1f %.1f entity=%d gamemode=%d\n",
 		game.WorldName, b.pos.X(), b.pos.Y(), b.pos.Z(), b.entityID, game.PlayerGameMode)
 	if b.chunkCache != nil {
-		subPos := protocol.SubChunkPos{int32(b.pos.X()) >> 4, int32(b.pos.Y()) >> 4, int32(b.pos.Z()) >> 4}
+		subPos := protocol.SubChunkPos{
+			int32(math.Floor(float64(b.pos.X()))) >> 4,
+			int32(math.Floor(float64(b.pos.Y()))) >> 4,
+			int32(math.Floor(float64(b.pos.Z()))) >> 4,
+		}
 		b.chunkCache.Enable(subPos)
 		missing := b.chunkCache.MissingOffsets()
 		if len(missing) > 0 {
@@ -489,7 +494,11 @@ func (b *Bot) connect(ctx context.Context) error {
 	log.Printf("bebot: world time: startGameTime=%d dayCycleLockTime=%d doDaylightCycle=%v\n", game.Time, game.DayCycleLockTime, daylightCycle)
 	log.Printf("bebot: joined %s at %.1f %.1f %.1f entity=%d gamemode=%d dimension=%d seed=%d\n", address, b.pos.X(), b.pos.Y(), b.pos.Z(), b.entityID, game.PlayerGameMode, game.Dimension, game.WorldSeed)
 	if b.chunkCache != nil {
-		subPos := protocol.SubChunkPos{int32(b.pos.X()) >> 4, int32(b.pos.Y()) >> 4, int32(b.pos.Z()) >> 4}
+		subPos := protocol.SubChunkPos{
+			int32(math.Floor(float64(b.pos.X()))) >> 4,
+			int32(math.Floor(float64(b.pos.Y()))) >> 4,
+			int32(math.Floor(float64(b.pos.Z()))) >> 4,
+		}
 		b.chunkCache.Enable(subPos)
 		missing := b.chunkCache.MissingOffsets()
 		if len(missing) > 0 {

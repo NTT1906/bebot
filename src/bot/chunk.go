@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"sync"
 
 	"github.com/sandertv/gophertunnel/minecraft/protocol"
@@ -24,14 +25,15 @@ type SubChunkData struct {
 }
 
 // BlockAt returns the runtime ID at local sub-chunk coordinates (0..15).
+// In Minecraft Bedrock Edition, subchunks are stored in XZY format: Index = x | (z << 4) | (y << 8).
 func (s *SubChunkData) BlockAt(x, y, z int32) uint32 {
-	idx := (x&15)<<8 | (z&15)<<4 | (y&15)
+	idx := (x & 15) | ((z & 15) << 4) | ((y & 15) << 8)
 	return s.Blocks[idx]
 }
 
 // SetBlock sets the runtime ID at local sub-chunk coordinates (0..15).
 func (s *SubChunkData) SetBlock(x, y, z int32, runtimeID uint32, layer uint32) {
-	idx := (x&15)<<8 | (z&15)<<4 | (y&15)
+	idx := (x & 15) | ((z & 15) << 4) | ((y & 15) << 8)
 	if layer == 1 {
 		s.Waterlogged[idx] = runtimeID
 		s.HasLayer1 = true
@@ -632,7 +634,11 @@ func (b *Bot) updateChunkCenterIfMoved() {
 	pos := b.pos
 	b.mu.Unlock()
 
-	subPos := protocol.SubChunkPos{int32(pos.X()) >> 4, int32(pos.Y()) >> 4, int32(pos.Z()) >> 4}
+	subPos := protocol.SubChunkPos{
+		int32(math.Floor(float64(pos.X()))) >> 4,
+		int32(math.Floor(float64(pos.Y()))) >> 4,
+		int32(math.Floor(float64(pos.Z()))) >> 4,
+	}
 	if subPos != b.chunkCache.Center() {
 		b.chunkCache.ShiftCenter(subPos)
 		missing := b.chunkCache.MissingOffsets()
