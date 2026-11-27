@@ -17,10 +17,10 @@ const CurrentConfigVersion = 2
 
 // SkinConfig holds the bot's skin in a dedicated skin.json file.
 type SkinConfig struct {
-	Type               string `json:"type" toml:"type"`                                             // "slim", "normal"/"wide", "pack"/"custom"
-	Path               string `json:"path" toml:"path"`                                             // PNG file (slim/normal) or skin pack folder (pack/custom)
-	Skin               string `json:"skin" toml:"skin"`                                             // skin id/index in the pack (pack/custom)
-	OverrideAppearance *bool  `json:"overrideAppearance,omitempty" toml:"override-appearance,omitempty"` // nil defaults to true
+	Type               string `json:"type" toml:"type"`                                               // "slim", "normal"/"wide", "pack"/"custom"
+	Path               string `json:"path" toml:"path"`                                               // PNG file (slim/normal) or skin pack folder (pack/custom)
+	Skin               string `json:"skin" toml:"skin"`                                               // skin id/index in the pack (pack/custom)
+	OverrideAppearance *bool  `json:"override_appearance,omitempty" toml:"override-appearance,omitempty"` // nil defaults to true
 }
 
 // DefaultSkinConfig is what "skin default" restores: the standard slim skin.
@@ -49,21 +49,21 @@ const DefaultServerStallThresholdMs = 250
 type Config struct {
 	Version          int        `json:"version" toml:"version"`
 	Superuser        string     `json:"superuser" toml:"superuser"`
-	BlockPalettePath string     `json:"block_palette_path,omitempty" toml:"block-palette-path,omitempty"`
+	CommandsViaChat  *bool      `json:"commands_via_chat,omitempty" toml:"commands-via-chat,omitempty"`
 	FreeMemAfterJoin *bool      `json:"free_mem_after_join,omitempty" toml:"free-mem-after-join,omitempty"`
 	Server           struct {
 		Host string `json:"host" toml:"host"`
 		Port int    `json:"port" toml:"port"`
 	} `json:"server" toml:"server"`
-	Behaviour struct {
-		ReconnectBaseDelayMs   int     `json:"reconnectBaseDelayMs" toml:"reconnect-base-delay-ms"`
-		WalkSpeed              float32 `json:"walkSpeed" toml:"walk-speed"`
-		RenderDistance         int32   `json:"renderDistance" toml:"render-distance"`
-		ServerStallThresholdMs int     `json:"serverStallThresholdMs" toml:"server-stall-threshold-ms"`
-	} `json:"behaviour" toml:"behaviour"`
-	CommandsViaChat  *bool      `json:"commands_via_chat,omitempty" toml:"commands-via-chat,omitempty"`
 	SkinFile         string     `json:"skin_file,omitempty" toml:"skin-file,omitempty"`
 	Skin             SkinConfig `json:"skin,omitempty" toml:"skin,omitempty"`
+	BlockPalettePath string     `json:"block_palette_path,omitempty" toml:"block-palette-path,omitempty"`
+	Behaviour        struct {
+		WalkSpeed              float32 `json:"walk_speed" toml:"walk-speed"`
+		RenderDistance         int32   `json:"render_distance" toml:"render-distance"`
+		ReconnectBaseDelayMs   int     `json:"reconnect_base_delay_ms" toml:"reconnect-base-delay-ms"`
+		ServerStallThresholdMs int     `json:"server_stall_threshold_ms" toml:"server-stall-threshold-ms"`
+	} `json:"behaviour" toml:"behaviour"`
 	Mine             MineConfig `json:"mine" toml:"mine"`
 }
 
@@ -129,9 +129,21 @@ func migrateConfig(cfg Config, fromVer, toVer int) Config {
 			if cfg.SkinFile == "" && cfg.Skin.Path != "" {
 				cfg.SkinFile = "data/skin.json"
 			}
+			cfg.Skin = SkinConfig{} // clear legacy embedded skin once unified
 		}
 	}
 	return cfg
+}
+
+type legacyBehaviour struct {
+	WalkSpeed              float32 `json:"walkSpeed" toml:"walkSpeed"`
+	RenderDistance         int32   `json:"renderDistance" toml:"renderDistance"`
+	ReconnectBaseDelayMs   int     `json:"reconnectBaseDelayMs" toml:"reconnectBaseDelayMs"`
+	ServerStallThresholdMs int     `json:"serverStallThresholdMs" toml:"serverStallThresholdMs"`
+}
+
+type legacyConfig struct {
+	Behaviour legacyBehaviour `json:"behaviour"`
 }
 
 // LoadConfig reads config from a JSON or TOML file, validating schema and performing version migrations if needed.
@@ -141,7 +153,8 @@ func LoadConfig(path string) (Config, error) {
 	if err != nil {
 		return cfg, err
 	}
-	if strings.HasSuffix(strings.ToLower(path), ".toml") {
+	isTOML := strings.HasSuffix(strings.ToLower(path), ".toml")
+	if isTOML {
 		if err := toml.Unmarshal(b, &cfg); err != nil {
 			return cfg, err
 		}
@@ -152,6 +165,43 @@ func LoadConfig(path string) (Config, error) {
 	}
 
 	migrated := false
+
+	// Legacy camelCase migration: if older keys are present, copy to snake_case fields.
+	var leg legacyConfig
+	if isTOML {
+		_ = toml.Unmarshal(b, &leg)
+	} else {
+		_ = json.Unmarshal(b, &leg)
+	}
+
+	if leg.Behaviour.WalkSpeed != 0 && cfg.Behaviour.WalkSpeed == 0 {
+		cfg.Behaviour.WalkSpeed = leg.Behaviour.WalkSpeed
+		migrated = true
+	}
+	if leg.Behaviour.RenderDistance != 0 && cfg.Behaviour.RenderDistance == 0 {
+		cfg.Behaviour.RenderDistance = leg.Behaviour.RenderDistance
+		migrated = true
+	}
+	if leg.Behaviour.ReconnectBaseDelayMs != 0 && cfg.Behaviour.ReconnectBaseDelayMs == 0 {
+		cfg.Behaviour.ReconnectBaseDelayMs = leg.Behaviour.ReconnectBaseDelayMs
+		migrated = true
+	}
+	if leg.Behaviour.ServerStallThresholdMs != 0 && cfg.Behaviour.ServerStallThresholdMs == 0 {
+		cfg.Behaviour.ServerStallThresholdMs = leg.Behaviour.ServerStallThresholdMs
+		migrated = true
+	}
+
+	// Detect presence of legacy keys in JSON to trigger migration even when default values match
+	if !isTOML {
+		legacyKeys := []string{`"walkSpeed"`, `"renderDistance"`, `"reconnectBaseDelayMs"`, `"serverStallThresholdMs"`, `"target"`}
+		for _, k := range legacyKeys {
+			if strings.Contains(string(b), k) {
+				migrated = true
+				break
+			}
+		}
+	}
+
 	if cfg.Version < CurrentConfigVersion {
 		migrated = true
 		cfg = migrateConfig(cfg, cfg.Version, CurrentConfigVersion)
@@ -206,6 +256,10 @@ func SaveConfig(path string, cfg Config) error {
 	return os.WriteFile(path, data, 0644)
 }
 
+type legacySkinConfig struct {
+	OverrideAppearance *bool `json:"overrideAppearance"`
+}
+
 // LoadSkin reads the bot's skin config from its dedicated skin.json file.
 func LoadSkin(path string) (SkinConfig, error) {
 	var sc SkinConfig
@@ -222,6 +276,13 @@ func LoadSkin(path string) (SkinConfig, error) {
 	}
 	if err := json.Unmarshal(b, &sc); err != nil {
 		return sc, err
+	}
+	// Migrate legacy camelCase overrideAppearance if needed
+	if sc.OverrideAppearance == nil {
+		var leg legacySkinConfig
+		if json.Unmarshal(b, &leg) == nil && leg.OverrideAppearance != nil {
+			sc.OverrideAppearance = leg.OverrideAppearance
+		}
 	}
 	if sc.Type == "" {
 		sc.Type = DefaultSkinConfig.Type

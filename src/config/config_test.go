@@ -44,7 +44,18 @@ func TestLoadConfig_UnversionedMigration(t *testing.T) {
 		t.Errorf("expected default renderDistance %d, got %d", DefaultRenderDistance, cfg.Behaviour.RenderDistance)
 	}
 
-	// Verify the file was upgraded on disk
+	// Verify the file was upgraded on disk with snake_case layout
+	diskData, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("failed to read upgraded config: %v", err)
+	}
+	if strings.Contains(string(diskData), `"walkSpeed"`) {
+		t.Errorf("expected legacy walkSpeed to be removed from disk, got: %s", string(diskData))
+	}
+	if !strings.Contains(string(diskData), `"walk_speed": 0.2`) {
+		t.Errorf("expected walk_speed: 0.2 in upgraded file, got: %s", string(diskData))
+	}
+
 	reloaded, err := LoadConfig(configPath)
 	if err != nil {
 		t.Fatalf("reloading upgraded config failed: %v", err)
@@ -195,13 +206,73 @@ func TestLoadConfig_V1toV2Migration(t *testing.T) {
 		t.Errorf("expected skin_file to be data/skin.json, got %s", cfg.SkinFile)
 	}
 
-	// Verify migrated file content on disk has version 2
+	// Verify migrated file content on disk has version 2 and clean snake_case layout
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatalf("failed to read migrated file: %v", err)
 	}
 	if !strings.Contains(string(data), `"version": 2`) {
 		t.Errorf("expected file on disk to be updated to version 2, got: %s", string(data))
+	}
+	if strings.Contains(string(data), `"target"`) {
+		t.Errorf("expected target to be removed from disk, got: %s", string(data))
+	}
+}
+
+func TestLoadConfig_V2CamelCaseMigration(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config_v2_legacy.json")
+
+	rawV2Legacy := `{
+  "version": 2,
+  "superuser": "TesterV2",
+  "server": {
+    "host": "127.0.0.1",
+    "port": 19132
+  },
+  "behaviour": {
+    "reconnectBaseDelayMs": 3000,
+    "walkSpeed": 0.25,
+    "renderDistance": 6,
+    "serverStallThresholdMs": 300
+  }
+}`
+	if err := os.WriteFile(configPath, []byte(rawV2Legacy), 0644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+
+	if cfg.Behaviour.WalkSpeed != 0.25 {
+		t.Errorf("expected walk_speed 0.25, got %f", cfg.Behaviour.WalkSpeed)
+	}
+	if cfg.Behaviour.RenderDistance != 6 {
+		t.Errorf("expected render_distance 6, got %d", cfg.Behaviour.RenderDistance)
+	}
+	if cfg.Behaviour.ReconnectBaseDelayMs != 3000 {
+		t.Errorf("expected reconnect_base_delay_ms 3000, got %d", cfg.Behaviour.ReconnectBaseDelayMs)
+	}
+	if cfg.Behaviour.ServerStallThresholdMs != 300 {
+		t.Errorf("expected server_stall_threshold_ms 300, got %d", cfg.Behaviour.ServerStallThresholdMs)
+	}
+
+	// Verify the disk file was migrated to snake_case layout
+	migratedBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("failed to read migrated file: %v", err)
+	}
+	s := string(migratedBytes)
+	if strings.Contains(s, "walkSpeed") || strings.Contains(s, "reconnectBaseDelayMs") {
+		t.Errorf("expected camelCase keys to be migrated away, got: %s", s)
+	}
+	if !strings.Contains(s, `"walk_speed": 0.25`) {
+		t.Errorf("expected walk_speed in migrated file, got: %s", s)
+	}
+	if !strings.Contains(s, `"render_distance": 6`) {
+		t.Errorf("expected render_distance in migrated file, got: %s", s)
 	}
 }
 

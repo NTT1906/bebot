@@ -16,17 +16,19 @@ Before running the bot, configure the `config.json` file in the project root. If
   "version": 2,
   "superuser": "YourUsername",
   "_comment_superuser": "Only this player can control the bot via chat commands.",
+  "commands_via_chat": false,
+  "free_mem_after_join": true,
   "server": {
     "host": "your.server.ip",
     "port": 19132
   },
   "skin_file": "data/skin.json",
   "behaviour": {
-    "reconnectBaseDelayMs": 5000,
-    "walkSpeed": 0.15,
-    "renderDistance": 5
+    "walk_speed": 0.15,
+    "render_distance": 5,
+    "reconnect_base_delay_ms": 5000,
+    "server_stall_threshold_ms": 250
   },
-  "commands_via_chat": false,
   "mine": {
     "timeout_sec": 3.0
   }
