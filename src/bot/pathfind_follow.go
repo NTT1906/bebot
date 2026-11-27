@@ -104,10 +104,15 @@ func (b *Bot) startPath(target protocol.BlockPos, playerName string) {
 	b.lookAtTarget = ""
 	b.lookAtPos = nil
 
-	// Set immediate target to first node
-	firstWP := res.Nodes[0]
+	// If starting node is already occupied by the bot, start navigating directly towards the next waypoint
+	wpIdx := 0
+	if len(res.Nodes) > 1 {
+		wpIdx = 1
+	}
+	b.pathIndex = wpIdx
+	curWP := res.Nodes[wpIdx]
 	eyeOff := botEyeOffset(b.pos)
-	b.moveTarget = mgl32.Vec3{float32(firstWP.X()) + 0.5, float32(firstWP.Y()) + eyeOff, float32(firstWP.Z()) + 0.5}
+	b.moveTarget = mgl32.Vec3{float32(curWP.X()) + 0.5, float32(curWP.Y()) + eyeOff, float32(curWP.Z()) + 0.5}
 	b.mu.Unlock()
 
 	if res.ReachedGoal {
@@ -176,8 +181,15 @@ func (b *Bot) pathFollowTick(c *minecraft.Conn) (jump bool, replyMsg string) {
 				if len(res.Nodes) > 0 && b.pathActive {
 					b.pathNodes = res.Nodes
 					b.pathMoves = res.Moves
-					b.pathIndex = 0
+					wpIdx := 0
+					if len(res.Nodes) > 1 {
+						wpIdx = 1
+					}
+					b.pathIndex = wpIdx
 					b.pathStuckTicks = 0
+					curWP := res.Nodes[wpIdx]
+					replanEyeOff := botEyeOffset(b.pos)
+					b.moveTarget = mgl32.Vec3{float32(curWP.X()) + 0.5, float32(curWP.Y()) + replanEyeOff, float32(curWP.Z()) + 0.5}
 				}
 			}
 		}
@@ -198,8 +210,8 @@ func (b *Bot) pathFollowTick(c *minecraft.Conn) (jump bool, replyMsg string) {
 	hDist := float32(math.Sqrt(float64(dx*dx + dz*dz)))
 	vDist := float32(math.Abs(float64(dy)))
 
-	// Check if waypoint reached: horizontal < 0.35 blocks and vertical < 0.8 blocks
-	if hDist < 0.35 && vDist < 0.8 {
+	// Check if waypoint reached: horizontal < 0.45 blocks and vertical < 0.8 blocks
+	if hDist < 0.45 && vDist < 0.8 {
 		b.pathIndex++
 		if b.pathIndex >= len(b.pathNodes) {
 			return b.onSegmentCompleteLocked()
@@ -256,10 +268,14 @@ func (b *Bot) pathFollowTick(c *minecraft.Conn) (jump bool, replyMsg string) {
 		if len(res.Nodes) > 0 && b.pathActive {
 			b.pathNodes = res.Nodes
 			b.pathMoves = res.Moves
-			b.pathIndex = 0
-			firstWP := res.Nodes[0]
+			wpIdx := 0
+			if len(res.Nodes) > 1 {
+				wpIdx = 1
+			}
+			b.pathIndex = wpIdx
+			curWP := res.Nodes[wpIdx]
 			replanEyeOff := botEyeOffset(b.pos)
-			b.moveTarget = mgl32.Vec3{float32(firstWP.X()) + 0.5, float32(firstWP.Y()) + replanEyeOff, float32(firstWP.Z()) + 0.5}
+			b.moveTarget = mgl32.Vec3{float32(curWP.X()) + 0.5, float32(curWP.Y()) + replanEyeOff, float32(curWP.Z()) + 0.5}
 			b.mu.Unlock()
 			return jump, ""
 		} else {
@@ -323,11 +339,11 @@ func (b *Bot) onSegmentCompleteLocked() (jump bool, replyMsg string) {
 	if len(nextRes.Nodes) > 1 && b.pathActive {
 		b.pathNodes = nextRes.Nodes
 		b.pathMoves = nextRes.Moves
-		b.pathIndex = 0
+		b.pathIndex = 1
 		b.pathStuckTicks = 0
-		firstWP := nextRes.Nodes[0]
+		nextWP := nextRes.Nodes[1]
 		eyeOff := botEyeOffset(b.pos)
-		b.moveTarget = mgl32.Vec3{float32(firstWP.X()) + 0.5, float32(firstWP.Y()) + eyeOff, float32(firstWP.Z()) + 0.5}
+		b.moveTarget = mgl32.Vec3{float32(nextWP.X()) + 0.5, float32(nextWP.Y()) + eyeOff, float32(nextWP.Z()) + 0.5}
 		b.mu.Unlock()
 
 		if nextRes.ReachedGoal {

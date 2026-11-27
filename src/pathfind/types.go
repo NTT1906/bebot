@@ -82,7 +82,7 @@ func DefaultSearchOptions() SearchOptions {
 	return SearchOptions{
 		MaxNodes:       5000,
 		Timeout:        50 * time.Millisecond,
-		AllowDiagonals: true,
+		AllowDiagonals: false, // Cardinal-only navigation prevents 0.6x0.6 bounding box from cutting into wall corners
 		AllowDrops:     true,
 	}
 }

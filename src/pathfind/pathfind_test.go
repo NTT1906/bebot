@@ -104,7 +104,9 @@ func TestPlan_CornerClearance(t *testing.T) {
 	w.set(1, 64, 2, BlockSolid)
 	w.set(1, 65, 2, BlockSolid)
 
-	neighbors := GetNeighbors(w, protocol.BlockPos{1, 64, 1}, DefaultSearchOptions())
+	opts := DefaultSearchOptions()
+	opts.AllowDiagonals = true
+	neighbors := GetNeighbors(w, protocol.BlockPos{1, 64, 1}, opts)
 	for _, m := range neighbors {
 		if m.To == (protocol.BlockPos{2, 64, 2}) {
 			t.Fatalf("illegal diagonal corner cut allowed: %+v", m)
