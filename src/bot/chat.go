@@ -1045,7 +1045,13 @@ func (b *Bot) commandInternal(line string, bypassFocus bool) {
 		target := b.pathTargetPos
 		b.mu.Unlock()
 		wv := NewBotWorldView(b)
-		feetMap := formatFeetDebugMap(wv, vec3ToBlockPos(botPos), target)
+		feetPos := vec3ToBlockPos(botPos)
+		if len(p) > 1 {
+			if customY, err := strconv.ParseInt(p[1], 10, 32); err == nil {
+				feetPos = protocol.BlockPos{feetPos.X(), int32(customY), feetPos.Z()}
+			}
+		}
+		feetMap := formatFeetDebugMap(wv, feetPos, target)
 		b.reply(feetMap)
 	case "move":
 		if len(p) < 4 {
