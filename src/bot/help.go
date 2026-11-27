@@ -10,6 +10,7 @@ import (
 var commandHelpDocs = map[string]string{
 	"goto": `§6=== Help: goto / pathfind ===§r
 Description: Autonomous 3D pathfinding to coordinates or a player, navigating around obstacles, climbing steps, and avoiding hazards.
+Requires the block palette and chunk data: run 'palette load' and 'chunk load' if either is reported as unloaded.
 Aliases: pathfind
 Syntax: goto <x y z> | goto <player> | goto stop
 Examples:

@@ -67,19 +67,14 @@ func (p *Planner) Plan(w WorldView, start, goal protocol.BlockPos, opts SearchOp
 		}, true
 	}
 
-	if opts.MaxNodes <= 0 {
-		opts.MaxNodes = 5000
-	}
-	if opts.Timeout <= 0 {
-		opts.Timeout = 50 * time.Millisecond
-	}
+	opts = opts.normalized()
 
 	deadline := time.Now().Add(opts.Timeout)
 
 	// Records lookup table to track open/closed nodes
 	records := make(map[protocol.BlockPos]*nodeRecord, 256)
 
-	startH := Octile3D(start, goal)
+	startH := opts.Weights.Heuristic(start, goal)
 	startNode := &nodeRecord{
 		pos:   start,
 		g:     0,
@@ -126,7 +121,7 @@ func (p *Planner) Plan(w WorldView, start, goal protocol.BlockPos, opts SearchOp
 
 			rec, exists := records[nextPos]
 			if !exists {
-				nextH := Octile3D(nextPos, goal)
+				nextH := opts.Weights.Heuristic(nextPos, goal)
 				rec = &nodeRecord{
 					pos:    nextPos,
 					g:      tentativeG,

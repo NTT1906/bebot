@@ -368,3 +368,75 @@ func TestResolveSkinConfig_DirectPNGAndJSON(t *testing.T) {
 		t.Errorf("expected save path %s, got %s", missingDefault, savePathLegacy)
 	}
 }
+
+func TestFeatureToggleDefaults(t *testing.T) {
+	cfg := Config{}
+	if !PaletteLoadOn(cfg) {
+		t.Error("palette_load should default to true")
+	}
+	if ChunkLoadOn(cfg) {
+		t.Error("chunk_load should default to false")
+	}
+	if PathfindingAutoLoadOn(cfg) {
+		t.Error("pathfinding.auto_load should default to false")
+	}
+	if PathfindingAllowDiagonalsOn(cfg) {
+		t.Error("pathfinding.allow_diagonals should default to false")
+	}
+	if !PathfindingAllowDropsOn(cfg) {
+		t.Error("pathfinding.allow_drops should default to true")
+	}
+}
+
+func TestPathfindingConfigParsingAndWeights(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.json")
+	raw := `{
+  "version": 2,
+  "superuser": "Tester",
+  "server": {"host": "127.0.0.1", "port": 19132},
+  "behaviour": {
+    "palette_load": false,
+    "chunk_load": true,
+    "pathfinding": {
+      "auto_load": true,
+      "max_nodes": 900,
+      "timeout_ms": 120,
+      "allow_diagonals": true,
+      "allow_drops": false,
+      "weights": {"step_up": 2.5, "water_penalty": 0.35, "vertical": 3}
+    }
+  }
+}`
+	if err := os.WriteFile(configPath, []byte(raw), 0644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+	if PaletteLoadOn(cfg) || !ChunkLoadOn(cfg) || !PathfindingAutoLoadOn(cfg) {
+		t.Fatalf("unexpected feature toggles: palette=%v chunk=%v auto=%v",
+			PaletteLoadOn(cfg), ChunkLoadOn(cfg), PathfindingAutoLoadOn(cfg))
+	}
+	pf := cfg.Behaviour.Pathfinding
+	if pf.MaxNodes != 900 || pf.TimeoutMs != 120 {
+		t.Fatalf("unexpected search limits: %+v", pf)
+	}
+	if !PathfindingAllowDiagonalsOn(cfg) || PathfindingAllowDropsOn(cfg) {
+		t.Fatalf("unexpected move toggles: diagonals=%v drops=%v",
+			PathfindingAllowDiagonalsOn(cfg), PathfindingAllowDropsOn(cfg))
+	}
+
+	w := pf.Weights.Sanitized()
+	d := DefaultPathfindingWeights()
+	if w.StepUp != 2.5 || w.Vertical != 3 {
+		t.Errorf("explicit weights were not kept: %+v", w)
+	}
+	if w.WalkCardinal != d.WalkCardinal || w.Drop2 != d.Drop2 {
+		t.Errorf("unset weights should fall back to defaults: %+v", w)
+	}
+	if w.WaterPenalty != 0.35 {
+		t.Errorf("explicit water penalty should be kept, got %v", w.WaterPenalty)
+	}
+}

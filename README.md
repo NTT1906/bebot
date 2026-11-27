@@ -28,7 +28,26 @@ Before running the bot, configure the `config.json` file in the project root. If
     "walk_speed": 0.15,
     "render_distance": 5,
     "reconnect_base_delay_ms": 5000,
-    "server_stall_threshold_ms": 250
+    "server_stall_threshold_ms": 250,
+    "palette_load": true,
+    "chunk_load": false,
+    "pathfinding": {
+      "auto_load": false,
+      "max_nodes": 5000,
+      "timeout_ms": 50,
+      "allow_diagonals": false,
+      "allow_drops": true,
+      "weights": {
+        "walk_cardinal": 1.0,
+        "walk_diagonal": 1.414,
+        "step_up": 1.6,
+        "drop_1": 1.1,
+        "drop_2": 1.6,
+        "drop_3": 2.2,
+        "water_penalty": 0.2,
+        "vertical": 1.2
+      }
+    }
   },
   "mining": {
     "timeout_sec": 3.0
@@ -40,6 +59,9 @@ Before running the bot, configure the `config.json` file in the project root. If
 - **`server`**: Set the `host`, `port`, and expected bedrock `version` of the server.
 - **`skin`**: Set a custom skin. You can define the type (`slim`, `normal`) and point to a local `.png` or folder path.
 - **`behaviour`**: Tweaks for how the bot operates in-game (like how often to jump to prevent AFK kicks).
+  * `palette_load` (default `true`): load the block palette on join. If `false`, run `bebot palette load` before using commands that resolve block names or pathfind.
+  * `chunk_load` (default `false`): enable the local 3x3x3 sub-chunk window on join. If `false`, run `bebot chunk load` before `goto`/`inspect`.
+  * `pathfinding`: A* tuning. `auto_load` (default `false`) lets `goto` load a missing palette/chunk window on demand; otherwise it reports what to load. `max_nodes` and `timeout_ms` bound the search; `allow_diagonals` (default `false`) and `allow_drops` (default `true`) control move types. `weights` overrides relative move costs (`walk_cardinal`, `walk_diagonal`, `step_up`, `drop_1`, `drop_2`, `drop_3`, `water_penalty`, `vertical`); omitted or non-positive values use the built-in defaults.
 
 ## Usage
 
@@ -128,7 +150,7 @@ Commands can be typed directly into the bot's terminal console or sent via in-ga
 
 ### 2. Movement & Player Interaction
 
-* **`goto <x y z>`** *(Alias: `pathfind`)*: Autonomous 3D voxel pathfinding to target coordinates, navigating around obstacles, stepping up elevation, descending safe ledges, and avoiding hazards.
+* **`goto <x y z>`** *(Alias: `pathfind`)*: Autonomous 3D voxel pathfinding to target coordinates, navigating around obstacles, stepping up elevation, descending safe ledges, and avoiding hazards. Requires the block palette and chunk data to be loaded (`bebot palette load` / `bebot chunk load` when `behaviour.palette_load` or `behaviour.chunk_load` are disabled); `goto` reports every missing prerequisite.
 * **`goto <player>`**: Finds designated player on the server and pathfinds to their position with dynamic tracking.
 * **`stoppath`** *(Aliases: `cancelpath`, `goto stop`)*: Aborts active 3D pathfinding navigation.
 * **`move <x> <y> <z>`**: Straight-line vector movement to the specified target coordinates (without obstacle avoidance).

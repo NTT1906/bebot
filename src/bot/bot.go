@@ -259,6 +259,47 @@ type Bot struct {
 	pathTargetMinDist float64
 	pathLastPos       mgl32.Vec3
 	pathPlanner       *pathfind.Planner
+	pathOptions       *pathfind.SearchOptions
+}
+
+// pathSearchOptions returns the configured A* search options, falling back to
+// built-in defaults for bots constructed without a config (e.g. unit tests).
+func (b *Bot) pathSearchOptions() pathfind.SearchOptions {
+	if b.pathOptions == nil {
+		return pathfind.DefaultSearchOptions()
+	}
+	return *b.pathOptions
+}
+
+// pathSearchOptionsFromConfig converts behaviour.pathfinding into engine options.
+func pathSearchOptionsFromConfig(cfg config.Config) pathfind.SearchOptions {
+	pf := cfg.Behaviour.Pathfinding
+	opts := pathfind.DefaultSearchOptions()
+	if pf.MaxNodes > 0 {
+		opts.MaxNodes = pf.MaxNodes
+	}
+	if pf.TimeoutMs > 0 {
+		opts.Timeout = time.Duration(pf.TimeoutMs) * time.Millisecond
+	}
+	if pf.AllowDiagonals != nil {
+		opts.AllowDiagonals = *pf.AllowDiagonals
+	}
+	if pf.AllowDrops != nil {
+		opts.AllowDrops = *pf.AllowDrops
+	}
+
+	w := pf.Weights.Sanitized()
+	opts.Weights = pathfind.Weights{
+		WalkCardinal: w.WalkCardinal,
+		WalkDiagonal: w.WalkDiagonal,
+		StepUp:       w.StepUp,
+		Drop1:        w.Drop1,
+		Drop2:        w.Drop2,
+		Drop3:        w.Drop3,
+		WaterPenalty: w.WaterPenalty,
+		Vertical:     w.Vertical,
+	}
+	return opts
 }
 
 // ServerStallThreshold returns the configured duration without server packets before considering the server stalled.
@@ -371,6 +412,8 @@ func New(opts Options) *Bot {
 		blockPalettePath:          palettePath,
 	}
 	b.pathPlanner = pathfind.NewPlanner()
+	pathOpts := pathSearchOptionsFromConfig(opts.Config)
+	b.pathOptions = &pathOpts
 	return b
 }
 

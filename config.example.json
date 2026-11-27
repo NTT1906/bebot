@@ -13,7 +13,26 @@
     "walk_speed": 0.15,
     "render_distance": 4,
     "reconnect_base_delay_ms": 5000,
-    "server_stall_threshold_ms": 250
+    "server_stall_threshold_ms": 250,
+    "palette_load": true,
+    "chunk_load": false,
+    "pathfinding": {
+      "auto_load": false,
+      "max_nodes": 5000,
+      "timeout_ms": 50,
+      "allow_diagonals": false,
+      "allow_drops": true,
+      "weights": {
+        "walk_cardinal": 1.0,
+        "walk_diagonal": 1.414,
+        "step_up": 1.6,
+        "drop_1": 1.1,
+        "drop_2": 1.6,
+        "drop_3": 2.2,
+        "water_penalty": 0.2,
+        "vertical": 1.2
+      }
+    }
   },
   "mining": {
     "timeout_sec": 3.0

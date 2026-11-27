@@ -42,10 +42,10 @@ func isStandableSurface(t BlockType) bool {
 }
 
 // isStandingPosValid checks whether a coordinate satisfies player navigation:
-// 1. Feet voxel is passable (BlockAir or BlockLiquidWater)
-// 2. Head voxel (Y+1) is passable (BlockAir or BlockLiquidWater)
-// 3. If feet is in water, player can float/swim regardless of water depth.
-//    If feet is in air, floor voxel (Y-1) must be solid ground.
+//  1. Feet voxel is passable (BlockAir or BlockLiquidWater)
+//  2. Head voxel (Y+1) is passable (BlockAir or BlockLiquidWater)
+//  3. If feet is in water, player can float/swim regardless of water depth.
+//     If feet is in air, floor voxel (Y-1) must be solid ground.
 func isStandingPosValid(w WorldView, pos protocol.BlockPos) bool {
 	feet := w.GetBlockType(pos)
 	if !isPassable(feet) {
@@ -64,6 +64,8 @@ func isStandingPosValid(w WorldView, pos protocol.BlockPos) bool {
 
 // GetNeighbors computes all physically legal moves from the current standing voxel.
 func GetNeighbors(w WorldView, curr protocol.BlockPos, opts SearchOptions) []Move {
+	costs := opts.Weights.normalized()
+
 	// Pre-allocate buffer for maximum expected transitions:
 	// 4 cardinal + 4 diagonal + 4 step-up + 12 drops = 24 moves
 	moves := make([]Move, 0, 24)
@@ -82,9 +84,9 @@ func GetNeighbors(w WorldView, curr protocol.BlockPos, opts SearchOptions) []Mov
 
 		// A. Level Cardinal Walk (Y = 0)
 		if isStandingPosValid(w, targetLevel) {
-			cost := CostWalkCardinal
+			cost := costs.WalkCardinal
 			if w.GetBlockType(targetLevel) == BlockLiquidWater {
-				cost += CostWaterPenalty
+				cost += costs.WaterPenalty
 			}
 			moves = append(moves, Move{
 				From: curr,
@@ -108,7 +110,7 @@ func GetNeighbors(w WorldView, curr protocol.BlockPos, opts SearchOptions) []Mov
 						From: curr,
 						To:   targetUp,
 						Type: MoveStepUp,
-						Cost: CostStepUp,
+						Cost: costs.StepUp,
 					})
 				}
 			}
@@ -134,14 +136,14 @@ func GetNeighbors(w WorldView, curr protocol.BlockPos, opts SearchOptions) []Mov
 							var dropCost float64
 							switch drop {
 							case 1:
-								dropCost = CostDrop1
+								dropCost = costs.Drop1
 							case 2:
-								dropCost = CostDrop2
+								dropCost = costs.Drop2
 							case 3:
-								dropCost = CostDrop3
+								dropCost = costs.Drop3
 							}
 							if dropType == BlockLiquidWater {
-								dropCost += CostWaterPenalty
+								dropCost += costs.WaterPenalty
 							}
 							moves = append(moves, Move{
 								From: curr,
@@ -181,9 +183,9 @@ func GetNeighbors(w WorldView, curr protocol.BlockPos, opts SearchOptions) []Mov
 
 				if isPassable(cardinalAFeet) && isPassable(cardinalAHead) &&
 					isPassable(cardinalBFeet) && isPassable(cardinalBHead) {
-					cost := CostWalkDiagonal
+					cost := costs.WalkDiagonal
 					if w.GetBlockType(targetDiag) == BlockLiquidWater {
-						cost += CostWaterPenalty
+						cost += costs.WaterPenalty
 					}
 					moves = append(moves, Move{
 						From: curr,

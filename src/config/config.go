@@ -17,9 +17,9 @@ const CurrentConfigVersion = 2
 
 // SkinConfig holds the bot's skin in a dedicated skin.json file.
 type SkinConfig struct {
-	Type               string `json:"type" toml:"type"`                                               // "slim", "normal"/"wide", "pack"/"custom"
-	Path               string `json:"path" toml:"path"`                                               // PNG file (slim/normal) or skin pack folder (pack/custom)
-	Skin               string `json:"skin" toml:"skin"`                                               // skin id/index in the pack (pack/custom)
+	Type               string `json:"type" toml:"type"`                                                   // "slim", "normal"/"wide", "pack"/"custom"
+	Path               string `json:"path" toml:"path"`                                                   // PNG file (slim/normal) or skin pack folder (pack/custom)
+	Skin               string `json:"skin" toml:"skin"`                                                   // skin id/index in the pack (pack/custom)
 	OverrideAppearance *bool  `json:"override_appearance,omitempty" toml:"override-appearance,omitempty"` // nil defaults to true
 }
 
@@ -42,6 +42,76 @@ type MiningConfig struct {
 // MineConfig is an alias for MiningConfig for backward compatibility.
 type MineConfig = MiningConfig
 
+// PathfindingWeights controls the relative cost of navigation moves.
+// Zero or negative values fall back to the built-in defaults, so partial
+// overrides are safe. Keep these defaults in sync with pathfind.DefaultWeights.
+type PathfindingWeights struct {
+	WalkCardinal float64 `json:"walk_cardinal" toml:"walk-cardinal"`
+	WalkDiagonal float64 `json:"walk_diagonal" toml:"walk-diagonal"`
+	StepUp       float64 `json:"step_up" toml:"step-up"`
+	Drop1        float64 `json:"drop_1" toml:"drop-1"`
+	Drop2        float64 `json:"drop_2" toml:"drop-2"`
+	Drop3        float64 `json:"drop_3" toml:"drop-3"`
+	WaterPenalty float64 `json:"water_penalty" toml:"water-penalty"`
+	Vertical     float64 `json:"vertical" toml:"vertical"`
+}
+
+// DefaultPathfindingWeights returns the built-in move costs.
+func DefaultPathfindingWeights() PathfindingWeights {
+	return PathfindingWeights{
+		WalkCardinal: 1.00,
+		WalkDiagonal: 1.41421356237309504880,
+		StepUp:       1.60,
+		Drop1:        1.10,
+		Drop2:        1.60,
+		Drop3:        2.20,
+		WaterPenalty: 0.20,
+		Vertical:     1.20,
+	}
+}
+
+// Sanitized returns a copy with unset/invalid weights replaced by their defaults.
+func (w PathfindingWeights) Sanitized() PathfindingWeights {
+	d := DefaultPathfindingWeights()
+	if w.WalkCardinal <= 0 {
+		w.WalkCardinal = d.WalkCardinal
+	}
+	if w.WalkDiagonal <= 0 {
+		w.WalkDiagonal = d.WalkDiagonal
+	}
+	if w.StepUp <= 0 {
+		w.StepUp = d.StepUp
+	}
+	if w.Drop1 <= 0 {
+		w.Drop1 = d.Drop1
+	}
+	if w.Drop2 <= 0 {
+		w.Drop2 = d.Drop2
+	}
+	if w.Drop3 <= 0 {
+		w.Drop3 = d.Drop3
+	}
+	if w.WaterPenalty <= 0 {
+		w.WaterPenalty = d.WaterPenalty
+	}
+	if w.Vertical <= 0 {
+		w.Vertical = d.Vertical
+	}
+	return w
+}
+
+// PathfindingConfig configures 3D path planning and its data auto-loading.
+// AutoLoad is nil by default (false): goto prompts the user to load the
+// palette and chunks instead of silently enabling them.
+type PathfindingConfig struct {
+	AutoLoad       *bool              `json:"auto_load,omitempty" toml:"auto-load,omitempty"`
+	MaxNodes       int                `json:"max_nodes,omitempty" toml:"max-nodes,omitempty"`
+	TimeoutMs      int                `json:"timeout_ms,omitempty" toml:"timeout-ms,omitempty"`
+	AllowDiagonals *bool              `json:"allow_diagonals,omitempty" toml:"allow-diagonals,omitempty"`
+	AllowDrops     *bool              `json:"allow_drops,omitempty" toml:"allow-drops,omitempty"`
+	Weights        PathfindingWeights `json:"weights" toml:"weights"`
+}
+
 // DefaultRenderDistance is the fallback chunk radius if unspecified or <= 0.
 const DefaultRenderDistance = 4
 
@@ -50,11 +120,11 @@ const DefaultServerStallThresholdMs = 250
 
 // Config represents the top-level configuration loaded from config.json or config.toml.
 type Config struct {
-	Version          int        `json:"version" toml:"version"`
-	Superuser        string     `json:"superuser" toml:"superuser"`
-	CommandsViaChat  *bool      `json:"commands_via_chat,omitempty" toml:"commands-via-chat,omitempty"`
-	FreeMemAfterJoin *bool        `json:"free_mem_after_join,omitempty" toml:"free-mem-after-join,omitempty"`
-	LogToFile        *bool        `json:"log_to_file,omitempty" toml:"log-to-file,omitempty"`
+	Version          int    `json:"version" toml:"version"`
+	Superuser        string `json:"superuser" toml:"superuser"`
+	CommandsViaChat  *bool  `json:"commands_via_chat,omitempty" toml:"commands-via-chat,omitempty"`
+	FreeMemAfterJoin *bool  `json:"free_mem_after_join,omitempty" toml:"free-mem-after-join,omitempty"`
+	LogToFile        *bool  `json:"log_to_file,omitempty" toml:"log-to-file,omitempty"`
 	Server           struct {
 		Host string `json:"host" toml:"host"`
 		Port int    `json:"port" toml:"port"`
@@ -63,12 +133,15 @@ type Config struct {
 	Skin             SkinConfig `json:"skin,omitempty" toml:"skin,omitempty"`
 	BlockPalettePath string     `json:"block_palette_path,omitempty" toml:"block-palette-path,omitempty"`
 	Behaviour        struct {
-		WalkSpeed              float32 `json:"walk_speed" toml:"walk-speed"`
-		RenderDistance         int32   `json:"render_distance" toml:"render-distance"`
-		ReconnectBaseDelayMs   int     `json:"reconnect_base_delay_ms" toml:"reconnect-base-delay-ms"`
-		ServerStallThresholdMs int     `json:"server_stall_threshold_ms" toml:"server-stall-threshold-ms"`
+		WalkSpeed              float32           `json:"walk_speed" toml:"walk-speed"`
+		RenderDistance         int32             `json:"render_distance" toml:"render-distance"`
+		ReconnectBaseDelayMs   int               `json:"reconnect_base_delay_ms" toml:"reconnect-base-delay-ms"`
+		ServerStallThresholdMs int               `json:"server_stall_threshold_ms" toml:"server-stall-threshold-ms"`
+		PaletteLoad            *bool             `json:"palette_load,omitempty" toml:"palette-load,omitempty"`
+		ChunkLoad              *bool             `json:"chunk_load,omitempty" toml:"chunk-load,omitempty"`
+		Pathfinding            PathfindingConfig `json:"pathfinding" toml:"pathfinding"`
 	} `json:"behaviour" toml:"behaviour"`
-	Mining           MiningConfig `json:"mining" toml:"mining"`
+	Mining MiningConfig `json:"mining" toml:"mining"`
 }
 
 // FreeMemAfterJoinOn returns true unless explicitly set to false (defaults to true).
@@ -85,6 +158,54 @@ func LogToFileOn(cfg Config) bool {
 		return true
 	}
 	return *cfg.LogToFile
+}
+
+// PaletteLoadOn reports whether the block palette should be loaded on join.
+// Defaults to true to preserve existing behavior.
+func PaletteLoadOn(cfg Config) bool {
+	if cfg.Behaviour.PaletteLoad == nil {
+		return true
+	}
+	return *cfg.Behaviour.PaletteLoad
+}
+
+// ChunkLoadOn reports whether the chunk cache should be enabled on join.
+// Defaults to false: terrain is loaded on demand via `chunk load`.
+func ChunkLoadOn(cfg Config) bool {
+	if cfg.Behaviour.ChunkLoad == nil {
+		return false
+	}
+	return *cfg.Behaviour.ChunkLoad
+}
+
+// PathfindingAutoLoadOn reports whether goto may enable missing palette/chunk
+// data automatically. Defaults to false so the user is prompted instead.
+func PathfindingAutoLoadOn(cfg Config) bool {
+	auto := cfg.Behaviour.Pathfinding.AutoLoad
+	if auto == nil {
+		return false
+	}
+	return *auto
+}
+
+// PathfindingAllowDiagonalsOn reports whether diagonal moves are allowed.
+// Defaults to the pathfinding package default (false).
+func PathfindingAllowDiagonalsOn(cfg Config) bool {
+	v := cfg.Behaviour.Pathfinding.AllowDiagonals
+	if v == nil {
+		return false
+	}
+	return *v
+}
+
+// PathfindingAllowDropsOn reports whether ledge drops are allowed.
+// Defaults to the pathfinding package default (true).
+func PathfindingAllowDropsOn(cfg Config) bool {
+	v := cfg.Behaviour.Pathfinding.AllowDrops
+	if v == nil {
+		return true
+	}
+	return *v
 }
 
 // ServerStallThreshold returns the configured duration without server packets before considering the server stalled.
@@ -323,13 +444,13 @@ func SaveSkin(path string, sc SkinConfig) error {
 }
 
 // ResolveSkinConfig resolves a skin configuration from an input path, which can be:
-// 1. Direct .png file path (e.g. "skin/skin.png" or "my_skin.png"):
-//    Uses the PNG image directly as a classic skin, and directs future in-game skin saves
-//    to defaultSavePath (e.g. "data/skin.json").
-// 2. A .json skin configuration file:
-//    Loads the JSON configuration and saves future in-game updates back to that JSON file.
-// 3. Empty string:
-//    Falls back to defaultSavePath, then legacy embedded config if provided, then DefaultSkinConfig.
+//  1. Direct .png file path (e.g. "skin/skin.png" or "my_skin.png"):
+//     Uses the PNG image directly as a classic skin, and directs future in-game skin saves
+//     to defaultSavePath (e.g. "data/skin.json").
+//  2. A .json skin configuration file:
+//     Loads the JSON configuration and saves future in-game updates back to that JSON file.
+//  3. Empty string:
+//     Falls back to defaultSavePath, then legacy embedded config if provided, then DefaultSkinConfig.
 func ResolveSkinConfig(rawTarget string, defaultSavePath string, legacyCfg SkinConfig) (SkinConfig, string, error) {
 	if defaultSavePath == "" {
 		defaultSavePath = "data/skin.json"

@@ -18,6 +18,25 @@ reconnect-base-delay-ms = 5000
 walk-speed = 0.15
 render-distance = 4
 server-stall-threshold-ms = 250
+palette-load = true
+chunk-load = false
+
+[behaviour.pathfinding]
+auto-load = false
+max-nodes = 5000
+timeout-ms = 50
+allow-diagonals = false
+allow-drops = true
+
+[behaviour.pathfinding.weights]
+walk-cardinal = 1.0
+walk-diagonal = 1.414
+step-up = 1.6
+drop-1 = 1.1
+drop-2 = 1.6
+drop-3 = 2.2
+water-penalty = 0.2
+vertical = 1.2
 
 [skin]
 type = "slim"

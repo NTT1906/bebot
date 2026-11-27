@@ -5,14 +5,23 @@ import (
 	"testing"
 	"time"
 
+	"bebot/src/config"
 	"bebot/src/pathfind"
 
 	"github.com/go-gl/mathgl/mgl32"
 	"github.com/sandertv/gophertunnel/minecraft/protocol"
 )
 
-func newTestPathBot() *Bot {
+// newLoadedBlockRegistry builds a registry that satisfies the palette
+// prerequisite for pathfinding, without loading a full palette from disk.
+func newLoadedBlockRegistry() *BlockRegistry {
 	reg := NewBlockRegistry()
+	reg.loaded = true
+	return reg
+}
+
+func newTestPathBot() *Bot {
+	reg := newLoadedBlockRegistry()
 	reg.SetActualAirRID(0)
 	reg.Register(1, "minecraft:stone")
 	b := &Bot{
@@ -27,7 +36,7 @@ func newTestPathBot() *Bot {
 
 // TestBotWorldView tests the spatial block type classification in BotWorldView.
 func TestBotWorldView(t *testing.T) {
-	reg := NewBlockRegistry()
+	reg := newLoadedBlockRegistry()
 	reg.SetActualAirRID(0)
 	reg.Register(1, "minecraft:stone")
 	reg.Register(2, "minecraft:water")
@@ -104,7 +113,7 @@ func TestBotWorldViewStandingAndGoalNodes(t *testing.T) {
 	cache.Enable(protocol.SubChunkPos{0, 4, 0})
 
 	b := &Bot{
-		blockRegistry:   NewBlockRegistry(),
+		blockRegistry:   newLoadedBlockRegistry(),
 		chunkCache:      cache,
 		blockRuntimeIDs: make(map[protocol.BlockPos]uint32),
 	}
@@ -136,7 +145,7 @@ func TestPathFollowerLifecycle(t *testing.T) {
 	b := &Bot{
 		pos:             mgl32.Vec3{0, 64, 0},
 		chunkCache:      cache,
-		blockRegistry:   NewBlockRegistry(),
+		blockRegistry:   newLoadedBlockRegistry(),
 		blockRuntimeIDs: make(map[protocol.BlockPos]uint32),
 		players:         make(map[string]player),
 		testReplyHook: func(msg string) {
@@ -208,7 +217,7 @@ func TestGotoCommands(t *testing.T) {
 	b := &Bot{
 		pos:             mgl32.Vec3{0, 64, 0},
 		chunkCache:      cache,
-		blockRegistry:   NewBlockRegistry(),
+		blockRegistry:   newLoadedBlockRegistry(),
 		blockRuntimeIDs: make(map[protocol.BlockPos]uint32),
 		players:         make(map[string]player),
 		testReplyHook: func(msg string) {
@@ -290,7 +299,7 @@ func TestMultiChunkSegmentProgression(t *testing.T) {
 	b := &Bot{
 		pos:             mgl32.Vec3{0, 64, 0},
 		chunkCache:      cache,
-		blockRegistry:   NewBlockRegistry(),
+		blockRegistry:   newLoadedBlockRegistry(),
 		blockRuntimeIDs: make(map[protocol.BlockPos]uint32),
 		players:         make(map[string]player),
 		testReplyHook: func(msg string) {
@@ -350,7 +359,7 @@ func TestPathArrivalRequires3DProximity(t *testing.T) {
 	b := &Bot{
 		pos:             mgl32.Vec3{0, 64, 0},
 		chunkCache:      cache,
-		blockRegistry:   NewBlockRegistry(),
+		blockRegistry:   newLoadedBlockRegistry(),
 		blockRuntimeIDs: make(map[protocol.BlockPos]uint32),
 		players:         make(map[string]player),
 		testReplyHook: func(msg string) {
@@ -411,7 +420,7 @@ func TestDynamicPlayerTracking3D(t *testing.T) {
 	b := &Bot{
 		pos:             mgl32.Vec3{0, 64, 0},
 		chunkCache:      cache,
-		blockRegistry:   NewBlockRegistry(),
+		blockRegistry:   newLoadedBlockRegistry(),
 		blockRuntimeIDs: make(map[protocol.BlockPos]uint32),
 		players:         make(map[string]player),
 	}
@@ -473,7 +482,7 @@ func TestReplanTimeoutAndGiveUp(t *testing.T) {
 	b := &Bot{
 		pos:             mgl32.Vec3{0, 64, 0},
 		chunkCache:      cache,
-		blockRegistry:   NewBlockRegistry(),
+		blockRegistry:   newLoadedBlockRegistry(),
 		blockRuntimeIDs: make(map[protocol.BlockPos]uint32),
 		players:         make(map[string]player),
 		testReplyHook: func(msg string) {
@@ -571,7 +580,7 @@ func TestReplanCountDoesNotResetOnRetreat(t *testing.T) {
 	b.pathActive = true
 	b.pathTargetPos = protocol.BlockPos{10, 64, 0}
 	b.pathTargetMinDist = 5.0 // Closest reached so far is 5.0m
-	b.pathReplanCount = 2   // Already had 2 failed attempts
+	b.pathReplanCount = 2     // Already had 2 failed attempts
 	// 3-node path: retreat node at x=4, then x=3, so reaching x=4 doesn't trigger segment complete
 	b.pathNodes = []protocol.BlockPos{{5, 64, 0}, {4, 64, 0}, {3, 64, 0}}
 	b.pathIndex = 1
@@ -690,5 +699,83 @@ func TestFormatFeetDebugMap(t *testing.T) {
 	wallRow := lines[6]
 	if wallRow[4] != 'x' {
 		t.Errorf("expected wall block at dz=+1, dx=0 to be 'x', got %c in row %q", wallRow[4], wallRow)
+	}
+}
+
+func TestStartPathReportsAllMissingPrerequisites(t *testing.T) {
+	var replies []string
+	b := &Bot{
+		pos:             mgl32.Vec3{0, 64, 0},
+		blockRegistry:   NewBlockRegistry(),
+		chunkCache:      NewChunkCache(),
+		blockRuntimeIDs: make(map[protocol.BlockPos]uint32),
+		testReplyHook: func(msg string) {
+			replies = append(replies, msg)
+		},
+	}
+	b.pathPlanner = pathfind.NewPlanner()
+
+	b.StartPath(protocol.BlockPos{3, 64, 0}, "")
+
+	joined := strings.Join(replies, "\n")
+	if !strings.Contains(joined, "palette load") {
+		t.Errorf("expected palette warning, got %q", joined)
+	}
+	if !strings.Contains(joined, "chunk load") {
+		t.Errorf("expected chunk warning, got %q", joined)
+	}
+	if b.chunkCache.IsEnabled() {
+		t.Error("goto must not auto-enable the chunk cache when auto-load is off")
+	}
+	if b.IsPathActive() {
+		t.Error("path should not start without the required data")
+	}
+}
+
+func TestStartPathReportsOnlyMissingPalette(t *testing.T) {
+	var replies []string
+	cache := NewChunkCache()
+	cache.Enable(protocol.SubChunkPos{0, 4, 0})
+	b := &Bot{
+		pos:             mgl32.Vec3{0, 64, 0},
+		blockRegistry:   NewBlockRegistry(),
+		chunkCache:      cache,
+		blockRuntimeIDs: make(map[protocol.BlockPos]uint32),
+		testReplyHook: func(msg string) {
+			replies = append(replies, msg)
+		},
+	}
+	b.pathPlanner = pathfind.NewPlanner()
+
+	b.StartPath(protocol.BlockPos{3, 64, 0}, "")
+
+	joined := strings.Join(replies, "\n")
+	if !strings.Contains(joined, "palette load") {
+		t.Errorf("expected palette warning, got %q", joined)
+	}
+	if strings.Contains(joined, "chunk load") {
+		t.Errorf("chunks are already loaded; unexpected warning: %q", joined)
+	}
+}
+
+func TestPathSearchOptionsFromConfig(t *testing.T) {
+	var cfg config.Config
+	cfg.Behaviour.Pathfinding.MaxNodes = 900
+	cfg.Behaviour.Pathfinding.TimeoutMs = 120
+	on := true
+	off := false
+	cfg.Behaviour.Pathfinding.AllowDiagonals = &on
+	cfg.Behaviour.Pathfinding.AllowDrops = &off
+	cfg.Behaviour.Pathfinding.Weights.StepUp = 2.5
+
+	opts := pathSearchOptionsFromConfig(cfg)
+	if opts.MaxNodes != 900 || opts.Timeout != 120*time.Millisecond {
+		t.Errorf("unexpected search limits: %+v", opts)
+	}
+	if !opts.AllowDiagonals || opts.AllowDrops {
+		t.Errorf("unexpected move toggles: %+v", opts)
+	}
+	if opts.Weights.StepUp != 2.5 || opts.Weights.WalkCardinal != pathfind.CostWalkCardinal {
+		t.Errorf("unexpected weights: %+v", opts.Weights)
 	}
 }

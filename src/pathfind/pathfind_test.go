@@ -286,3 +286,56 @@ func TestPlan_DeepWaterSwimming(t *testing.T) {
 		t.Fatalf("expected 5 nodes for straight river crossing, got %d: %v", len(res.Nodes), res.Nodes)
 	}
 }
+
+func TestWeightsNormalization(t *testing.T) {
+	var opts SearchOptions
+	n := opts.normalized()
+	if n.MaxNodes != 5000 || n.Timeout != 50*time.Millisecond {
+		t.Fatalf("unexpected normalized search limits: %+v", n)
+	}
+	if n.Weights != DefaultWeights() {
+		t.Errorf("unset weights should use defaults: %+v", n.Weights)
+	}
+}
+
+func TestConfiguredWeightsChangeMoveCosts(t *testing.T) {
+	w := newMockWorld()
+	w.setFloor(0, 0, 2, 0, 63)
+
+	opts := DefaultSearchOptions()
+	opts.Weights.WalkCardinal = 5
+	neighbors := GetNeighbors(w, protocol.BlockPos{0, 64, 0}, opts)
+	found := false
+	for _, m := range neighbors {
+		if m.Type == MoveWalkCardinal {
+			found = true
+			if m.Cost != 5 {
+				t.Errorf("configured cardinal cost not applied: got %v", m.Cost)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected a cardinal move")
+	}
+}
+
+func TestConfiguredWeightsChangePlanCostAndHeuristic(t *testing.T) {
+	w := newMockWorld()
+	w.setFloor(0, 0, 6, 0, 63)
+
+	opts := DefaultSearchOptions()
+	opts.Weights.WalkCardinal = 3
+	opts.Weights.Vertical = 4
+	res, ok := NewPlanner().Plan(w, protocol.BlockPos{0, 64, 0}, protocol.BlockPos{5, 64, 0}, opts)
+	if !ok {
+		t.Fatal("expected a path")
+	}
+	if res.Cost != 15 { // 5 cardinal steps * 3
+		t.Errorf("expected configured plan cost 15, got %v", res.Cost)
+	}
+
+	h := opts.Weights.Heuristic(protocol.BlockPos{0, 64, 0}, protocol.BlockPos{0, 69, 0})
+	if h != 20 { // 5 vertical blocks * 4
+		t.Errorf("expected configured vertical heuristic 20, got %v", h)
+	}
+}

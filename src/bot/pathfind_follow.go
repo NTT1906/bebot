@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"bebot/src/config"
 	"bebot/src/pathfind"
 
 	"github.com/go-gl/mathgl/mgl32"
@@ -31,8 +32,68 @@ func (b *Bot) IsPathActive() bool {
 	return b.pathActive
 }
 
+// ensurePathfindingData verifies the two data sources pathfinding relies on.
+// Unless auto-load is enabled, every missing prerequisite is reported to the
+// user (like `palette status` / `chunk status`) instead of being silently fixed.
+func (b *Bot) ensurePathfindingData(autoLoad bool) bool {
+	paletteLoaded := b.blockRegistry != nil && b.blockRegistry.IsLoaded()
+	chunksLoaded := b.chunkCache != nil && b.chunkCache.IsEnabled()
+	if paletteLoaded && chunksLoaded {
+		return true
+	}
+
+	var missing []string
+	if !paletteLoaded {
+		missing = append(missing, "[BlockPalette] Palette is not loaded. Run 'bebot palette load' first.")
+	}
+	if !chunksLoaded {
+		missing = append(missing, "[ChunkCache] Chunk data is not loaded. Run 'bebot chunk load' first.")
+	}
+	if !autoLoad {
+		b.reply(strings.Join(missing, "\n"))
+		return false
+	}
+
+	if !paletteLoaded {
+		if _, _, err := b.LoadPalette(); err != nil {
+			b.reply(fmt.Sprintf("[BlockPalette] Failed to auto-load palette: %v", err))
+			return false
+		}
+	}
+	if !chunksLoaded {
+		if b.chunkCache == nil {
+			b.chunkCache = NewChunkCache()
+		}
+		b.mu.Lock()
+		pos := b.pos
+		b.mu.Unlock()
+		subPos := protocol.SubChunkPos{
+			int32(math.Floor(float64(pos.X()))) >> 4,
+			int32(math.Floor(float64(pos.Y()))) >> 4,
+			int32(math.Floor(float64(pos.Z()))) >> 4,
+		}
+		b.chunkCache.Enable(subPos)
+		if offsets := b.chunkCache.MissingOffsets(); len(offsets) > 0 {
+			b.requestSubChunks(subPos, offsets)
+		}
+		b.reply("[Bebot] Loading terrain chunks around bot...")
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			time.Sleep(50 * time.Millisecond)
+			if b.chunkCache.HasSubChunk(subPos) {
+				break
+			}
+		}
+	}
+	return true
+}
+
 // startPath plans and starts following a 3D path toward target.
 func (b *Bot) startPath(target protocol.BlockPos, playerName string) {
+	if !b.ensurePathfindingData(config.PathfindingAutoLoadOn(b.cfg)) {
+		return
+	}
+
 	b.mu.Lock()
 	curPos := b.pos
 	b.mu.Unlock()
@@ -42,28 +103,11 @@ func (b *Bot) startPath(target protocol.BlockPos, playerName string) {
 		int32(math.Floor(float64(curPos.Z()))) >> 4,
 	}
 
-	// Auto-enable chunk cache if not already active to provide authentic voxel queries
-	if b.chunkCache != nil {
-		if !b.chunkCache.IsEnabled() {
-			b.chunkCache.Enable(subPos)
-		} else if b.chunkCache.Center() != subPos {
-			b.chunkCache.ShiftCenter(subPos)
-		}
-		missing := b.chunkCache.MissingOffsets()
-		if len(missing) > 0 {
+	// Keep the window centered on the bot when it has already entered a new sub-chunk.
+	if b.chunkCache != nil && b.chunkCache.IsEnabled() && b.chunkCache.Center() != subPos {
+		b.chunkCache.ShiftCenter(subPos)
+		if missing := b.chunkCache.MissingOffsets(); len(missing) > 0 {
 			b.requestSubChunks(subPos, missing)
-		}
-	}
-
-	// If the subchunk around the bot's current standing position is not loaded yet, wait briefly for incoming packets
-	if b.chunkCache != nil && !b.chunkCache.HasSubChunk(subPos) {
-		b.reply("[Bebot] Loading terrain chunks around bot...")
-		deadline := time.Now().Add(2 * time.Second)
-		for time.Now().Before(deadline) {
-			time.Sleep(50 * time.Millisecond)
-			if b.chunkCache.HasSubChunk(subPos) {
-				break
-			}
 		}
 	}
 
@@ -89,7 +133,7 @@ func (b *Bot) startPath(target protocol.BlockPos, playerName string) {
 		b.reply(fmt.Sprintf("[Bebot] Planning path to <%d, %d, %d>...", target.X(), target.Y(), target.Z()))
 	}
 
-	res, _ := b.pathPlanner.Plan(wv, startNode, goalNode, pathfind.DefaultSearchOptions())
+	res, _ := b.pathPlanner.Plan(wv, startNode, goalNode, b.pathSearchOptions())
 	if len(res.Nodes) <= 1 {
 		b.reply(fmt.Sprintf("[Bebot] Cannot find a path to <%d, %d, %d> (blocked or terrain not loaded).", target.X(), target.Y(), target.Z()))
 		return
@@ -221,7 +265,7 @@ func (b *Bot) pathFollowTick(c *minecraft.Conn) (jump bool, replyMsg string) {
 				wv := NewBotWorldView(b)
 				startNode := wv.FindStandingNode(vec3ToBlockPos(botPos))
 				goalNode := wv.FindGoalNode(target)
-				res, _ := planner.Plan(wv, startNode, goalNode, pathfind.DefaultSearchOptions())
+				res, _ := planner.Plan(wv, startNode, goalNode, b.pathSearchOptions())
 
 				b.mu.Lock()
 				if len(res.Nodes) > 0 && b.pathActive {
@@ -350,7 +394,7 @@ func (b *Bot) pathFollowTick(c *minecraft.Conn) (jump bool, replyMsg string) {
 		wv := NewBotWorldView(b)
 		startNode := wv.FindStandingNode(vec3ToBlockPos(botPos))
 		goalNode := wv.FindGoalNode(target)
-		res, _ := planner.Plan(wv, startNode, goalNode, pathfind.DefaultSearchOptions())
+		res, _ := planner.Plan(wv, startNode, goalNode, b.pathSearchOptions())
 
 		b.mu.Lock()
 		if len(res.Nodes) > 1 && b.pathActive {
@@ -424,7 +468,7 @@ func (b *Bot) onSegmentCompleteLocked() (jump bool, replyMsg string) {
 	wv := NewBotWorldView(b)
 	startNode := wv.FindStandingNode(vec3ToBlockPos(botPos))
 	goalNode := wv.FindGoalNode(target)
-	nextRes, _ := planner.Plan(wv, startNode, goalNode, pathfind.DefaultSearchOptions())
+	nextRes, _ := planner.Plan(wv, startNode, goalNode, b.pathSearchOptions())
 
 	b.mu.Lock()
 	if len(nextRes.Nodes) > 1 && b.pathActive {
