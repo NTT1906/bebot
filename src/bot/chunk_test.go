@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-gl/mathgl/mgl32"
 	"github.com/sandertv/gophertunnel/minecraft/protocol"
+	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
 )
 
 // TestInWindow verifies the 3D mathematical sliding window containment.
@@ -379,4 +380,45 @@ func TestAreaMineAirPreFiltering(t *testing.T) {
 	if !strings.Contains(lastReply, "6 air pre-filtered") {
 		t.Errorf("expected reply to report '6 air pre-filtered', got: %s", lastReply)
 	}
+}
+
+// TestSubChunkDecodeInvalidBitsPerBlock verifies that malformed subchunks with invalid bitsPerBlock
+// (e.g., bitsPerBlock > 32 causing blocksPerWord = 0) gracefully return an error instead of panicking
+// with an integer divide by zero.
+func TestSubChunkDecodeInvalidBitsPerBlock(t *testing.T) {
+	// Malformed header where header = 0xFE -> header >> 1 = 127 (> 32)
+	malformed := []byte{0xFE, 0x00, 0x00, 0x00}
+
+	r := bytes.NewReader(malformed)
+	err := skipSubChunkStorages(r, 1)
+	if err == nil {
+		t.Fatalf("expected error for bitsPerBlock 127 in skipSubChunkStorages, got nil")
+	}
+
+	sub := &SubChunkData{}
+	r = bytes.NewReader(malformed)
+	err = decodeSubChunkStorages(r, 1, sub)
+	if err == nil {
+		t.Fatalf("expected error for bitsPerBlock 127 in decodeSubChunkStorages, got nil")
+	}
+}
+
+// TestReloadWindowSubChunkRequestMode verifies that shifting chunk centers does not parse non-subchunk
+// LevelChunk payloads in modern SubChunkRequest mode.
+func TestReloadWindowSubChunkRequestMode(t *testing.T) {
+	cache := NewChunkCache()
+	cache.Enable(protocol.SubChunkPos{10, 5, -20})
+
+	// Server sends modern LevelChunk with SubChunkCount = math.MaxUint32 (SubChunkRequestMode)
+	// and a payload containing border blocks / biomes (not subchunks)
+	colPos := protocol.ChunkPos{10, -20}
+	borderPayload := []byte{0x09, 0x01, 0xFF, 0xFE, 0xAA, 0xBB} // Arbitrary non-subchunk bytes
+	cache.OnLevelChunk(&packet.LevelChunk{
+		Position:      colPos,
+		SubChunkCount: 0xFFFFFFFF,
+		RawPayload:    borderPayload,
+	})
+
+	// Shift center to trigger reloadWindowLocked
+	cache.ShiftCenter(protocol.SubChunkPos{10, 6, -20})
 }

@@ -52,13 +52,19 @@ func (s *SubChunkData) Reset() {
 	s.HasLayer1 = false
 }
 
+// rawChunkColumn stores cached LevelChunk data per column
+type rawChunkColumn struct {
+	payload       []byte
+	subChunkCount uint32
+}
+
 // ChunkCache manages the local 3x3x3 sub-chunk window (27 sub-chunks) centered on the bot.
 type ChunkCache struct {
 	mu        sync.RWMutex
 	enabled   bool
 	center    protocol.SubChunkPos
 	subchunks map[protocol.SubChunkPos]*SubChunkData
-	rawChunks map[protocol.ChunkPos][]byte // cached raw payload per chunk column
+	rawChunks map[protocol.ChunkPos]rawChunkColumn // cached raw payload per chunk column
 	pool      sync.Pool
 }
 
@@ -66,7 +72,7 @@ type ChunkCache struct {
 func NewChunkCache() *ChunkCache {
 	return &ChunkCache{
 		subchunks: make(map[protocol.SubChunkPos]*SubChunkData, 27),
-		rawChunks: make(map[protocol.ChunkPos][]byte),
+		rawChunks: make(map[protocol.ChunkPos]rawChunkColumn),
 		pool: sync.Pool{
 			New: func() any {
 				return &SubChunkData{}
@@ -220,7 +226,10 @@ func (c *ChunkCache) OnLevelChunk(p *packet.LevelChunk) {
 	// Store raw payload (copying to avoid retention of packet buffers)
 	payloadCopy := make([]byte, len(p.RawPayload))
 	copy(payloadCopy, p.RawPayload)
-	c.rawChunks[p.Position] = payloadCopy
+	c.rawChunks[p.Position] = rawChunkColumn{
+		payload:       payloadCopy,
+		subChunkCount: p.SubChunkCount,
+	}
 
 	if !c.enabled {
 		return
@@ -326,8 +335,8 @@ func (c *ChunkCache) reloadWindowLocked() {
 			chunkZ := c.center[2] + dz
 			colPos := protocol.ChunkPos{chunkX, chunkZ}
 
-			if payload, ok := c.rawChunks[colPos]; ok {
-				c.decodeColumnSubChunksLocked(colPos, payload, 0)
+			if col, ok := c.rawChunks[colPos]; ok {
+				c.decodeColumnSubChunksLocked(colPos, col.payload, col.subChunkCount)
 			}
 		}
 	}
@@ -335,18 +344,14 @@ func (c *ChunkCache) reloadWindowLocked() {
 
 // decodeColumnSubChunksLocked iterates through a LevelChunk raw payload and extracts sub-chunks in the window.
 func (c *ChunkCache) decodeColumnSubChunksLocked(colPos protocol.ChunkPos, payload []byte, declaredCount uint32) {
-	if declaredCount > 64 {
-		// Server uses modern Bedrock SubChunkRequest mode; LevelChunk does not carry inline subchunks
+	if declaredCount == 0 || declaredCount > 64 {
+		// Server uses modern Bedrock SubChunkRequest mode or empty column; LevelChunk does not carry inline subchunks
 		return
 	}
 	r := bytes.NewReader(payload)
 
 	// In Bedrock LevelChunk payloads, sub-chunks are written sequentially.
-	// We parse up to 24 sub-chunks or until the buffer ends.
 	maxSubChunks := int(declaredCount)
-	if maxSubChunks <= 0 || maxSubChunks > 32 {
-		maxSubChunks = 24
-	}
 
 	implicitY := int32(-4) // standard 1.18+ overworld minCY is -4 (Y=-64)
 
@@ -473,8 +478,15 @@ func decodeSubChunkStorages(r *bytes.Reader, storageCount int, sub *SubChunkData
 			continue
 		}
 
+		if bitsPerBlock < 1 || bitsPerBlock > 32 {
+			return fmt.Errorf("invalid bitsPerBlock %d", bitsPerBlock)
+		}
+
 		// Paletted bit-packed storage
 		blocksPerWord := 32 / bitsPerBlock
+		if blocksPerWord <= 0 {
+			return fmt.Errorf("invalid blocksPerWord for bitsPerBlock %d", bitsPerBlock)
+		}
 		wordCount := (SubChunkBlockCount + blocksPerWord - 1) / blocksPerWord
 
 		if r.Len() < wordCount*4 {
@@ -553,7 +565,14 @@ func skipSubChunkStorages(r *bytes.Reader, storageCount int) error {
 			continue
 		}
 
+		if bitsPerBlock < 1 || bitsPerBlock > 32 {
+			return fmt.Errorf("invalid bitsPerBlock %d", bitsPerBlock)
+		}
+
 		blocksPerWord := 32 / bitsPerBlock
+		if blocksPerWord <= 0 {
+			return fmt.Errorf("invalid blocksPerWord for bitsPerBlock %d", bitsPerBlock)
+		}
 		wordCount := (SubChunkBlockCount + blocksPerWord - 1) / blocksPerWord
 		if r.Len() < wordCount*4 {
 			return errors.New("unexpected EOF skipping subchunk words")
