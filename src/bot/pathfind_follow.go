@@ -302,6 +302,12 @@ func (b *Bot) pathFollowTick(c *minecraft.Conn) (jump bool, replyMsg string) {
 		jump = true
 	}
 
+	// In-water buoyancy: jump continuously to swim at the surface and prevent sinking/drowning
+	curFeet := vec3ToBlockPos(b.pos)
+	if b.getBlockTypeLocked(curFeet) == pathfind.BlockLiquidWater {
+		jump = true
+	}
+
 	// Anti-stuck and node progress timeout detection
 	b.pathNodeTicks++
 	progress := b.pos.Sub(b.pathLastPos)

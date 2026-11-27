@@ -67,21 +67,23 @@ func (w *BotWorldView) GetBlockType(pos protocol.BlockPos) pathfind.BlockType {
 		return pathfind.BlockAir
 	}
 
+	w.b.mu.Lock()
+	defer w.b.mu.Unlock()
+	return w.b.getBlockTypeLocked(pos)
+}
+
+// getBlockTypeLocked resolves the spatial navigation BlockType when w.b.mu is already held.
+func (b *Bot) getBlockTypeLocked(pos protocol.BlockPos) pathfind.BlockType {
 	// 1. Check recent single block updates (highest precedence)
 	var rid uint32
 	var found bool
-	var mineAir map[uint32]bool
-
-	w.b.mu.Lock()
-	if w.b.blockRuntimeIDs != nil {
-		rid, found = w.b.blockRuntimeIDs[pos]
+	if b.blockRuntimeIDs != nil {
+		rid, found = b.blockRuntimeIDs[pos]
 	}
-	mineAir = w.b.mineAirRuntimeIDs
-	w.b.mu.Unlock()
 
 	// 2. Check chunk cache (3x3x3 sub-chunk window)
-	if !found && w.b.chunkCache != nil && w.b.chunkCache.IsEnabled() {
-		rid, found = w.b.chunkCache.BlockAt(pos)
+	if !found && b.chunkCache != nil && b.chunkCache.IsEnabled() {
+		rid, found = b.chunkCache.BlockAt(pos)
 	}
 
 	// 3. If unmapped or chunk not loaded
@@ -101,8 +103,8 @@ func (w *BotWorldView) GetBlockType(pos protocol.BlockPos) pathfind.BlockType {
 
 	// 5. If blockRegistry is available, resolve block name and characteristics (highest semantic truth).
 	// Prevents misconfigured or corrupted air runtime IDs from treating solid blocks (like oak logs) as air.
-	if w.b.blockRegistry != nil {
-		if name, ok := w.b.blockRegistry.ResolveName(rid); ok {
+	if b.blockRegistry != nil {
+		if name, ok := b.blockRegistry.ResolveName(rid); ok {
 			lower := strings.ToLower(name)
 
 			if strings.Contains(lower, "air") {
@@ -128,8 +130,8 @@ func (w *BotWorldView) GetBlockType(pos protocol.BlockPos) pathfind.BlockType {
 	}
 
 	// 6. Check for Air by Runtime ID fallback (when palette is unloaded or RID is unknown to palette)
-	airRID := w.b.ActualAirRID()
-	if rid == airRID || (mineAir != nil && mineAir[rid]) {
+	airRID := b.actualAirRIDLocked()
+	if rid == airRID || (b.mineAirRuntimeIDs != nil && b.mineAirRuntimeIDs[rid]) {
 		return pathfind.BlockAir
 	}
 
@@ -179,7 +181,7 @@ func (w *BotWorldView) FindGoalNode(target protocol.BlockPos) protocol.BlockPos 
 }
 
 // isStandingNode checks if a coordinate satisfies standing criteria:
-// non-solid feet and head, solid floor.
+// non-solid feet and head, solid floor (or floating in water).
 func (w *BotWorldView) isStandingNode(feet protocol.BlockPos) bool {
 	footType := w.GetBlockType(feet)
 	if footType != pathfind.BlockAir && footType != pathfind.BlockLiquidWater {
@@ -188,6 +190,9 @@ func (w *BotWorldView) isStandingNode(feet protocol.BlockPos) bool {
 	headType := w.GetBlockType(protocol.BlockPos{feet.X(), feet.Y() + 1, feet.Z()})
 	if headType != pathfind.BlockAir && headType != pathfind.BlockLiquidWater {
 		return false
+	}
+	if footType == pathfind.BlockLiquidWater {
+		return true // Swimming / floating in water of any depth
 	}
 	floorType := w.GetBlockType(protocol.BlockPos{feet.X(), feet.Y() - 1, feet.Z()})
 	return floorType == pathfind.BlockSolid

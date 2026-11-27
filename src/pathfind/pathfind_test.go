@@ -254,3 +254,35 @@ func TestPlan_WaterShortcut(t *testing.T) {
 		}
 	}
 }
+
+// TestPlan_DeepWaterSwimming verifies that the bot can swim across a deep water channel (depth >= 2)
+// where floor is also water.
+func TestPlan_DeepWaterSwimming(t *testing.T) {
+	w := newMockWorld()
+	// Left bank: X=0 at Y=64 (floor Y=63 solid)
+	w.set(0, 63, 0, BlockSolid)
+	// Deep river channel at X=1..3: water at Y=64, Y=63, Y=62 (depth 3 blocks, floor is water!)
+	for x := int32(1); x <= 3; x++ {
+		w.set(x, 64, 0, BlockLiquidWater)
+		w.set(x, 63, 0, BlockLiquidWater)
+		w.set(x, 62, 0, BlockLiquidWater)
+		w.set(x, 61, 0, BlockSolid) // riverbed deep below
+	}
+	// Right bank: X=4 at Y=64 (floor Y=63 solid)
+	w.set(4, 63, 0, BlockSolid)
+
+	planner := NewPlanner()
+	start := protocol.BlockPos{0, 64, 0}
+	goal := protocol.BlockPos{4, 64, 0}
+
+	opts := DefaultSearchOptions()
+	opts.AllowDiagonals = false
+
+	res, ok := planner.Plan(w, start, goal, opts)
+	if !ok {
+		t.Fatalf("expected deep water swimming path to be found, got ok=false")
+	}
+	if len(res.Nodes) != 5 {
+		t.Fatalf("expected 5 nodes for straight river crossing, got %d: %v", len(res.Nodes), res.Nodes)
+	}
+}

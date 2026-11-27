@@ -370,10 +370,7 @@ func New(opts Options) *Bot {
 	return b
 }
 
-// ActualAirRID returns the active runtime ID representing minecraft:air.
-func (b *Bot) ActualAirRID() uint32 {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+func (b *Bot) actualAirRIDLocked() uint32 {
 	if b.actualAirRID != 0 {
 		return b.actualAirRID
 	}
@@ -386,6 +383,13 @@ func (b *Bot) ActualAirRID() uint32 {
 		return HashBlockState("minecraft:air", nil)
 	}
 	return 0
+}
+
+// ActualAirRID returns the active runtime ID representing minecraft:air.
+func (b *Bot) ActualAirRID() uint32 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.actualAirRIDLocked()
 }
 
 // SetActualAirRID updates the active air runtime ID across the bot and block registry.

@@ -8,11 +8,11 @@ import (
 const (
 	CostWalkCardinal = 1.00
 	CostWalkDiagonal = Sqrt2 // ~1.414
-	CostStepUp       = 2.00  // Jump initiation + air time delay (~6 ticks)
-	CostDrop1        = 1.20  // Falling 1 block
-	CostDrop2        = 1.80  // Falling 2 blocks
-	CostDrop3        = 2.50  // Falling 3 blocks
-	CostWaterPenalty = 1.00  // Swimming drag penalty (total water walk cost = 2.00)
+	CostStepUp       = 1.60  // Jump initiation + step up
+	CostDrop1        = 1.10  // Falling 1 block
+	CostDrop2        = 1.60  // Falling 2 blocks
+	CostDrop3        = 2.20  // Falling 3 blocks
+	CostWaterPenalty = 0.20  // Mild swimming drag penalty (prefers short water shortcuts over land detours)
 )
 
 // cardinalOffsets define the 4 horizontal cardinal directions.
@@ -41,10 +41,11 @@ func isStandableSurface(t BlockType) bool {
 	return t == BlockSolid
 }
 
-// isStandingPosValid checks whether a coordinate satisfies the 0.6x1.8 player AABB:
-// 1. Feet voxel is passable
-// 2. Head voxel (Y+1) is passable
-// 3. Floor voxel (Y-1) is solid ground
+// isStandingPosValid checks whether a coordinate satisfies player navigation:
+// 1. Feet voxel is passable (BlockAir or BlockLiquidWater)
+// 2. Head voxel (Y+1) is passable (BlockAir or BlockLiquidWater)
+// 3. If feet is in water, player can float/swim regardless of water depth.
+//    If feet is in air, floor voxel (Y-1) must be solid ground.
 func isStandingPosValid(w WorldView, pos protocol.BlockPos) bool {
 	feet := w.GetBlockType(pos)
 	if !isPassable(feet) {
@@ -53,6 +54,9 @@ func isStandingPosValid(w WorldView, pos protocol.BlockPos) bool {
 	head := w.GetBlockType(protocol.BlockPos{pos.X(), pos.Y() + 1, pos.Z()})
 	if !isPassable(head) {
 		return false
+	}
+	if feet == BlockLiquidWater {
+		return true // Swimming / floating across water of any depth
 	}
 	floor := w.GetBlockType(protocol.BlockPos{pos.X(), pos.Y() - 1, pos.Z()})
 	return isStandableSurface(floor)
@@ -118,13 +122,14 @@ func GetNeighbors(w WorldView, curr protocol.BlockPos, opts SearchOptions) []Mov
 					// Check drop depths 1, 2, 3
 					for drop := int32(1); drop <= 3; drop++ {
 						dropPos := protocol.BlockPos{nx, currY - drop, nz}
-						// Air column between currY and landing must remain passable
-						if !isPassable(w.GetBlockType(dropPos)) {
+						// Air or water column between currY and landing must remain passable
+						dropType := w.GetBlockType(dropPos)
+						if !isPassable(dropType) {
 							break // blocked, cannot drop further
 						}
-						// Check landing floor
+						// Check landing: either solid floor below, OR dropping directly into water!
 						landingFloor := w.GetBlockType(protocol.BlockPos{nx, currY - drop - 1, nz})
-						if isStandableSurface(landingFloor) {
+						if isStandableSurface(landingFloor) || dropType == BlockLiquidWater {
 							// Valid landing found!
 							var dropCost float64
 							switch drop {
@@ -135,13 +140,16 @@ func GetNeighbors(w WorldView, curr protocol.BlockPos, opts SearchOptions) []Mov
 							case 3:
 								dropCost = CostDrop3
 							}
+							if dropType == BlockLiquidWater {
+								dropCost += CostWaterPenalty
+							}
 							moves = append(moves, Move{
 								From: curr,
 								To:   dropPos,
 								Type: MoveDropDown,
 								Cost: dropCost,
 							})
-							break // Once a floor is hit, cannot fall further
+							break // Once a floor or water is hit, cannot fall further
 						}
 					}
 				}
