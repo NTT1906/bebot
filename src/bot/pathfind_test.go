@@ -447,3 +447,85 @@ func TestDynamicPlayerTracking3D(t *testing.T) {
 		t.Errorf("expected pathTargetPos.Y to be updated to 67 after 3D player movement, got %d", targetY)
 	}
 }
+
+// TestReplanTimeoutAndGiveUp verifies that:
+// 1. Failing to reach the next node in 50 ticks triggers re-pathfinding.
+// 2. Failing to make progress after multiple consecutive replans gives up and broadcasts.
+func TestReplanTimeoutAndGiveUp(t *testing.T) {
+	cache := NewChunkCache()
+	cache.Enable(protocol.SubChunkPos{0, 4, 0})
+
+	var replied []string
+	b := &Bot{
+		pos:             mgl32.Vec3{0, 64, 0},
+		chunkCache:      cache,
+		blockRegistry:   NewBlockRegistry(),
+		blockRuntimeIDs: make(map[protocol.BlockPos]uint32),
+		players:         make(map[string]player),
+		testReplyHook: func(msg string) {
+			replied = append(replied, msg)
+		},
+	}
+	b.pathPlanner = pathfind.NewPlanner()
+
+	// Flat ground
+	for x := int32(0); x <= 10; x++ {
+		cache.OnBlockUpdate(protocol.BlockPos{x, 63, 0}, 1)
+		cache.OnBlockUpdate(protocol.BlockPos{x, 64, 0}, 0)
+		cache.OnBlockUpdate(protocol.BlockPos{x, 65, 0}, 0)
+	}
+
+	b.StartPath(protocol.BlockPos{5, 64, 0}, "")
+	if !b.IsPathActive() {
+		t.Fatal("expected path to be active")
+	}
+
+	// 1. Test position stalled timeout (25 ticks)
+	for i := 0; i < 24; i++ {
+		b.pathFollowTick(nil)
+	}
+	b.mu.Lock()
+	count := b.pathReplanCount
+	b.mu.Unlock()
+	if count != 0 {
+		t.Fatalf("did not expect replan before 25 ticks of stall, got %d", count)
+	}
+
+	// 25th tick triggers replan attempt 1
+	_, msg := b.pathFollowTick(nil)
+	if !strings.Contains(msg, "attempt 1/3") {
+		t.Errorf("expected attempt 1/3 replan message, got %q", msg)
+	}
+
+	// Trigger attempt 2
+	for i := 0; i < 25; i++ {
+		b.pathFollowTick(nil)
+	}
+	b.mu.Lock()
+	count = b.pathReplanCount
+	b.mu.Unlock()
+	if count != 2 {
+		t.Errorf("expected replan count 2, got %d", count)
+	}
+
+	// Trigger attempt 3
+	for i := 0; i < 25; i++ {
+		b.pathFollowTick(nil)
+	}
+
+	// Next failure after 3 attempts must give up and broadcast
+	var finalMsg string
+	for i := 0; i < 25; i++ {
+		_, m := b.pathFollowTick(nil)
+		if m != "" {
+			finalMsg = m
+		}
+	}
+
+	if !strings.Contains(finalMsg, "giving up") && !strings.Contains(finalMsg, "multiple replan attempts") {
+		t.Errorf("expected give up broadcast message, got %q", finalMsg)
+	}
+	if b.IsPathActive() {
+		t.Errorf("expected path to be deactivated after giving up")
+	}
+}
