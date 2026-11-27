@@ -106,7 +106,8 @@ func (b *Bot) startPath(target protocol.BlockPos, playerName string) {
 
 	// Set immediate target to first node
 	firstWP := res.Nodes[0]
-	b.moveTarget = mgl32.Vec3{float32(firstWP.X()) + 0.5, float32(firstWP.Y()), float32(firstWP.Z()) + 0.5}
+	eyeOff := botEyeOffset(b.pos)
+	b.moveTarget = mgl32.Vec3{float32(firstWP.X()) + 0.5, float32(firstWP.Y()) + eyeOff, float32(firstWP.Z()) + 0.5}
 	b.mu.Unlock()
 
 	if res.ReachedGoal {
@@ -187,7 +188,8 @@ func (b *Bot) pathFollowTick(c *minecraft.Conn) (jump bool, replyMsg string) {
 	}
 
 	curWP := b.pathNodes[b.pathIndex]
-	targetVec := mgl32.Vec3{float32(curWP.X()) + 0.5, float32(curWP.Y()), float32(curWP.Z()) + 0.5}
+	eyeOff := botEyeOffset(b.pos)
+	targetVec := mgl32.Vec3{float32(curWP.X()) + 0.5, float32(curWP.Y()) + eyeOff, float32(curWP.Z()) + 0.5}
 
 	dx := targetVec.X() - b.pos.X()
 	dy := targetVec.Y() - b.pos.Y()
@@ -202,7 +204,7 @@ func (b *Bot) pathFollowTick(c *minecraft.Conn) (jump bool, replyMsg string) {
 			return b.onSegmentCompleteLocked()
 		}
 		curWP = b.pathNodes[b.pathIndex]
-		targetVec = mgl32.Vec3{float32(curWP.X()) + 0.5, float32(curWP.Y()), float32(curWP.Z()) + 0.5}
+		targetVec = mgl32.Vec3{float32(curWP.X()) + 0.5, float32(curWP.Y()) + eyeOff, float32(curWP.Z()) + 0.5}
 		dx = targetVec.X() - b.pos.X()
 		dy = targetVec.Y() - b.pos.Y()
 		dz = targetVec.Z() - b.pos.Z()
@@ -217,7 +219,7 @@ func (b *Bot) pathFollowTick(c *minecraft.Conn) (jump bool, replyMsg string) {
 	if b.pathIndex < len(b.pathMoves) {
 		move := b.pathMoves[b.pathIndex]
 		if move.Type == pathfind.MoveStepUp {
-			if hDist <= 0.8 && b.pos.Y() < float32(curWP.Y()) {
+			if hDist <= 0.8 && b.pos.Y() < float32(curWP.Y())+eyeOff {
 				jump = true
 			}
 		}
@@ -233,8 +235,8 @@ func (b *Bot) pathFollowTick(c *minecraft.Conn) (jump bool, replyMsg string) {
 		b.pathLastPos = b.pos
 	}
 
-	// If stuck for 20 ticks (1 second), trigger replan
-	if b.pathStuckTicks >= 20 {
+	// If stuck for 25 ticks (1.25 seconds), trigger replan
+	if b.pathStuckTicks >= 25 {
 		log.Printf("bebot: stuck at (%.2f, %.2f, %.2f) following path, replanning to %v\n",
 			b.pos.X(), b.pos.Y(), b.pos.Z(), b.pathTargetPos)
 		b.pathStuckTicks = 0
@@ -254,7 +256,8 @@ func (b *Bot) pathFollowTick(c *minecraft.Conn) (jump bool, replyMsg string) {
 			b.pathMoves = res.Moves
 			b.pathIndex = 0
 			firstWP := res.Nodes[0]
-			b.moveTarget = mgl32.Vec3{float32(firstWP.X()) + 0.5, float32(firstWP.Y()), float32(firstWP.Z()) + 0.5}
+			replanEyeOff := botEyeOffset(b.pos)
+			b.moveTarget = mgl32.Vec3{float32(firstWP.X()) + 0.5, float32(firstWP.Y()) + replanEyeOff, float32(firstWP.Z()) + 0.5}
 			b.mu.Unlock()
 			return jump, ""
 		} else {
@@ -319,7 +322,8 @@ func (b *Bot) onSegmentCompleteLocked() (jump bool, replyMsg string) {
 		b.pathIndex = 0
 		b.pathStuckTicks = 0
 		firstWP := nextRes.Nodes[0]
-		b.moveTarget = mgl32.Vec3{float32(firstWP.X()) + 0.5, float32(firstWP.Y()), float32(firstWP.Z()) + 0.5}
+		eyeOff := botEyeOffset(b.pos)
+		b.moveTarget = mgl32.Vec3{float32(firstWP.X()) + 0.5, float32(firstWP.Y()) + eyeOff, float32(firstWP.Z()) + 0.5}
 		b.mu.Unlock()
 
 		if nextRes.ReachedGoal {

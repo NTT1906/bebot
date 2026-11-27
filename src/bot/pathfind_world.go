@@ -21,11 +21,21 @@ func NewBotWorldView(b *Bot) *BotWorldView {
 	return &BotWorldView{b: b}
 }
 
-// vec3ToBlockPos converts floating-point entity coordinates into world block coordinates.
+// botEyeOffset returns the vertical offset (~1.62 blocks in Bedrock) if pos includes eye height.
+func botEyeOffset(pos mgl32.Vec3) float32 {
+	frac := pos.Y() - float32(math.Floor(float64(pos.Y())))
+	if frac >= 0.2 {
+		return 1.62
+	}
+	return 0.0
+}
+
+// vec3ToBlockPos converts floating-point entity coordinates into world feet block coordinates.
 func vec3ToBlockPos(v mgl32.Vec3) protocol.BlockPos {
+	feetY := v.Y() - botEyeOffset(v)
 	return protocol.BlockPos{
 		int32(math.Floor(float64(v.X()))),
-		int32(math.Floor(float64(v.Y()))),
+		int32(math.Floor(float64(feetY))),
 		int32(math.Floor(float64(v.Z()))),
 	}
 }
@@ -153,6 +163,11 @@ func (w *BotWorldView) FindGoalNode(target protocol.BlockPos) protocol.BlockPos 
 	// If target is already a valid standing node
 	if w.isStandingNode(target) {
 		return target
+	}
+	// If target was given as eye position, check 1 block below
+	down := protocol.BlockPos{target.X(), target.Y() - 1, target.Z()}
+	if w.isStandingNode(down) {
+		return down
 	}
 	return target
 }
