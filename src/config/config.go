@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -205,7 +206,14 @@ func SaveConfig(path string, cfg Config) error {
 // LoadSkin reads the bot's skin config from its dedicated skin.json file.
 func LoadSkin(path string) (SkinConfig, error) {
 	var sc SkinConfig
-	b, err := os.ReadFile(path)
+	targetPath := path
+	b, err := os.ReadFile(targetPath)
+	if err != nil && (targetPath == "data/skin.json" || targetPath == filepath.Clean("data/skin.json")) {
+		if fallbackB, fallbackErr := os.ReadFile("skin.json"); fallbackErr == nil {
+			b = fallbackB
+			err = nil
+		}
+	}
 	if err != nil {
 		return sc, err
 	}
@@ -226,6 +234,9 @@ func SaveSkin(path string, sc SkinConfig) error {
 	data, err := json.MarshalIndent(sc, "", "  ")
 	if err != nil {
 		return err
+	}
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		_ = os.MkdirAll(dir, 0755)
 	}
 	return os.WriteFile(path, data, 0644)
 }

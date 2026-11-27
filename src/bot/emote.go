@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,11 +15,19 @@ import (
 )
 
 // DefaultEmotesFile is the default filename used for persisting emote bookmarks.
-const DefaultEmotesFile = "emotes.json"
+const DefaultEmotesFile = "data/emotes.json"
 
 // loadEmotes reads emote bookmarks from a JSON file.
 func loadEmotes(path string) map[string]string {
-	data, err := os.ReadFile(path)
+	targetPath := path
+	data, err := os.ReadFile(targetPath)
+	if err != nil && (targetPath == DefaultEmotesFile || targetPath == filepath.Clean(DefaultEmotesFile)) {
+		if fallbackData, fallbackErr := os.ReadFile("emotes.json"); fallbackErr == nil {
+			data = fallbackData
+			err = nil
+			targetPath = "emotes.json"
+		}
+	}
 	if err != nil {
 		// Provide starter default bookmarks if file does not exist
 		emotes := map[string]string{
@@ -45,6 +54,9 @@ func saveEmotes(path string, emotes map[string]string) error {
 	data, err := json.MarshalIndent(emotes, "", "  ")
 	if err != nil {
 		return err
+	}
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		_ = os.MkdirAll(dir, 0755)
 	}
 	return os.WriteFile(path, data, 0644)
 }

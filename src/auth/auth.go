@@ -25,7 +25,16 @@ type XSTSDiskCache struct {
 
 // LoadXBLCache loads cached Xbox Live session tokens from disk.
 func LoadXBLCache(path string, source oauth2.TokenSource) *auth.XBLTokenCache {
-	if data, err := os.ReadFile(path); err == nil {
+	targetPath := path
+	data, err := os.ReadFile(targetPath)
+	if err != nil && (targetPath == "data/xsts_cache.json" || targetPath == filepath.Clean("data/xsts_cache.json")) {
+		if fallbackData, fallbackErr := os.ReadFile("xsts_cache.json"); fallbackErr == nil {
+			data = fallbackData
+			err = nil
+			targetPath = "xsts_cache.json"
+		}
+	}
+	if err == nil {
 		var cache XSTSDiskCache
 		if json.Unmarshal(data, &cache) == nil && cache.Snapshot != nil {
 			if key, err := x509.ParseECPrivateKey(cache.PrivateKey); err == nil {
@@ -34,7 +43,7 @@ func LoadXBLCache(path string, source oauth2.TokenSource) *auth.XBLTokenCache {
 					Snapshot:          cache.Snapshot,
 					DeviceTokenSource: device,
 				})
-				log.Println("bebot: restored Xbox Live session from", path)
+				log.Println("bebot: restored Xbox Live session from", targetPath)
 				return auth.AndroidConfig.ReuseTokenCache(session)
 			}
 		}
@@ -59,23 +68,35 @@ func SaveXBLCache(path string, cache *auth.XBLTokenCache) {
 		DeviceToken: deviceToken,
 		PrivateKey:  keyBytes,
 	}
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		_ = os.MkdirAll(dir, 0755)
+	}
 	if data, err := json.Marshal(dc); err == nil {
 		_ = os.WriteFile(path, data, 0644)
 	}
 }
 
 // OfflineUUIDFile is the default filename for persisting offline UUIDs.
-const OfflineUUIDFile = "offline_uuid.json"
+const OfflineUUIDFile = "data/offline_uuid.json"
 
 // LoadOrGenerateOfflineUUID loads an existing offline UUID for botName or generates and saves a new one.
 func LoadOrGenerateOfflineUUID(path string, botName string, renew bool) uuid.UUID {
 	cache := make(map[string]string)
 	if !renew {
-		if data, err := os.ReadFile(path); err == nil {
+		targetPath := path
+		data, err := os.ReadFile(targetPath)
+		if err != nil && (targetPath == OfflineUUIDFile || targetPath == filepath.Clean(OfflineUUIDFile)) {
+			if fallbackData, fallbackErr := os.ReadFile("offline_uuid.json"); fallbackErr == nil {
+				data = fallbackData
+				err = nil
+				targetPath = "offline_uuid.json"
+			}
+		}
+		if err == nil {
 			_ = json.Unmarshal(data, &cache)
 			if idStr, ok := cache[botName]; ok {
 				if parsed, err := uuid.Parse(idStr); err == nil {
-					log.Printf("bebot: restored saved offline UUID %s for %q from %s\n", parsed.String(), botName, path)
+					log.Printf("bebot: restored saved offline UUID %s for %q from %s\n", parsed.String(), botName, targetPath)
 					return parsed
 				}
 			}
@@ -83,6 +104,9 @@ func LoadOrGenerateOfflineUUID(path string, botName string, renew bool) uuid.UUI
 	}
 	newUUID := uuid.New()
 	cache[botName] = newUUID.String()
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		_ = os.MkdirAll(dir, 0755)
+	}
 	if data, err := json.MarshalIndent(cache, "", "  "); err == nil {
 		_ = os.WriteFile(path, data, 0644)
 	}
@@ -120,6 +144,9 @@ func (s *PersistedTokenSource) save(token *oauth2.Token) error {
 	if err != nil {
 		return err
 	}
+	if dir := filepath.Dir(s.path); dir != "" && dir != "." {
+		_ = os.MkdirAll(dir, 0755)
+	}
 	return os.WriteFile(s.path, data, 0600)
 }
 
@@ -128,7 +155,15 @@ func (s *PersistedTokenSource) save(token *oauth2.Token) error {
 // refresh token, so device authentication is only needed once.
 func LoadAuthSource(path string) (oauth2.TokenSource, error) {
 	path = filepath.Clean(path)
-	if data, err := os.ReadFile(path); err == nil {
+	data, err := os.ReadFile(path)
+	if err != nil && (path == "data/token_cache.json" || path == filepath.Clean("data/token_cache.json")) {
+		if fallbackData, fallbackErr := os.ReadFile("token_cache.json"); fallbackErr == nil {
+			data = fallbackData
+			err = nil
+			path = "token_cache.json"
+		}
+	}
+	if err == nil {
 		var token oauth2.Token
 		if json.Unmarshal(data, &token) == nil && token.RefreshToken != "" {
 			source := &PersistedTokenSource{source: auth.RefreshTokenSource(&token), path: path}
